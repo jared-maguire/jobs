@@ -10,23 +10,77 @@ import threading
 import time
 import multiprocessing
 from multiprocessing.pool import ThreadPool
+import requests
+import base64
+import json
 
+
+def mktemp():
+    f = tempfile.NamedTemporaryFile()
+    fname = f.name
+    f.close()
+    return fname
+
+
+def pickle_func(func):
+    fname = mktemp()
+    with open(fname, "wb") as fp:
+        pickle.dump(func, fp)
+    return fname    
+
+
+def unpickle_func(fname):
+    with open(fname, "rb") as fp:
+        func = pickle.load(fp)
+    return func    
+
+
+######
+
+def enqueue_url(func, url, deps=[]):
+    code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
+    obj = {'code': code, "deps": deps}
+    response = requests.post(url + "enqueue", json=obj)
+    result = json.loads(response.content)
+    print(result)
+    return result
+
+
+def wait_url(jobid, url):
+    obj = {'jobid': jobid}
+    response = requests.post(url + "wait", json=obj)
+    result = json.loads(response.content)
+    print(result)
+    return result
+
+
+def check_url(jobid, url):
+    obj = {'jobid': jobid}
+    response = requests.post(url + "check", json=obj)
+    result = response.content
+    print(result)
+    return result
+
+
+def requeue_url(jobid, func, url, deps=[]):
+    code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
+    obj = {'jobid': jobid, 'code': code, "deps": deps}
+    response = requests.post(url + "requeue", json=obj)
+    jobid = response.content
+    print(jobid)
+    return jobid
+    
+
+####
 
 
 def load_and_execute_file(fname, *args, **kwargs):
-    with open(fname, "rb") as fp:
-        func = pickle.load(fp)
-        return func(*args, **kwargs)
+    func = unpickle_func(fname)
+    return func(*args, **kwargs)
 
 
 def picklemap(funcs):
-    def _mktemp():
-        f = tempfile.NamedTemporaryFile()
-        fname = f.name
-        f.close()
-        return fname
-
-    temps = [_mktemp() for i in range(len(funcs))]
+    temps = [mktemp() for i in range(len(funcs))]
 
     for i, temp in enumerate(temps):
         with open(temp, "wb") as fp:
@@ -42,6 +96,7 @@ def picklemap(funcs):
 def make_thunk(func, *args, **kwargs):
     return lambda args=args, kwargs=kwargs: func(*args, **kwargs)
 
+
 def fib(a):
     if a == 0: return 0
     if a == 1: return 1
@@ -52,9 +107,11 @@ def fib(a):
 def test1():
     expected = tuple(range(10))
     result = tuple(picklemap([lambda a=i: a for i in range(10)]))
-    if result == expected: return True
+    if result == expected:
+        print(tuple(range(10)), "==", result)
+        return True
     else:
-        print(tuple(range(10)), result)
+        print(tuple(range(10)), "!=", result)
         return False
 
 
@@ -177,17 +234,16 @@ class Dispatcher:
         self.thread.start()
 
     def stop(self):
-        while len(self.pending) + len(self.ready) != 0:
-            #print("Stopping...")
-            #self.dump()
-            time.sleep(1)
-            self.stop()
+        #while len(self.pending) + len(self.ready) != 0:
+        #    print("Stopping...")
+        #    self.dump()
+        #    time.sleep(1)
+        #    self.stop()
         self.keep_running = False
         self.pool.close()
 
     def __call__(self):
         return self.run()
-
 
 
 def test2():
@@ -208,12 +264,12 @@ def test2a():
     job1 = dispatcher.enqueue(lambda: 1+2)
     job2 = dispatcher.enqueue(lambda: 1+2, deps=[job1])
     job3 = dispatcher.enqueue(lambda: 1+2, deps=[job2])
-    results = map(dispatcher.wait, (job1, job2, job3))
+    results = list(map(dispatcher.wait, (job1, job2, job3)))
 
     dispatcher.stop()
     print("result:", sum(results))
     print("expected result:", 9)
-    return results == 9
+    return sum(results) == 9
 
 
 def test2b():
@@ -226,6 +282,34 @@ def test2b():
     results = list(map(dispatcher.wait, (job1, job2, job3)))
 
     dispatcher.stop()
+    print("result:", sum(results))
+    print("expected result:", 18)
+    return sum(results) == 18
+
+
+def test2a_url():
+    url = "http://localhost:5000/"
+
+    job1 = enqueue_url(lambda: 1+2, url)
+    job2 = enqueue_url(lambda: 1+2, url, deps=[job1["jobid"]])
+    job3 = enqueue_url(lambda: 1+2, url, deps=[job2["jobid"]])
+    results = [wait_url(j["jobid"], url)["result"] for j in (job1, job2, job3)]
+    print(results)
+
+    print("result:", sum(results))
+    print("expected result:", 18)
+    return sum(results) == 18
+
+
+def test2b_url():
+    url = "http://localhost:5000/"
+
+    job1 = enqueue_url(lambda: 1+2, url)
+    job2 = enqueue_url(lambda: 1+2+wait_url(job1["jobid"], url)["result"], url, deps=[job1["jobid"]])
+    job3 = enqueue_url(lambda: 1+2+wait_url(job2["jobid"], url)["result"], url, deps=[job2["jobid"]])
+    results = [wait_url(j["jobid"], url)["result"] for j in (job1, job2, job3)]
+    print(results)
+
     print("result:", sum(results))
     print("expected result:", 18)
     return sum(results) == 18
@@ -290,6 +374,11 @@ def test4():
     print("result:", result)
     print("expected result:", fib(6))
     return result == fib(6)
+
+
+tests = [test1, test2, test2a, test2b]
+def run_tests():
+    return [(lambda: (print(">> Running Test:", test.__name__), test())[1])() for test in tests]
 
 
 if __name__=="__main__":
