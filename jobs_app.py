@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os
+import signal
 import sys
 import dill as pickle
 import tempfile
@@ -26,7 +27,6 @@ import jobs
 
 
 app = Flask("dispatcher")
-
 
 d = jobs.Dispatcher()
 d.start()
@@ -67,10 +67,16 @@ def requeue():
     return json.dumps(dict(jobid=jobid))
 
 
-@app.route("/stop")
-def stop():
+@app.route('/shutdown', methods=["GET"])
+def shutdown():
     d.stop()
-    sys.exit(0)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+@app.route("/dump", methods=["GET"])
+def dump():
+    d.dump()
+    return ""
 
 
 """
@@ -88,6 +94,5 @@ def login():
     return render_template('login.html', error=error)
 """
 
-
-
-app.run(debug=True)
+if __name__ == "__main__":
+    app.run()

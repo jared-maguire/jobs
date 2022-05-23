@@ -122,14 +122,14 @@ class Dispatcher:
         def __str__(self):
             return f"Continuation({self.jobid}, {self.deps})"
 
-    def dump(self):
-        print("--")
-        print("pending", len(self.pending), list(map(str, self.pending)))
-        print("ready", len(self.ready), self.ready)
-        print("running", len(self.running), self.running)
-        print("done", len(self.done), self.done)
-        print("keep_running", self.keep_running)
-        print("--")
+    def dump(self, fp=sys.stdout):
+        print("--", file=fp)
+        print("pending", len(self.pending), list(map(str, self.pending)), file=fp)
+        print("ready", len(self.ready), self.ready, file=fp)
+        print("running", len(self.running), list(map(str, self.running)), file=fp)
+        print("done", len(self.done), self.done, file=fp)
+        print("keep_running", self.keep_running, file=fp)
+        print("--", file=fp)
 
     def enqueue(self, thunk, deps=[]):
         self.lock.acquire()

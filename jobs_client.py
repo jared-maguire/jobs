@@ -41,3 +41,10 @@ def requeue_url(jobid, func, url, deps=[]):
     print(jobid)
     return jobid
 
+
+def shutdown_server(url):
+    try:
+        requests.get(url + "shutdown", timeout=1)
+    except requests.exceptions.ConnectionError: 
+        pass
+    return None
