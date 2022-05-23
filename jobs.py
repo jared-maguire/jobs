@@ -13,6 +13,7 @@ from multiprocessing.pool import ThreadPool
 import requests
 import base64
 import json
+import sys
 
 
 def mktemp():
@@ -37,11 +38,15 @@ def unpickle_func(fname):
 
 ######
 
+
 def enqueue_url(func, url, deps=[]):
+    print("a", file=sys.stderr, flush=True)
     code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
     obj = {'code': code, "deps": deps}
+    print("b", file=sys.stderr, flush=True)
     response = requests.post(url + "enqueue", json=obj)
     result = json.loads(response.content)
+    print("c", file=sys.stderr, flush=True)
     print(result)
     return result
 
@@ -187,7 +192,7 @@ class Dispatcher:
     def wait(self, jobid):
         while(jobid not in self.done):
             #self.dump()
-            time.sleep(1)
+            time.sleep(0.1)
         return self.done[jobid]
 
     def check(self, jobid):
@@ -303,16 +308,36 @@ def test2a_url():
 
 def test2b_url():
     url = "http://localhost:5000/"
-
     job1 = enqueue_url(lambda: 1+2, url)
     job2 = enqueue_url(lambda: 1+2+wait_url(job1["jobid"], url)["result"], url, deps=[job1["jobid"]])
     job3 = enqueue_url(lambda: 1+2+wait_url(job2["jobid"], url)["result"], url, deps=[job2["jobid"]])
     results = [wait_url(j["jobid"], url)["result"] for j in (job1, job2, job3)]
     print(results)
-
     print("result:", sum(results))
     print("expected result:", 18)
     return sum(results) == 18
+
+
+def test2c_url():
+    url = "http://localhost:5000/"
+
+    def wait(j):
+        return wait_url(j["jobid"], url)["result"]
+
+    def _fib(n):
+        print("fib:", n, file=sys.stderr, flush=True)
+        if n <= 2:
+            return 1
+        else:
+            job1 = enqueue_url(lambda: _fib(n-1), url) 
+            #job2 = enqueue_url(lambda: _fib(n-2), url)
+            #job3 = enqueue_url(lambda: wait(job1) + wait(job2), url, deps=[job1["jobid"], job2["jobid"]])
+        return wait(job1)
+    result = _fib(3)
+
+    print("result:", result)
+    print("expected result:", 18)
+    return result == 18
 
 
 def test3():
