@@ -150,7 +150,6 @@ class Dispatcher:
         return record.jobid
 
     def check_ready(self, jobid):
-        thunk = self.all_jobs[jobid].thunk
         deps = self.all_jobs[jobid].deps
         if False in [self.check(dep) for dep in deps]:
             return False
@@ -193,7 +192,7 @@ class Dispatcher:
                 record = self.ready.pop()
                 #print(f"Dispatcher running job {record.jobid}, {record.thunk}", flush=True)
                 self.pool.apply_async(record.proc, callback=lambda result, j=record.jobid: self.catch_result(j, result))
-                self.running.add(record)
+                #self.running.add(record)
         self.lock.release()
 
     def run(self):

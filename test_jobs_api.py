@@ -76,6 +76,7 @@ def test_deps_simple():
     print("result:", sum(results))
     print("expected result:", 9)
     stop_app_server(srv)
+    assert(sum(results) == 9)
     return sum(results) == 9
 
 
