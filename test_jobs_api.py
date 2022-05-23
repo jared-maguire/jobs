@@ -20,6 +20,13 @@ def stop_app_server(server_process):
     print("server stopped.", flush=True)
 
 
+def test_start_and_stop():
+    srv = launch_app_server()
+    url = "http://localhost:5000/"
+    stop_app_server(srv)
+    jobs_client.enqueue_url(lambda: "OK!", url, timeout=10)
+
+
 def test_enqueue_and_wait():
     srv = launch_app_server()
     time.sleep(1)
