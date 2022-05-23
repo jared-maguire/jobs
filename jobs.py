@@ -14,6 +14,7 @@ import requests
 import base64
 import json
 import sys
+import functools
 
 
 def mktemp():
@@ -34,49 +35,6 @@ def unpickle_func(fname):
     with open(fname, "rb") as fp:
         func = pickle.load(fp)
     return func    
-
-
-######
-
-
-def enqueue_url(func, url, deps=[]):
-    print("a", file=sys.stderr, flush=True)
-    code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
-    obj = {'code': code, "deps": deps}
-    print("b", file=sys.stderr, flush=True)
-    response = requests.post(url + "enqueue", json=obj)
-    result = json.loads(response.content)
-    print("c", file=sys.stderr, flush=True)
-    print(result)
-    return result
-
-
-def wait_url(jobid, url):
-    obj = {'jobid': jobid}
-    response = requests.post(url + "wait", json=obj)
-    result = json.loads(response.content)
-    print(result)
-    return result
-
-
-def check_url(jobid, url):
-    obj = {'jobid': jobid}
-    response = requests.post(url + "check", json=obj)
-    result = response.content
-    print(result)
-    return result
-
-
-def requeue_url(jobid, func, url, deps=[]):
-    code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
-    obj = {'jobid': jobid, 'code': code, "deps": deps}
-    response = requests.post(url + "requeue", json=obj)
-    jobid = response.content
-    print(jobid)
-    return jobid
-    
-
-####
 
 
 def load_and_execute_file(fname, *args, **kwargs):
@@ -151,6 +109,16 @@ class Dispatcher:
                 print(self._thunk.__class__)
                 assert(False)
 
+        @property
+        def proc(self):
+            # This is eldritch:
+            thunk = self.thunk
+            if "__context__" in thunk.__code__.co_varnames:
+                context = dict(jobid=self.jobid, deps=self.deps)
+                return functools.partial(thunk, __context__=context)
+            else:
+                return self.thunk
+
         def __str__(self):
             return f"Continuation({self.jobid}, {self.deps})"
 
@@ -224,7 +192,7 @@ class Dispatcher:
             else:
                 record = self.ready.pop()
                 #print(f"Dispatcher running job {record.jobid}, {record.thunk}", flush=True)
-                self.pool.apply_async(record.thunk, callback=lambda result, j=record.jobid: self.catch_result(j, result))
+                self.pool.apply_async(record.proc, callback=lambda result, j=record.jobid: self.catch_result(j, result))
                 self.running.add(record)
         self.lock.release()
 
