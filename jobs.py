@@ -134,7 +134,7 @@ class Dispatcher:
     def enqueue(self, thunk, deps=[]):
         self.lock.acquire()
         record = Dispatcher.Continuation(self.jobid, thunk, tuple(deps))
-        #print("Dispatcher.enqueue", record.source)
+        print("Dispatcher.enqueue", str(record), file=sys.stderr)
         self.jobid += 1
         self.all_jobs[record.jobid] = record
         self.pending.add(record)
@@ -144,6 +144,7 @@ class Dispatcher:
     def requeue(self, jobid, thunk, deps=[]):
         self.lock.acquire()
         record = Dispatcher.Continuation(jobid, thunk, tuple(deps))
+        print("Dispatcher.requeue", str(record), file=sys.stderr)
         self.all_jobs[record.jobid] = record
         self.pending.add(record)
         self.lock.release()
@@ -165,23 +166,27 @@ class Dispatcher:
     def check(self, jobid):
         return jobid in self.done
 
-    def catch_result(self, jobid, result):
-        #print(f"Dispatcher finished job {jobid}, result: {result}", flush=True)
+    def catch_result(self, record, result):
+        jobid = record.jobid
+        print(f"Dispatcher finished job {record}, result: {result}", flush=True)
         if result.__class__ == Dispatcher.Continuation:
             #print("set_done", f"job {jobid} not complete, requeueing continuation", flush=True)
             self.requeue(jobid, result.thunk, result.deps)
+            self.running.discard(record)
             return
         self.done[jobid] = result
+        self.running.discard(record)
 
     def step(self):
         #print("Dispatcher.run, beat", len(self.ready), flush=True)
         self.lock.acquire()
-        #self.dump()
+        state_changed = False
         # 1. Move and jobs from pending to ready
         for record in list(self.pending):
             if self.check_ready(record.jobid):
                 self.pending.discard(record)
                 self.ready.add(record)
+                state_changed = True
         # 2. Launch any ready jobs
         if len(self.ready) != 0:
             #print("Dispatcher.run:", len(self.ready), flush=True)
@@ -191,14 +196,17 @@ class Dispatcher:
             else:
                 record = self.ready.pop()
                 #print(f"Dispatcher running job {record.jobid}, {record.thunk}", flush=True)
-                self.pool.apply_async(record.proc, callback=lambda result, j=record.jobid: self.catch_result(j, result))
-                #self.running.add(record)
+                self.pool.apply_async(record.proc, callback=lambda result, rec=record: self.catch_result(rec, result))
+                self.running.add(record)
+                state_changed = True
+        if state_changed:
+            self.dump(fp=sys.stderr)
         self.lock.release()
 
     def run(self):
         while self.keep_running:
             self.step()
-            time.sleep(0.1)
+            time.sleep(1.0)
 
     def start(self):
         self.thread = threading.Thread(target=self)

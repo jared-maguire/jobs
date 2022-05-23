@@ -4,7 +4,9 @@
 import sys
 import time
 import subprocess
+import jobs
 import jobs_client
+import requests
 from requests.exceptions import ConnectionError
 import multiprocessing
 
@@ -86,12 +88,15 @@ def test_continuation():
     url = "http://localhost:5000/"
 
     # __context__ is a special variable containing job context information.
-    # It gets populated by the Dispatcher, if the function takes it as a parameter...
+    # It gets populated by the Dispatcher, if the function takes it as a parameter.
     def func(__context__):
         rest = jobs_client.enqueue_url(lambda: 1, url)
         cont = lambda jid=rest["jobid"]: jobs_client.wait_url(jid)["result"] + 1
-        jobs_client.requeue_url(__context__["jobid"], cont, url, deps=[rest["jobid"]])
+        #jobs_client.requeue_url(__context__["jobid"], cont, url, deps=[rest["jobid"]])
+        jobs_client.enqueue_url(cont, url, deps=[rest["jobid"]])
 
-    job = jobs_client.enqueue_url(lambda n=3: func(n), url)
-    #result = jobs_client.wait_url(job["jobid"], url)
-    #assert(result["result"] == 2)
+    job = jobs_client.enqueue_url(lambda: func(), url)
+    result = jobs_client.wait_url(0, url)
+    result = jobs_client.wait_url(2, url)
+    stop_app_server(srv, url)
+    assert(result["result"] == 2)
