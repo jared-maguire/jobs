@@ -1,0 +1,17 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{name}}
+spec:
+  template:
+    spec:
+      containers:
+      - name: {{name}}
+        image: {{image}}
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Hey."
+      restartPolicy: Never
+  backoffLimit: 4
