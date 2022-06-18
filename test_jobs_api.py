@@ -9,6 +9,7 @@ import jobs_client
 import requests
 from requests.exceptions import ConnectionError
 import multiprocessing
+import functools
 
 
 def launch_app_server():
@@ -43,9 +44,24 @@ def test_enqueue_and_wait():
     url = "http://localhost:5000/"
     job = jobs_client.enqueue_url(lambda: "OK!", url)
     result = jobs_client.wait_url(job["jobid"], url)
-    print(result)
+    print("oh boy result!:", result)
     stop_app_server(srv)
     assert(result["result"] == "OK!")
+
+
+def test_map():
+    srv = launch_app_server()
+    time.sleep(1)
+    url = "http://localhost:5000/"
+    thunks = [lambda: "OK!" for i in range(10)]
+    jobs = jobs_client.map_url(thunks, url)
+    results = [jobs_client.wait_url(jobid, url, timeout=5, retries=5) for jobid in jobs["jobids"]]
+    print("oh boy results!:", results)
+    stop_app_server(srv)
+    print(results)
+    for result in results:
+        assert(result is not None)
+        assert(result["result"] == "OK!")
 
 
 def test_job_context():
@@ -72,7 +88,7 @@ def test_deps_simple():
     job1 = jobs_client.enqueue_url(lambda: 1+2, url)
     job2 = jobs_client.enqueue_url(lambda: 1+2, url, deps=[job1["jobid"]])
     job3 = jobs_client.enqueue_url(lambda: 1+2, url, deps=[job2["jobid"]])
-    results = [jobs_client.wait_url(j["jobid"], url)["result"] for j in (job1, job2, job3)]
+    results = [jobs_client.wait_url(j["jobid"], url)["result"] for j in (job3, job2, job1)]
     print(results)
 
     print("result:", sum(results))
@@ -80,6 +96,28 @@ def test_deps_simple():
     stop_app_server(srv)
     assert(sum(results) == 9)
     return sum(results) == 9
+
+
+def test_jobwaitforjob():
+    srv = launch_app_server()
+    time.sleep(1)
+    url = "http://localhost:5000/"
+
+    # __context__ is a special variable containing job context information.
+    # It gets populated by the Dispatcher, if the function takes it as a parameter.
+    def func1(__context__):
+        return 1
+
+    def func2(jobid, __context__):
+        return 1 + jobs_client.wait_url(jobid, url) 
+
+    job1 = jobs_client.enqueue_url(func1, url)
+    job2 = jobs_client.enqueue_url(lambda j=job1["jobid"]: functools.partial(jobid=j), url)
+    result = jobs_client.wait_url(job1["jobid"], url)
+    result = jobs_client.wait_url(job2["jobid"], url)
+    print("test_jobwaitforjob:", result)
+    stop_app_server(srv, url)
+    assert(result["result"] == 2)
 
 
 def test_continuation():

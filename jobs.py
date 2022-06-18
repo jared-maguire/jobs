@@ -141,6 +141,10 @@ class Dispatcher:
         self.lock.release()
         return record.jobid
 
+    def map(self, thunks):
+        jobids = list(map(self.enqueue, thunks))
+        return jobids
+
     def requeue(self, jobid, thunk, deps=[]):
         self.lock.acquire()
         record = Dispatcher.Continuation(jobid, thunk, tuple(deps))
@@ -168,7 +172,7 @@ class Dispatcher:
 
     def catch_result(self, record, result):
         jobid = record.jobid
-        print(f"Dispatcher finished job {record}, result: {result}", flush=True)
+        print(f"Dispatcher finished job {record}, result: {result}", flush=True, file=sys.stderr)
         if result.__class__ == Dispatcher.Continuation:
             #print("set_done", f"job {jobid} not complete, requeueing continuation", flush=True)
             self.requeue(jobid, result.thunk, result.deps)

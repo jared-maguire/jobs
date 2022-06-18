@@ -45,11 +45,21 @@ def enqueue():
     return json.dumps(dict(jobid=jobid))
 
 
+@app.route("/map", methods=["POST"])
+def map():
+    data = request.get_json()
+    funcs = [pickle.loads(base64.b64decode(c)) for c in data["code"]]
+    jobids = [d.enqueue(func, deps=data["deps"]) for func in funcs]
+    return json.dumps(dict(jobids=jobids))
+
+
 @app.route("/wait", methods=["POST"])
 def wait():
     data = request.get_json()
     jobid = data["jobid"]
-    return json.dumps(dict(jobid=jobid, result=d.wait(jobid)))
+    result = json.dumps(dict(jobid=jobid, result=d.wait(jobid)))
+    print("API: wait:", data, result)
+    return result
 
 
 @app.route("/check", methods=["POST"])
@@ -75,8 +85,10 @@ def shutdown():
 
 @app.route("/dump", methods=["GET"])
 def dump():
-    d.dump()
-    return ""
+    file = StringIO()
+    d.dump(file)
+    data = file.read()
+    return data
 
 
 """
