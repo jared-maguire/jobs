@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os
+import signal
 import sys
 import dill as pickle
 import tempfile
@@ -27,7 +28,6 @@ import jobs
 
 app = Flask("dispatcher")
 
-
 d = jobs.Dispatcher()
 d.start()
 
@@ -45,11 +45,21 @@ def enqueue():
     return json.dumps(dict(jobid=jobid))
 
 
+@app.route("/map", methods=["POST"])
+def map():
+    data = request.get_json()
+    funcs = [pickle.loads(base64.b64decode(c)) for c in data["code"]]
+    jobids = [d.enqueue(func, deps=data["deps"]) for func in funcs]
+    return json.dumps(dict(jobids=jobids))
+
+
 @app.route("/wait", methods=["POST"])
 def wait():
     data = request.get_json()
     jobid = data["jobid"]
-    return json.dumps(dict(jobid=jobid, result=d.wait(jobid)))
+    result = json.dumps(dict(jobid=jobid, result=d.wait(jobid)))
+    print("API: wait:", data, result)
+    return result
 
 
 @app.route("/check", methods=["POST"])
@@ -67,27 +77,19 @@ def requeue():
     return json.dumps(dict(jobid=jobid))
 
 
-@app.route("/stop")
-def stop():
+@app.route('/shutdown', methods=["GET"])
+def shutdown():
     d.stop()
-    sys.exit(0)
+    os.kill(os.getpid(), signal.SIGINT)
 
 
-"""
-@app.route('/login', methods=['POST', 'GET'])
-def login():
-    error = None
-    if request.method == 'POST':
-        if valid_login(request.form['username'],
-                       request.form['password']):
-            return log_the_user_in(request.form['username'])
-        else:
-            error = 'Invalid username/password'
-    # the code below is executed if the request method
-    # was GET or the credentials were invalid
-    return render_template('login.html', error=error)
-"""
+@app.route("/dump", methods=["GET"])
+def dump():
+    file = StringIO()
+    d.dump(file)
+    data = file.read()
+    return data
 
 
-
-app.run(debug=True)
+if __name__ == "__main__":
+    app.run()
