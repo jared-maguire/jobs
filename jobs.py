@@ -310,6 +310,7 @@ def wait_k8s(job_name, timeout=None):
             continue
         if result["status"]["succeeded"] == 1:
             break
+        time.sleep(1)
 
     # Collect the names of the pods:
     get_pods = f"kubectl get pods --selector=job-name={job_name} --output=json"
