@@ -238,7 +238,8 @@ class Dispatcher:
 
 
 #################################
-# k8s 
+# k8s
+
 
 def serialize_func(func):
     code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
@@ -278,6 +279,7 @@ spec:
         - |
           import dill as pickle
           import base64
+          import json
           func = pickle.loads(base64.b64decode("{{code}}"))
           func()
       restartPolicy: Never
@@ -309,23 +311,30 @@ def wait_k8s(job_name, timeout=None):
         if result["status"]["succeeded"] == 1:
             break
 
-    # Collect the output from the pods:
+    # Collect the names of the pods:
     get_pods = f"kubectl get pods --selector=job-name={job_name} --output=json"
     pods = json.loads(run_cmd(get_pods))
     pod_names = [p["metadata"]["name"] for p in pods["items"]]
 
     logs = {}
     for pod_name in pod_names:
-        logs[pod_name] = run_cmd(f"kubectl logs {pod_name}")
+        logs[pod_name] = json.loads(run_cmd(f"kubectl logs {pod_name}"))
 
     return logs
 
 
-def map_k8s(func, iterable, image="jobs", timeout=None):
-    thunks = [lambda: func(i) for i in iterable]
+def map_k8s(func, iterable, image="jobs", timeout=None, wait=True, verbose=False):
+    thunks = [lambda arg=i: print(json.dumps(func(arg))) for i in iterable]
     job_names = [run_k8s(thunk, image=image) for thunk in thunks]
-    results = {j: wait_k8s(j, timeout=timeout) for j in job_names}
-    return results
+
+    if wait:
+        if verbose:
+            results = {j: wait_k8s(j, timeout=timeout) for j in job_names}
+        else:
+            results = [list(wait_k8s(j, timeout=timeout).values())[0] for j in job_names]
+        return results
+    else:
+        return job_names
 
 
 #################################
