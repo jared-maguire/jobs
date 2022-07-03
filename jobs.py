@@ -15,6 +15,10 @@ import base64
 import json
 import sys
 import functools
+import string
+import random
+import jinja2
+import subprocess
 
 
 def mktemp():
@@ -77,6 +81,9 @@ def test1():
         print(tuple(range(10)), "!=", result)
         return False
 
+
+def run_job_k8s(thunk):
+    pass
 
 
 class Dispatcher:
@@ -230,159 +237,98 @@ class Dispatcher:
         return self.run()
 
 
-def test2():
-    dispatcher = Dispatcher()
-    dispatcher.start()
-    job = dispatcher.enqueue(lambda: 1+2)
-    result = dispatcher.wait(job)
-    dispatcher.stop()
-    print("result:", result)
-    print("expected result:", 3)
-    return result == 3
+#################################
+# k8s 
+
+def serialize_func(func):
+    code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
+    return code
 
 
-def test2a():
-    dispatcher = Dispatcher()
-    dispatcher.start()
-
-    job1 = dispatcher.enqueue(lambda: 1+2)
-    job2 = dispatcher.enqueue(lambda: 1+2, deps=[job1])
-    job3 = dispatcher.enqueue(lambda: 1+2, deps=[job2])
-    results = list(map(dispatcher.wait, (job1, job2, job3)))
-
-    dispatcher.stop()
-    print("result:", sum(results))
-    print("expected result:", 9)
-    return sum(results) == 9
+def deserialize_func(code):
+    func = pickle.loads(base64.b64decode(code))
+    return func
 
 
-def test2b():
-    dispatcher = Dispatcher()
-    dispatcher.start()
-
-    job1 = dispatcher.enqueue(lambda: 1+2)
-    job2 = dispatcher.enqueue(lambda: 1+2+dispatcher.wait(job1), deps=[job1])
-    job3 = dispatcher.enqueue(lambda: 1+2+dispatcher.wait(job2), deps=[job2])
-    results = list(map(dispatcher.wait, (job1, job2, job3)))
-
-    dispatcher.stop()
-    print("result:", sum(results))
-    print("expected result:", 18)
-    return sum(results) == 18
+def random_string(length):
+    letters = string.ascii_lowercase
+    return ''.join(random.choice(letters) for i in range(length))
 
 
-def test2a_url():
-    url = "http://localhost:5000/"
-
-    job1 = enqueue_url(lambda: 1+2, url)
-    job2 = enqueue_url(lambda: 1+2, url, deps=[job1["jobid"]])
-    job3 = enqueue_url(lambda: 1+2, url, deps=[job2["jobid"]])
-    results = [wait_url(j["jobid"], url)["result"] for j in (job1, job2, job3)]
-    print(results)
-
-    print("result:", sum(results))
-    print("expected result:", 18)
-    return sum(results) == 18
+def run_cmd(cmd):
+    result = subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout
+    return result
 
 
-def test2b_url():
-    url = "http://localhost:5000/"
-    job1 = enqueue_url(lambda: 1+2, url)
-    job2 = enqueue_url(lambda: 1+2+wait_url(job1["jobid"], url)["result"], url, deps=[job1["jobid"]])
-    job3 = enqueue_url(lambda: 1+2+wait_url(job2["jobid"], url)["result"], url, deps=[job2["jobid"]])
-    results = [wait_url(j["jobid"], url)["result"] for j in (job1, job2, job3)]
-    print(results)
-    print("result:", sum(results))
-    print("expected result:", 18)
-    return sum(results) == 18
+def run_k8s(func, image="jobs"):
+    job_template = """apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{name}}
+spec:
+  template:
+    spec:
+      containers:
+      - name: {{name}}
+        image: {{image}}
+        imagePullPolicy: Never
+        command:
+        - python
+        - -c
+        - |
+          import dill as pickle
+          import base64
+          func = pickle.loads(base64.b64decode("{{code}}"))
+          func()
+      restartPolicy: Never
+  backoffLimit: 1
+"""
+
+    code = serialize_func(func)
+    t = jinja2.Template(job_template)
+    s = random_string(5)
+    j = t.render(name=f"job-{s}", code=code, image=image)
+    subprocess.run("kubectl apply -f -",
+                   input=j.encode("utf-8"),
+                   check=True)
+    return f"job-{s}"
 
 
-def test2c_url():
-    url = "http://localhost:5000/"
+def wait_k8s(job_name, timeout=None):
+    get_job = f"kubectl get job -o json {job_name}"
 
-    def wait(j):
-        return wait_url(j["jobid"], url)["result"]
+    # Wait until the whole job is finished:
+    start = time.time()
+    while True:
+        current = time.time()
+        if (timeout is not None) and (current - start) > timeout:
+            return None
+        result = json.loads(run_cmd(get_job))
+        if "succeeded" not in result["status"]:
+            continue
+        if result["status"]["succeeded"] == 1:
+            break
 
-    def _fib(n):
-        print("fib:", n, file=sys.stderr, flush=True)
-        if n <= 2:
-            return 1
-        else:
-            job1 = enqueue_url(lambda: _fib(n-1), url) 
-            #job2 = enqueue_url(lambda: _fib(n-2), url)
-            #job3 = enqueue_url(lambda: wait(job1) + wait(job2), url, deps=[job1["jobid"], job2["jobid"]])
-        return wait(job1)
-    result = _fib(3)
+    # Collect the output from the pods:
+    get_pods = f"kubectl get pods --selector=job-name={job_name} --output=json"
+    pods = json.loads(run_cmd(get_pods))
+    pod_names = [p["metadata"]["name"] for p in pods["items"]]
 
-    print("result:", result)
-    print("expected result:", 18)
-    return result == 18
+    logs = {}
+    for pod_name in pod_names:
+        logs[pod_name] = run_cmd(f"kubectl logs {pod_name}")
 
-
-def test3():
-    dispatcher = Dispatcher()
-    dispatcher.start()
-
-    def _sum(lst):
-        if len(lst) == 0: return 0
-        elif len(lst) == 1: return lst[0]
-        else: return lst[0] + _sum(lst[1:])
-
-    job = dispatcher.enqueue(lambda: sum([1,2,3]))
-    result = dispatcher.wait(job)
-    dispatcher.stop()
-    print("result:", result)
-    print("expected result:", 6)
-    return result == 6
+    return logs
 
 
-def test3a():
-    dispatcher = Dispatcher()
-    dispatcher.start()
-
-    def _sum(lst):
-        #print("sum!", lst, flush=True)
-        if len(lst) == 0: return 0
-        elif len(lst) == 1: return lst[0]
-        else:
-            #print(f"sum: forking {lst}", flush=True)
-            jobid = dispatcher.enqueue(lambda: _sum(lst[1:]))
-            #print(f"sum: jobid: {jobid}", flush=True)
-            return Dispatcher.Continuation(None, lambda: dispatcher.wait(jobid) + lst[0], deps=[jobid])
-
-    job = dispatcher.enqueue(lambda: _sum([1,2,3]))
-    result = dispatcher.wait(job)
-    dispatcher.stop()
-    print("result:", result)
-    print("expected result:", 6)
-    return result == 6
+def map_k8s(func, iterable, image="jobs", timeout=None):
+    thunks = [lambda: func(i) for i in iterable]
+    job_names = [run_k8s(thunk, image=image) for thunk in thunks]
+    results = {j: wait_k8s(j, timeout=timeout) for j in job_names}
+    return results
 
 
-
-def test4():
-    dispatcher = Dispatcher()
-    dispatcher.start()
-
-    def _fib(n):
-        if n == 0: return 0
-        if n == 1: return 1
-        if n == 2: return 2
-        else: 
-            job1 = dispatcher.enqueue(lambda: _fib(n-1))
-            job2 = dispatcher.enqueue(lambda: _fib(n-2))
-            return Dispatcher.Continuation(None, lambda: dispatcher.wait(job1) + dispatcher.wait(job2), deps=[job1, job2])
-
-    job = dispatcher.enqueue(lambda: _fib(6))
-    result = dispatcher.wait(job)
-    dispatcher.stop()
-    print("result:", result)
-    print("expected result:", fib(6))
-    return result == fib(6)
-
-
-tests = [test1, test2, test2a, test2b]
-def run_tests():
-    return [(lambda: (print(">> Running Test:", test.__name__), test())[1])() for test in tests]
+#################################
 
 
 if __name__=="__main__":

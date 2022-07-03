@@ -9,9 +9,9 @@ spec:
       - name: {{name}}
         image: {{image}}
         command:
-        - /bin/sh
+        - python
         - -c
         - |
-          echo "Hey."
+          {{script}}
       restartPolicy: Never
-  backoffLimit: 4
+  backoffLimit: 1
