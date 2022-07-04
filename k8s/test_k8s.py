@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import k8s
-import numpy
 
 
 def test_run_and_wait():
@@ -10,7 +9,5 @@ def test_run_and_wait():
 
 
 def test_map():
-    input = numpy.array(range(10))
-    expected_output = input * 2
-    results = k8s.map(lambda i: i*2, input)
-    assert(results == expected_output)
+    results = k8s.map(lambda i: i*2, (0,1,2))
+    assert(tuple(results) == (0,2,4))
