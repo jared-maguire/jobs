@@ -2,10 +2,6 @@
 
 import os
 import dill as pickle
-import tempfile
-import inspect
-import traceback
-from queue import Queue
 import threading
 import time
 import multiprocessing
@@ -116,15 +112,15 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         return list(logs.values())[0]
 
 
-def map(func, iterable, image="jobs", imports=[], imagePullPolicy="Never", timeout=None, wait=True, verbose=False):
+def map(func, iterable, image="jobs", imports=[], imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
     job_names = [run(thunk, image=image, imagePullPolicy=imagePullPolicy) for thunk in thunks]
 
-    if wait:
+    if not nowait:
         if verbose:
-            results = {j: wait(j, timeout=timeout) for j in job_names}
+            results = {j: wait(j, timeout=timeout, verbose=verbose) for j in job_names}
         else:
-            results = [list(wait(j, timeout=timeout).values())[0] for j in job_names]
+            results = [wait(j, timeout=timeout, verbose=verbose) for j in job_names]
         return results
     else:
         return job_names
