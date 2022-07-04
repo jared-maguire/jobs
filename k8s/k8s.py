@@ -15,6 +15,7 @@ import string
 import random
 import jinja2
 import subprocess
+import inspect
 
 
 def run_cmd(cmd):
@@ -32,12 +33,17 @@ def deserialize_func(code):
     return func
 
 
+def check_for_kwargs(func):
+    args, varargs, varkw, defaults = inspect.getargspec(func)
+    return (varkw=='kwargs')
+
+
 def random_string(length):
     letters = string.ascii_lowercase
     return ''.join(random.choice(letters) for i in range(length))
 
 
-def run(func, image="jobs", imports=[], imagePullPolicy="Never"):
+def run(func, image="jobs", imports=[], deps=[], imagePullPolicy="Never"):
     job_template = """apiVersion: batch/v1
 kind: Job
 metadata:
@@ -45,6 +51,7 @@ metadata:
 spec:
   template:
     spec:
+      serviceAccountName: internal-kubectl
       containers:
       - name: worker
         image: {{image}}
@@ -57,12 +64,23 @@ spec:
           import base64
           import json
           import sys
+          import k8s
 
           {% for module in imports %}
           import {{module}} {% endfor %}
 
           func = pickle.loads(base64.b64decode("{{code}}"))
-          json.dump(func(), sys.stdout)
+
+          deps = {{deps}}
+          if len(deps) != 0:
+            inputs = {dep: k8s.wait(dep, delete=False) for dep in deps}
+          else:
+            inputs = dict()
+
+          if k8s.check_for_kwargs(func):
+            json.dump(func(inputs=inputs), sys.stdout)
+          else:
+            json.dump(func(), sys.stdout)
       restartPolicy: Never
   backoffLimit: 1
 """
@@ -70,7 +88,7 @@ spec:
     code = serialize_func(func)
     t = jinja2.Template(job_template)
     s = random_string(5)
-    j = t.render(name=f"job-{s}", code=code, image=image, imports=imports, imagePullPolicy=imagePullPolicy)
+    j = t.render(name=f"job-{s}", code=code, image=image, imports=imports, imagePullPolicy=imagePullPolicy, deps=deps)
     subprocess.run("kubectl apply -f -",
                    input=j.encode("utf-8"),
                    check=True)
@@ -112,9 +130,13 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         return list(logs.values())[0]
 
 
-def map(func, iterable, image="jobs", imports=[], imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
-    thunks = [lambda arg=i: func(arg) for i in iterable]
-    job_names = [run(thunk, image=image, imagePullPolicy=imagePullPolicy) for thunk in thunks]
+def map(func, iterable, image="jobs", imports=[], deps=[], imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
+    if check_for_kwargs(func):
+        thunks = [lambda arg=i, **kwargs: func(arg, **kwargs) for i in iterable]
+    else:
+        thunks = [lambda arg=i: func(arg) for i in iterable]
+
+    job_names = [run(thunk, image=image, imagePullPolicy=imagePullPolicy, deps=deps) for thunk in thunks]
 
     if not nowait:
         if verbose:
