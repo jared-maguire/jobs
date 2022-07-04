@@ -17,6 +17,8 @@ def test_deps():
     job1 = k8s.run(lambda: "job-1", deps=[])
     job2 = k8s.run(lambda j=job1, **kwargs: "job-2 " + kwargs["inputs"][j], deps=[job1])
     result = k8s.wait(job2, timeout=30)
+    # clean up job1
+    k8s.wait(job1, timeout=30)
     assert(result == "job-2 job-1")
 
 

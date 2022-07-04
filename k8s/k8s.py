@@ -34,7 +34,7 @@ def deserialize_func(code):
 
 
 def check_for_kwargs(func):
-    args, varargs, varkw, defaults = inspect.getargspec(func)
+    varkw = inspect.getfullargspec(func).varkw
     return (varkw=='kwargs')
 
 
@@ -136,7 +136,7 @@ def map(func, iterable, image="jobs", imports=[], deps=[], imagePullPolicy="Neve
     else:
         thunks = [lambda arg=i: func(arg) for i in iterable]
 
-    job_names = [run(thunk, image=image, imagePullPolicy=imagePullPolicy, deps=deps) for thunk in thunks]
+    job_names = [run(thunk, image=image, imports=imports, imagePullPolicy=imagePullPolicy, deps=deps) for thunk in thunks]
 
     if not nowait:
         if verbose:
