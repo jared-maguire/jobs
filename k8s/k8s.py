@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 
 import os
+
 import dill as pickle
+pickle.settings['recurse'] = True
+
 import threading
 import time
 import multiprocessing
@@ -43,7 +46,7 @@ def random_string(length):
     return ''.join(random.choice(letters) for i in range(length))
 
 
-def run(func, image="jobs", imports=[], deps=[], imagePullPolicy="Never"):
+def run(func, *args, image="jobs", imports=[], deps=[], imagePullPolicy="Never", test=False):
     job_template = """apiVersion: batch/v1
 kind: Job
 metadata:
@@ -85,12 +88,24 @@ spec:
   backoffLimit: 1
 """
 
-    code = serialize_func(func)
+    if check_for_kwargs(func):
+        code = serialize_func(lambda a=args, **kwargs: func(*a, **kwargs))
+    else:
+        #thunks = [lambda arg=i: func(arg) for i in iterable]
+        code = serialize_func(lambda a=args: func(*a))
+
+    if test:
+        func_2 = pickle.loads(base64.b64decode(code))
+        return func_2()
+
     t = jinja2.Template(job_template)
     s = random_string(5)
     j = t.render(name=f"job-{s}", code=code, image=image, imports=imports, imagePullPolicy=imagePullPolicy, deps=deps)
     subprocess.run("kubectl apply -f -",
+                   shell=True,
                    input=j.encode("utf-8"),
+                   stdout=subprocess.PIPE,
+                   stderr=subprocess.PIPE,
                    check=True)
     return f"job-{s}"
 

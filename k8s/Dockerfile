@@ -12,5 +12,5 @@ ADD ./conda.yaml .
 RUN conda env update -n base -f conda.yaml
 WORKDIR /app
 ENV PYTHONPATH "${PYTHONPATH}:/app"
-COPY . .
+ADD k8s.py .
 CMD ["bash"]
