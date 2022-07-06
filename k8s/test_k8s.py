@@ -22,7 +22,7 @@ def test_deps():
     assert(result == "job-2 job-1")
 
 
-def test_workflow():
+def test_simple_workflow():
     jobs1 = k8s.map(lambda i: i, range(3), nowait=True)
     jobs2 = k8s.map(lambda i, **kwargs: sum(kwargs["inputs"].values()), range(3), deps=jobs1, nowait=True)
     results = [k8s.wait(j, timeout=30) for j in jobs2]
@@ -30,3 +30,8 @@ def test_workflow():
     _ = [k8s.wait(j, timeout=30) for j in jobs1]
     assert(tuple(results) == (3, 3, 3))
 
+
+def test_ngs_workflow():
+    from example_workflow import ngs_workflow
+    results = ngs_workflow("batch-1")
+    assert(results.__class__ == dict)
