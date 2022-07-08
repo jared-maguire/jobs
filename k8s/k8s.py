@@ -72,7 +72,8 @@ spec:
           {% for module in imports %}
           import {{module}} {% endfor %}
 
-          func = pickle.loads(base64.b64decode("{{code}}"))
+          #func = pickle.loads(base64.b64decode("{{code}}"))
+          func = k8s.deserialize_func("{{code}}")
 
           deps = {{deps}}
           if len(deps) != 0:
