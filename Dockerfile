@@ -11,6 +11,11 @@ RUN apt update && \
 ADD ./conda.yaml .
 RUN conda env update -n base -f conda.yaml
 WORKDIR /app
+COPY . /app/module
+
+# Installing in dev mode here is a hack to work around
+# the fact that MANIFEST.in doesn't seem to be working in linux :-/
+RUN cd module && pip install -e .   
+
 ENV PYTHONPATH "${PYTHONPATH}:/app"
-ADD k8s.py .
 CMD ["bash"]
