@@ -35,7 +35,7 @@ def merge_counts(counts_list):
 
 def count_words_workflow(url):
     text = requests.get(url).text.lower()
-    words = re.split("\s+", text)
+    words = re.split(r"\s+", text)
 
     count_jobs = k8s.map(count_words,
                          chunk_list(words, chunk_size=1000),
@@ -61,12 +61,12 @@ def demux_batch(batch_folder):
 
 
 def align_bam(fastq):
-    bam = re.sub("\.fq\.gz", ".bam", fastq)
+    bam = re.sub(r"\.fq\.gz", ".bam", fastq)
     return bam
 
 
 def sample_qc(bam):
-    qc = re.sub("\.bam", ".qc.tsv", bam)
+    qc = re.sub(r"\.bam", ".qc.tsv", bam)
     return qc
 
 
@@ -76,7 +76,7 @@ def merge_qc(sample_qcs):
 
 
 def call_snps(bam):
-    qc = re.sub("\.bam", ".vcf", bam)
+    qc = re.sub(r"\.bam", ".vcf", bam)
     return qc
 
 
