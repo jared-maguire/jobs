@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{name}}
+spec:
+  template:
+    spec:
+      serviceAccountName: internal-kubectl
+      containers:
+      - name: worker
+        image: {{image}}
+        imagePullPolicy: {{imagePullPolicy}}
+        command:
+        - python
+        - -c
+        - |
+          import dill as pickle
+          import base64
+          import json
+          import sys
+          import k8s
+
+          {% for module in imports %}
+          import {{module}} {% endfor %}
+
+          #func = pickle.loads(base64.b64decode("{{code}}"))
+          func = k8s.deserialize_func("{{code}}")
+
+          deps = {{deps}}
+          if len(deps) != 0:
+            inputs = {dep: k8s.wait(dep, delete=False) for dep in deps}
+          else:
+            inputs = dict()
+
+          if k8s.check_for_kwargs(func):
+            json.dump(func(inputs=inputs), sys.stdout)
+          else:
+            json.dump(func(), sys.stdout)
+      restartPolicy: Never
+  backoffLimit: 1
