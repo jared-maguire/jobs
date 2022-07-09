@@ -14,8 +14,8 @@ if __name__ == '__main__':
     config.add_argument('-check', default=False, action='store_true', help='check that the cluster is properly configured')
     config.add_argument('-apply', default=False, action='store_true', help='apply the configuration to the cluster')
 
-    test = subparsers.add_parser('test', help='test k8s')
-    test.add_argument('-opt-one', action='store', help='option one')
+    #test = subparsers.add_parser('test', help='test k8s')
+    #test.add_argument('-opt-one', action='store', help='option one')
 
     args = parser.parse_args()
 
