@@ -19,6 +19,14 @@ import random
 import jinja2
 import subprocess
 import inspect
+import importlib
+
+
+def check_cluster_config():
+    svc_acct = "internal-kubectl" in subprocess.run("kubectl get serviceaccounts",
+                                                    check=True,
+                                                    stdout=subprocess.PIPE).stdout.decode("utf-8")
+    return svc_acct
 
 
 def run_cmd(cmd):
@@ -47,47 +55,7 @@ def random_string(length):
 
 
 def run(func, *args, image="jobs", imports=[], deps=[], imagePullPolicy="Never", test=False):
-    job_template = """apiVersion: batch/v1
-kind: Job
-metadata:
-  name: {{name}}
-spec:
-  template:
-    spec:
-      serviceAccountName: internal-kubectl
-      containers:
-      - name: worker
-        image: {{image}}
-        imagePullPolicy: {{imagePullPolicy}}
-        command:
-        - python
-        - -c
-        - |
-          import dill as pickle
-          import base64
-          import json
-          import sys
-          import k8s
-
-          {% for module in imports %}
-          import {{module}} {% endfor %}
-
-          #func = pickle.loads(base64.b64decode("{{code}}"))
-          func = k8s.deserialize_func("{{code}}")
-
-          deps = {{deps}}
-          if len(deps) != 0:
-            inputs = {dep: k8s.wait(dep, delete=False) for dep in deps}
-          else:
-            inputs = dict()
-
-          if k8s.check_for_kwargs(func):
-            json.dump(func(inputs=inputs), sys.stdout)
-          else:
-            json.dump(func(), sys.stdout)
-      restartPolicy: Never
-  backoffLimit: 1
-"""
+    job_template = importlib.resources.read_text("k8s", "job_template.yaml")
 
     if check_for_kwargs(func):
         code = serialize_func(lambda a=args, **kwargs: func(*a, **kwargs))

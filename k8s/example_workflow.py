@@ -8,6 +8,7 @@ import re
 import functools
 import os
 import json
+import importlib
 
 
 def chunk_list(lst, chunk_size):
@@ -20,10 +21,7 @@ def chunk_list(lst, chunk_size):
 
 
 document_url = "https://www.gutenberg.org/cache/epub/68283/pg68283.txt"
-
-
-with open("stopwords.txt") as fp:
-    stopwords = {line.strip() for line in fp}
+stopwords = importlib.resources.read_text("k8s", "stopwords.txt")
 
 
 def count_words(words, stopwords=stopwords):

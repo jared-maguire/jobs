@@ -31,7 +31,7 @@ def test_simple_workflow():
     assert(tuple(results) == (3, 3, 3))
 
 
-def test_ngs_workflow():
-    from example_workflow import ngs_workflow
-    results = ngs_workflow("batch-1")
-    assert(results.__class__ == dict)
+#def test_ngs_workflow():
+#    from example_workflow import ngs_workflow
+#    results = ngs_workflow("batch-1")
+#    assert(results.__class__ == dict)
