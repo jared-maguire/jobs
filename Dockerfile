@@ -15,7 +15,7 @@ COPY . /app/module
 
 # Installing in dev mode here is a hack to work around
 # the fact that MANIFEST.in doesn't seem to be working in linux :-/
-RUN cd module && pip install -e .   
+RUN cd /app/module && pip install -e .   
 
-ENV PYTHONPATH "${PYTHONPATH}:/app"
+#ENV PYTHONPATH "${PYTHONPATH}:/app"
 CMD ["bash"]

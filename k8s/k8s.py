@@ -20,6 +20,7 @@ import jinja2
 import subprocess
 import inspect
 import importlib
+import importlib.resources
 
 
 def check_cluster_config():
@@ -54,8 +55,56 @@ def random_string(length):
     return ''.join(random.choice(letters) for i in range(length))
 
 
-def run(func, *args, image="jobs", imports=[], deps=[], imagePullPolicy="Never", test=False):
-    job_template = importlib.resources.read_text("k8s", "job_template.yaml")
+# This should be in a file inside the package, but I'm having problems with that right now...
+default_job_template = """apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{name}}
+spec:
+  template:
+    spec:
+      serviceAccountName: internal-kubectl
+      containers:
+      - name: worker
+        image: {{image}}
+        imagePullPolicy: {{imagePullPolicy}}
+        command:
+        - python
+        - -c
+        - |
+          import dill as pickle
+          import base64
+          import json
+          import sys
+          import k8s
+
+          {% for module in imports %}
+          import {{module}} {% endfor %}
+
+          func = k8s.deserialize_func("{{code}}")
+
+          deps = {{deps}}
+          if len(deps) != 0:
+            inputs = {dep: k8s.wait(dep, delete=False) for dep in deps}
+          else:
+            inputs = dict()
+
+          if k8s.check_for_kwargs(func):
+            json.dump(func(inputs=inputs), sys.stdout)
+          else:
+            json.dump(func(), sys.stdout)
+
+      restartPolicy: Never
+  backoffLimit: 1
+"""
+
+
+
+
+
+def run(func, *args, image="jobs", imports=[], deps=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
+    # Should do it this way, but having problems. Reverting for now:
+    # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
 
     if check_for_kwargs(func):
         code = serialize_func(lambda a=args, **kwargs: func(*a, **kwargs))
@@ -70,6 +119,10 @@ def run(func, *args, image="jobs", imports=[], deps=[], imagePullPolicy="Never",
     t = jinja2.Template(job_template)
     s = random_string(5)
     j = t.render(name=f"job-{s}", code=code, image=image, imports=imports, imagePullPolicy=imagePullPolicy, deps=deps)
+
+    if dryrun:
+        return j
+
     subprocess.run("kubectl apply -f -",
                    shell=True,
                    input=j.encode("utf-8"),
