@@ -31,6 +31,12 @@ def test_simple_workflow():
     assert(tuple(results) == (3, 3, 3))
 
 
+def test_nested_lambda():
+    job = k8s.run(lambda i, j: 10 * k8s.wait(k8s.run(lambda a=i, b=j: a+b)), 1,2)
+    result = k8s.wait(job)
+    assert(result == 30)
+
+
 #def test_ngs_workflow():
 #    from example_workflow import ngs_workflow
 #    results = ngs_workflow("batch-1")
