@@ -1,0 +1,2 @@
+include ./k8s/*.txt 
+include ./k8s/*.yaml 

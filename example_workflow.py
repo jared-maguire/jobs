@@ -11,9 +11,22 @@ import json
 import importlib
 
 
-def chunk_list(lst, chunk_size):
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i:i+chunk_size]
+
+###########################################################
+##  Most Basic workflow
+
+def func1(i):
+    return -1 * i
+
+
+def func2(i):
+    return 10 * i
+
+
+def basic_wf(i):
+    a = k8s.wait(k8s.run(func1, i))
+    b = k8s.wait(k8s.run(func2, a))
+    return b
 
 
 ###########################################################
@@ -22,6 +35,11 @@ def chunk_list(lst, chunk_size):
 
 document_url = "https://www.gutenberg.org/cache/epub/68283/pg68283.txt"
 stopwords = importlib.resources.read_text("k8s", "stopwords.txt")
+
+
+def chunk_list(lst, chunk_size):
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i+chunk_size]
 
 
 def count_words(words, stopwords=stopwords):
