@@ -83,31 +83,18 @@ spec:
 
           func = k8s.deserialize_func("{{code}}")
 
-          deps = {{deps}}
-          if len(deps) != 0:
-            inputs = {dep: k8s.wait(dep, delete=False) for dep in deps}
-          else:
-            inputs = dict()
-
-          if k8s.check_for_kwargs(func):
-            json.dump(func(inputs=inputs), sys.stdout)
-          else:
-            json.dump(func(), sys.stdout)
+          json.dump(func(), sys.stdout)
 
       restartPolicy: Never
   backoffLimit: 1
 """
 
 
-def run(func, *args, image="jobs", imports=[], deps=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
+def run(func, *args, image="jobs", imports=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
 
-    if check_for_kwargs(func):
-        code = serialize_func(lambda a=args, **kwargs: func(*a, **kwargs))
-    else:
-        #thunks = [lambda arg=i: func(arg) for i in iterable]
-        code = serialize_func(lambda a=args: func(*a))
+    code = serialize_func(lambda a=args: func(*a))
 
     if test:
         func_2 = pickle.loads(base64.b64decode(code))
@@ -115,7 +102,7 @@ def run(func, *args, image="jobs", imports=[], deps=[], job_template=default_job
 
     t = jinja2.Template(job_template)
     s = random_string(5)
-    j = t.render(name=f"job-{s}", code=code, image=image, imports=imports, imagePullPolicy=imagePullPolicy, deps=deps)
+    j = t.render(name=f"job-{s}", code=code, image=image, imports=imports, imagePullPolicy=imagePullPolicy)
 
     if dryrun:
         return j
@@ -137,8 +124,10 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
     while True:
         current = time.time()
         if (timeout is not None) and (current - start) > timeout:
-            return None
+            raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
         result = json.loads(run_cmd(get_job))
+        if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
+            raise RuntimeError(f"k8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
             continue
         if result["status"]["succeeded"] == 1:
@@ -164,13 +153,10 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         return list(logs.values())[0]
 
 
-def map(func, iterable, image="jobs", imports=[], deps=[], imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
-    if check_for_kwargs(func):
-        thunks = [lambda arg=i, **kwargs: func(arg, **kwargs) for i in iterable]
-    else:
-        thunks = [lambda arg=i: func(arg) for i in iterable]
+def map(func, iterable, image="jobs", imports=[], imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
+    thunks = [lambda arg=i: func(arg) for i in iterable]
 
-    job_names = [run(thunk, image=image, imports=imports, imagePullPolicy=imagePullPolicy, deps=deps) for thunk in thunks]
+    job_names = [run(thunk, image=image, imports=imports, imagePullPolicy=imagePullPolicy) for thunk in thunks]
 
     if not nowait:
         if verbose:
