@@ -6,3 +6,4 @@ __pycache__/jobs.cpython-39.pyc
 fnord
 k8s/counts.txt
 .vs/
+.vscode/
