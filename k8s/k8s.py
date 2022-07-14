@@ -99,9 +99,6 @@ spec:
 """
 
 
-
-
-
 def run(func, *args, image="jobs", imports=[], deps=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
