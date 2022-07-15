@@ -50,3 +50,10 @@ def test_ngs_workflow():
     from example_workflow import ngs_workflow
     results = ngs_workflow("batch-1")
     assert(results.__class__ == dict)
+
+
+def test_count_words_workflow():
+    import collections
+    from example_workflow import count_words_workflow, document_url
+    results = count_words_workflow(document_url)
+    assert(results.__class__ == collections.Counter)

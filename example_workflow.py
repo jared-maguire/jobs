@@ -51,21 +51,38 @@ def merge_counts(counts_list):
     return functools.reduce(lambda a,b: Counter(a)+Counter(b), counts_list)
 
 
+def counts_to_probs(counts_list):
+    N = sum(counts_list.values())
+    probs = dict()
+    for word, count in counts_list.items():
+        probs[word] = count / N
+    return probs
+
+
 def count_words_workflow(url):
     text = requests.get(url).text.lower()
-    words = re.split(r"\s+", text)
 
-    count_jobs = k8s.map(count_words,
+    def wf(text):
+        import collections
+        words = re.split(r"\s+", text)
+
+        counts = k8s.map(count_words,
                          chunk_list(words, chunk_size=1000),
                          imports=["collections"],
-                         nowait=True)
+                         timeout=30)
 
-    merged_counts_job = k8s.run(lambda func=merge_counts, **kwargs: func(kwargs["inputs"].values()),
-                                deps=count_jobs,
-                                imports=["collections", "re", "functools"])
+        merged_counts = k8s.wait(k8s.run(merge_counts, counts,
+                                         imports=["collections", "re", "functools"]),
+                                 timeout=30)
+
+        probs = k8s.wait(k8s.run(counts_to_probs, merged_counts,
+                                 imports=["collections", "re", "functools"]),
+                         timeout=30)
+
+        return collections.Counter(words)
 
     #from IPython import embed; embed(header="inside_workflow")
-    return collections.Counter(k8s.wait(merged_counts_job))
+    return collections.Counter(k8s.wait(k8s.run(wf, text)))
 
 
 
