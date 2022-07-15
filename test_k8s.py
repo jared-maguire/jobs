@@ -13,9 +13,12 @@ def test_run_and_wait():
 
 
 def test_fail():
+    import os
     try:
-        k8s.wait(k8s.run(lambda: 1/0), timeout=30)
+        job = k8s.run(lambda: 1/0)
+        k8s.wait(job, timeout=30)
     except RuntimeError:
+        assert(os.system(f"kubectl delete job {job}") == 0)
         return
     assert(False)
 
