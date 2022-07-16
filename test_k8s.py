@@ -13,9 +13,12 @@ def test_run_and_wait():
 
 
 def test_fail():
+    import os
     try:
-        k8s.wait(k8s.run(lambda: 1/0), timeout=30)
+        job = k8s.run(lambda: 1/0)
+        k8s.wait(job, timeout=30)
     except RuntimeError:
+        assert(os.system(f"kubectl delete job {job}") == 0)
         return
     assert(False)
 
@@ -50,3 +53,10 @@ def test_ngs_workflow():
     from example_workflow import ngs_workflow
     results = ngs_workflow("batch-1")
     assert(results.__class__ == dict)
+
+
+def test_count_words_workflow():
+    import collections
+    from example_workflow import count_words_workflow, document_url
+    results = count_words_workflow(document_url)
+    assert(results.__class__ == collections.Counter)

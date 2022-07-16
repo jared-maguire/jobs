@@ -8,7 +8,7 @@ RUN apt update && \
       chmod +x ./kubectl && \
       mv ./kubectl /usr/local/bin/kubectl
 
-ADD ./conda.yaml .
+ADD ./k8s/conda.yaml .
 RUN conda env update -n base -f conda.yaml
 WORKDIR /app
 COPY . /app/module
