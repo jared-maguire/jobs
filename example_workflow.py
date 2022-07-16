@@ -34,7 +34,7 @@ def basic_wf(i):
 
 
 document_url = "https://www.gutenberg.org/cache/epub/68283/pg68283.txt"
-stopwords = importlib.resources.read_text("k8s", "stopwords.txt")
+stopwords_url = "https://gist.githubusercontent.com/sebleier/554280/raw/7e0e4a1ce04c2bb7bd41089c9821dbcf6d0c786c/NLTK's%2520list%2520of%2520english%2520stopwords"
 
 
 def chunk_list(lst, chunk_size):
@@ -42,7 +42,7 @@ def chunk_list(lst, chunk_size):
         yield lst[i:i+chunk_size]
 
 
-def count_words(words, stopwords=stopwords):
+def count_words(words, stopwords):
     return collections.Counter([word for word in words if word not in stopwords])
 
 
@@ -61,6 +61,7 @@ def counts_to_probs(counts_list):
 
 def count_words_workflow(url):
     text = requests.get(url).text.lower()
+    stopwords = requests.get(stopwords_url).text.lower().strip().split("\n")
 
     def wf(text):
         import collections
@@ -68,6 +69,7 @@ def count_words_workflow(url):
 
         counts = k8s.map(count_words,
                          chunk_list(words, chunk_size=1000),
+                         stopwords,
                          imports=["collections"],
                          timeout=30)
 
