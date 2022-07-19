@@ -5,22 +5,13 @@ import os
 import dill as pickle
 pickle.settings['recurse'] = True
 
-import threading
 import time
-import multiprocessing
-from multiprocessing.pool import ThreadPool
-import requests
 import base64
 import json
-import sys
-import functools
-import string
-import random
 import jinja2
 import subprocess
-import inspect
-import importlib
-import importlib.resources
+
+from k8s.util import *
 
 
 def check_cluster_config():
@@ -28,31 +19,6 @@ def check_cluster_config():
                                                     check=True,
                                                     stdout=subprocess.PIPE).stdout.decode("utf-8")
     return svc_acct
-
-
-def run_cmd(cmd):
-    result = subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout
-    return result
-
-
-def serialize_func(func):
-    code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
-    return code
-
-
-def deserialize_func(code):
-    func = pickle.loads(base64.b64decode(code))
-    return func
-
-
-def check_for_kwargs(func):
-    varkw = inspect.getfullargspec(func).varkw
-    return (varkw=='kwargs')
-
-
-def random_string(length):
-    letters = string.ascii_lowercase
-    return ''.join(random.choice(letters) for i in range(length))
 
 
 # This should be in a file inside the package, but I'm having problems with that right now...
@@ -63,6 +29,12 @@ metadata:
 spec:
   template:
     spec:
+      volumes:
+      {% for volume in volumes %}
+      - name: {{volume}}
+        persistentVolumeClaim:
+          claimName: {{volume}}
+      {% endfor %}
       serviceAccountName: internal-kubectl
       containers:
       - name: worker
@@ -84,13 +56,18 @@ spec:
           func = k8s.deserialize_func("{{code}}")
 
           json.dump(func(), sys.stdout)
+        {% for volume in volumes %}
+        volumeMounts:
+        - mountPath: "/mnt/{{volume}}"
+          name: {{volume}}
+        {% endfor %}
 
       restartPolicy: Never
   backoffLimit: 1
 """
 
 
-def run(func, *args, image="jobs", imports=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
+def run(func, *args, image="jobs", volumes=[], imports=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
 
@@ -102,7 +79,7 @@ def run(func, *args, image="jobs", imports=[], job_template=default_job_template
 
     t = jinja2.Template(job_template)
     s = random_string(5)
-    j = t.render(name=f"job-{s}", code=code, image=image, imports=imports, imagePullPolicy=imagePullPolicy)
+    j = t.render(name=f"job-{s}", code=code, image=image, volumes=volumes, imports=imports, imagePullPolicy=imagePullPolicy)
 
     if dryrun:
         return j
@@ -111,8 +88,9 @@ def run(func, *args, image="jobs", imports=[], job_template=default_job_template
                    shell=True,
                    input=j.encode("utf-8"),
                    stdout=subprocess.PIPE,
-                   stderr=subprocess.PIPE,
                    check=True)
+                   #stderr=subprocess.PIPE,
+
     return f"job-{s}"
 
 
