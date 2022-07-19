@@ -50,3 +50,25 @@ def test_ngs_workflow():
     from example_workflow import ngs_workflow
     results = ngs_workflow("batch-1")
     assert(results.__class__ == dict)
+
+
+def test_volumes():
+    def wf():
+        import json
+        volume = k8s.create_volume("10Mi")
+
+        def func1():
+            with open(f"/mnt/{volume}/test.json", "w") as fp:
+                json.dump("hey", fp)
+
+        def func2():
+            with open(f"/mnt/{volume}/test.json") as fp:
+                return json.load(fp)
+
+        k8s.wait(k8s.run(func1, volumes=[volume]))
+        result = k8s.wait(k8s.run(func2, volumes=[volume]))
+                                  
+        return result
+
+    result = wf()
+    assert(result == "hey")
