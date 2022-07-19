@@ -29,6 +29,12 @@ metadata:
 spec:
   template:
     spec:
+      volumes:
+      {% for volume in volumes %}
+      - name: {{volume}}
+        persistentVolumeClaim:
+          claimName: {{volume}}
+      {% endfor %}
       serviceAccountName: internal-kubectl
       containers:
       - name: worker

@@ -17,7 +17,7 @@ spec:
 #  storageClassName: manual
 
 
-def create_volume(size, accessModes=["ReadWriteMany"], name=None, template=default_volume_template, **kwargs):
+def create_volume(size, name=None, accessModes=["ReadWriteMany"], template=default_volume_template, dryrun=False, **kwargs):
     template = jinja2.Template(default_volume_template)
 
     if name is None:
@@ -31,11 +31,18 @@ def create_volume(size, accessModes=["ReadWriteMany"], name=None, template=defau
 
     volume_yaml = template.render(**template_args)
 
+    if dryrun:
+      return volume_yaml
+
     subprocess.run("kubectl apply -f -",
                    shell=True,
                    input=volume_yaml.encode("utf-8"),
-                   stdout=subprocess.PIPE,
-                   stderr=subprocess.PIPE,
                    check=True)
 
     return name
+
+
+def delete_volume(volume):
+    subprocess.run(f"kubectl delete pvc {volume}",
+                   shell=True,
+                   check=True)
