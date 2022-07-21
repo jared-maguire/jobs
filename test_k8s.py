@@ -112,3 +112,15 @@ def test_rwx_volumes():
 
     result = wf()
     assert((result["iteration_count"] >= 0) and (result["data"] == "the writer has writ"))
+
+
+    def test_containers():
+        image = k8s.docker_build("pysam", ancestor="jobs", conda=["pysam"])
+
+        def test_pysam():
+            import pysam
+            import json
+            print(json.dumps(pysam.__file__))
+
+        result = k8s.wait(k8s.run(test_pysam, image=image))
+        assert(result.__class__ == str)
