@@ -21,20 +21,18 @@ RUN conda update -n base conda
 RUN conda install -y pip tqdm
 RUN pip install dill flask jupyter requests numpy scipy pandas
 
+# Installing in dev mode here is a hack to work around
+# the fact that MANIFEST.in doesn't seem to be working in linux :-/
+COPY . /app/module
+RUN cd /app/module && pip install -e .   
+
 {% if conda is defined and conda|length > 0 %}
-RUN conda install -y{% for pkg in conda %} {{pkg}}{% endfor %}
+RUN conda install -y {% for pkg in conda %} {{pkg}} {% endfor %}
 {% endif %}
 
 {% if pip is defined and pip|length > 0 %}
 RUN pip install {% for pkg in pip %} {{pkg}}{% endfor %}
 {% endif %}
-
-
-COPY . /app/module
-
-# Installing in dev mode here is a hack to work around
-# the fact that MANIFEST.in doesn't seem to be working in linux :-/
-RUN cd /app/module && pip install -e .   
 
 #ENV PYTHONPATH "${PYTHONPATH}:/app"
 CMD ["bash"]
