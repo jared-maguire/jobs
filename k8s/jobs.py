@@ -50,9 +50,6 @@ spec:
           import sys
           import k8s
 
-          {% for module in imports %}
-          import {{module}} {% endfor %}
-
           func = k8s.deserialize_func("{{code}}")
 
           json.dump(func(), sys.stdout)
@@ -67,7 +64,7 @@ spec:
 """
 
 
-def run(func, *args, image="jobs", volumes=[], imports=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
+def run(func, *args, image="jobs", volumes=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
 
@@ -79,7 +76,7 @@ def run(func, *args, image="jobs", volumes=[], imports=[], job_template=default_
 
     t = jinja2.Template(job_template)
     s = random_string(5)
-    j = t.render(name=f"job-{s}", code=code, image=image, volumes=volumes, imports=imports, imagePullPolicy=imagePullPolicy)
+    j = t.render(name=f"job-{s}", code=code, image=image, volumes=volumes, imagePullPolicy=imagePullPolicy)
 
     if dryrun:
         return j
@@ -131,10 +128,10 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         return list(logs.values())[0]
 
 
-def map(func, iterable, image="jobs", imports=[], imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
+def map(func, iterable, image="jobs", imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
-    job_names = [run(thunk, image=image, imports=imports, imagePullPolicy=imagePullPolicy) for thunk in thunks]
+    job_names = [run(thunk, image=image, imagePullPolicy=imagePullPolicy) for thunk in thunks]
 
     if not nowait:
         if verbose:

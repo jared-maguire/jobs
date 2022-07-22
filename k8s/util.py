@@ -12,7 +12,7 @@ def run_cmd(cmd):
 
 
 def serialize_func(func):
-    code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
+    code = base64.b64encode(pickle.dumps(func, byref=True, recurse=True)).decode("utf-8")
     return code
 
 
