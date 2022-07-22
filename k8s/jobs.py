@@ -64,7 +64,7 @@ spec:
 """
 
 
-def run(func, *args, image="jobs", volumes=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
+def run(func, *args, image="jobs", volumes=[], nowait=True, timeout=None, job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
 
@@ -88,7 +88,12 @@ def run(func, *args, image="jobs", volumes=[], job_template=default_job_template
                    check=True)
                    #stderr=subprocess.PIPE,
 
-    return f"job-{s}"
+    job = f"job-{s}"
+
+    if nowait:
+        return f"job-{s}"
+    else:
+        return wait(job, timeout=timeout)
 
 
 def wait(job_name, timeout=None, verbose=False, delete=True):
