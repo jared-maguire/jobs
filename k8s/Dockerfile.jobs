@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+FROM {{ancestor|default('continuumio/miniconda3', True)}}
+
+# install kubectl
+RUN apt update && \
+      apt install -y curl && \
+      curl -LO https://storage.googleapis.com/kubernetes-release/release/`curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt`/bin/linux/amd64/kubectl && \
+      chmod +x ./kubectl && \
+      mv ./kubectl /usr/local/bin/kubectl
+
+WORKDIR /app
+
+RUN conda config --add channels defaults 
+RUN conda config --add channels conda-forge
+
+{% for channel in channels %}
+RUN conda config --add channels {{channel}}
+{% endfor %}
+
+RUN conda update -n base conda
+
+RUN conda install -y pip tqdm
+RUN pip install dill flask jupyter requests numpy scipy pandas
+
+# Installing in dev mode here is a hack to work around
+# the fact that MANIFEST.in doesn't seem to be working in linux :-/
+COPY . /app/module
+RUN cd /app/module && pip install -e .   
+
+#ENV PYTHONPATH "${PYTHONPATH}:/app"
+CMD ["bash"]

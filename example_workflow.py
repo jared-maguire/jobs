@@ -34,7 +34,7 @@ def basic_wf(i):
 
 
 document_url = "https://www.gutenberg.org/cache/epub/68283/pg68283.txt"
-stopwords = importlib.resources.read_text("k8s", "stopwords.txt")
+#stopwords = importlib.resources.read_text("k8s", "stopwords.txt")
 
 
 def chunk_list(lst, chunk_size):
@@ -42,7 +42,7 @@ def chunk_list(lst, chunk_size):
         yield lst[i:i+chunk_size]
 
 
-def count_words(words, stopwords=stopwords):
+def count_words(words, stopwords=[]):
     return collections.Counter([word for word in words if word not in stopwords])
 
 
@@ -79,21 +79,25 @@ def demux_batch(batch_folder):
 
 
 def align_bam(fastq):
+    import re
     bam = re.sub(r"\.fq\.gz", ".bam", fastq)
     return bam
 
 
 def sample_qc(bam):
+    import re
     qc = re.sub(r"\.bam", ".qc.tsv", bam)
     return qc
 
 
 def merge_qc(sample_qcs):
+    import os
     qc = os.path.dirname(sample_qcs[0]) + "/basic_stats.tsv"
     return qc
 
 
 def call_snps(bam):
+    import re
     qc = re.sub(r"\.bam", ".vcf", bam)
     return qc
 
@@ -102,10 +106,10 @@ def ngs_workflow(batch_folder):
     def wf(batch_folder):
         import json, sys
         fastqs = k8s.wait(k8s.run(demux_batch, batch_folder))
-        bams = k8s.map(align_bam, fastqs, imports=["re"])
-        sample_qcs = k8s.map(sample_qc, bams, imports=["re"])
-        snps = k8s.map(call_snps, bams, imports=["re"])
-        basic_stats = k8s.wait(k8s.run(merge_qc, sample_qcs, imports=["os"]))
+        bams = k8s.map(align_bam, fastqs)
+        sample_qcs = k8s.map(sample_qc, bams)
+        snps = k8s.map(call_snps, bams)
+        basic_stats = k8s.wait(k8s.run(merge_qc, sample_qcs))
         return dict(fastq=fastqs,
                     bams=bams,
                     sample_qcs=sample_qcs,
