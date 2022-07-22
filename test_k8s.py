@@ -16,6 +16,11 @@ def test_run_and_wait():
     assert(result=="Hooray")
 
 
+def test_run_and_wait_2():
+    result = k8s.run(lambda: "Hooray", nowait=False, timeout=30)
+    assert(result=="Hooray")
+
+
 def test_fail():
     try:
         k8s.wait(k8s.run(lambda: 1/0), timeout=30)
