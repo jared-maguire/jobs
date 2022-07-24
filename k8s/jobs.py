@@ -53,18 +53,38 @@ spec:
           func = k8s.deserialize_func("{{code}}")
 
           json.dump(func(), sys.stdout)
-        {% for volume in volumes %}
+
+        {%- if (requests is defined and requests|length > 0) or (limits is defined and limits|length > 0) %}
+        resources:
+        {%- endif %}
+        {%- if requests is defined and requests|length > 0 %}
+            requests:
+        {%- endif %}
+        {%- for key, value in requests.items() %}
+                {{key}}: {{value}}
+        {%- endfor %}
+        {%- if limits is defined and limits|length > 0 %}
+            limits:
+        {%- endif %}
+        {%- for key, value in limits.items() %}
+                {{key}}: {{value}}
+        {%- endfor %}
+        {%- if volumes is defined and volumes|length > 0 %}
         volumeMounts:
+        {%- for volume in volumes %}
         - mountPath: "/mnt/{{volume}}"
           name: {{volume}}
-        {% endfor %}
+        {%- endfor %}
+        {%- endif %}
 
       restartPolicy: Never
   backoffLimit: 1
 """
 
 
-def run(func, *args, image="jobs", volumes=[], nowait=True, timeout=None, job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
+def run(func, *args, image="jobs",
+        volumes=[], requests=dict(), limits=dict(),
+        nowait=True, timeout=None, job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
 
@@ -76,7 +96,7 @@ def run(func, *args, image="jobs", volumes=[], nowait=True, timeout=None, job_te
 
     t = jinja2.Template(job_template)
     s = random_string(5)
-    j = t.render(name=f"job-{s}", code=code, image=image, volumes=volumes, imagePullPolicy=imagePullPolicy)
+    j = t.render(name=f"job-{s}", code=code, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy)
 
     if dryrun:
         return j
