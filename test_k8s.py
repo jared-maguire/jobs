@@ -143,3 +143,23 @@ def test_containers():
 
     result = k8s.wait(k8s.run(test_pysam, image=image))
     assert(result.__class__ == str)
+
+
+# Resources
+
+def test_resource_limits():
+    def allocate_memory(size):
+        import numpy
+        numpy.random.bytes(size * int(1e6))
+        return True
+    assert(k8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, nowait=False, timeout=20))
+
+    try:
+        job = k8s.run(allocate_memory, 1000, requests={"memory": "6Mi", "cpu": 1}, limits={"memory":"6Mi"})
+        k8s.wait(job)
+        assert(os.system(f"kubectl delete job {job}") == 0)
+    except RuntimeError:
+        assert(True)
+        return
+
+    assert(False)
