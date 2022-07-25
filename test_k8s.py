@@ -22,9 +22,12 @@ def test_run_and_wait_2():
 
 
 def test_fail():
+    import os
     try:
-        k8s.wait(k8s.run(lambda: 1/0), timeout=30)
+        job = k8s.run(lambda: 1/0)
+        job = k8s.wait(job)
     except RuntimeError:
+        assert(os.system(f"kubectl delete job {job}") == 0)
         return
     assert(False)
 
@@ -148,18 +151,19 @@ def test_containers():
 # Resources
 
 def test_resource_limits():
+    import os
     def allocate_memory(size):
         import numpy
         numpy.random.bytes(size * int(1e6))
         return True
+
     assert(k8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, nowait=False, timeout=20))
 
     try:
         job = k8s.run(allocate_memory, 1000, requests={"memory": "6Mi", "cpu": 1}, limits={"memory":"6Mi"})
         k8s.wait(job)
-        assert(os.system(f"kubectl delete job {job}") == 0)
     except RuntimeError:
-        assert(True)
+        assert(os.system(f"kubectl delete job {job}") == 0)
         return
 
     assert(False)
