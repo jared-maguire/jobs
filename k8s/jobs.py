@@ -153,10 +153,12 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         return list(logs.values())[0]
 
 
-def map(func, iterable, image="jobs", imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
+def map(func, iterable, 
+        requests=dict(), limits=dict(),
+        image="jobs", imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
-    job_names = [run(thunk, image=image, imagePullPolicy=imagePullPolicy) for thunk in thunks]
+    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
 
     if not nowait:
         if verbose:
