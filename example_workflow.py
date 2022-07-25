@@ -34,7 +34,6 @@ def basic_wf(i):
 
 
 document_url = "https://www.gutenberg.org/cache/epub/68283/pg68283.txt"
-#stopwords = importlib.resources.read_text("k8s", "stopwords.txt")
 
 
 def chunk_list(lst, chunk_size):
