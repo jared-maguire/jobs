@@ -52,3 +52,16 @@ def wf(batch_folder):
 wf_job = k8s.run(wf, batch_folder)
 ```
 
+# Installation
+
+First, have a k8s cluster configured. Docker Desktop can give you a single node k8s cluster with a few clicks. The examples here are all trivially small compute load, and should run locally just fine. The instructions below assume a local k8s cluster via Docker Desktop.
+
+It's not on pypi yet, so...
+
+```
+git clone git@github.com:jared-maguire/jobs.git
+cd jobs
+pip install .
+docker build -t jobs .         # build the default docker image that jobs will run in
+python -m k8s config -apply    # create a service account on the cluster that allows jobs to submit other jobs
+```
