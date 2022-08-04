@@ -5,6 +5,7 @@ import subprocess
 import pymongo
 import k8s.util
 import k8s.volumes
+import hashlib
 
 
 default_mongodb_template = """apiVersion: apps/v1
@@ -101,7 +102,7 @@ def mongo_db_port_forward(db):
 
 
 # Note: this class only works within pods right now.
-class WorkflowState:
+class StatefulWorkflow:
     def __init__(self, db=None):
         if db is None:
           self.db = create_mongo_db()
@@ -119,6 +120,11 @@ class WorkflowState:
         result = client.state.state.find_one(dict(key=key))
         return result["val"]
 
+    def contains(self, key):
+        client = pymongo.client(self.db["url"])
+        result = client.state.state.find_one(dict(key=key))
+        return result is not None
+
     def __setitem__(self, key, val):
         return self.set(key, val)
 
@@ -127,3 +133,12 @@ class WorkflowState:
 
     def __delitem__(self, key):
         raise NotImplementedError
+
+    # this isn't quite right; WIP
+    def run(func, *args, **kwargs):
+        code = k8s.util.serialize_func(lambda a=args: func(*a))
+        hash = hashlib.sha1(code.encode("utf-8")).hexdigest()
+        if self.contains(hash):
+            return self.get(hash)["val"]
+        else:
+            return k8s.jobs.run(func, *args, **kwargs)
