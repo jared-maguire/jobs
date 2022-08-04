@@ -1,9 +1,11 @@
 import subprocess
+import io
 import base64
 import dill as pickle
 import inspect
 import string
 import random
+import yaml
 
 
 def run_cmd(cmd):
@@ -29,3 +31,15 @@ def check_for_kwargs(func):
 def random_string(length):
     letters = string.ascii_lowercase
     return ''.join(random.choice(letters) for i in range(length))
+
+
+def get_k8s_config():
+    cmd = "kubectl config view --minify"
+    config = yaml.load(io.StringIO(subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8")), yaml.Loader)
+    return config
+
+
+def get_current_namespace():
+    cmd = "kubectl config view --minify"
+    config = get_k8s_config()
+    return config["contexts"][0]["context"]["namespace"]   # I might really regret the hardcoded '[0]' here.

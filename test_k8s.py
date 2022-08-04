@@ -167,3 +167,47 @@ def test_resource_limits():
         return
 
     assert(False)
+
+
+# Workflow State
+
+def test_mongodb():
+    # Create a container that has pymongo installed
+    image = k8s.docker_build("pymongo", ancestor="jobs", pip=["pymongo"], push=False)
+    db = k8s.create_mongo_db()
+
+    def insert_document(data, url=db["url"]):
+        import pymongo
+        client = pymongo.MongoClient(url)
+        client.state.state.insert_one(data)
+        return None
+
+    def retrieve_document(query, url=db["url"]):
+        import pymongo
+        import json
+        import bson.json_util
+        client = pymongo.MongoClient(url)
+        result = json.loads(bson.json_util.dumps(client.state.state.find_one(query)))  # little hack to work around serializing MongoDB ObjectId's
+        return result
+
+    result1 = k8s.run(insert_document, dict(hello="world", payload=42), image=image, nowait=False)
+    result2 = k8s.run(retrieve_document, dict(hello="world"), image=image, nowait=False)
+
+    print(result1)
+    print(result2)
+
+    k8s.delete_mongo_db(db["name"])
+
+    assert(result2.__class__ == dict)
+    assert(result2["payload"] == 42)
+
+
+#def test_workflowstate():
+#
+#    def wf(state=None):
+#        if state is None:
+#            state = WorkflowState()
+#        job1 = k8s.run(lambda a, b: a+b, 1, 2)
+#        state["jobs"] = [job1]
+#        job1_result = k8s.wait(job1, timeout=30)
+#        state["jobs1_result"] = [job1_result]
