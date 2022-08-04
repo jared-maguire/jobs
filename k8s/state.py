@@ -1,6 +1,8 @@
 
+from re import A
 import jinja2
 import subprocess
+import pymongo
 import k8s.util
 import k8s.volumes
 
@@ -82,28 +84,46 @@ def create_mongo_db(name=None, namespace=None, dryrun=False, template=default_mo
     return dict(name=name, url=url)
 
 
-def delete_mongo_db(name):
+def delete_mongo_db(db):
+    if db.__class__ == dict:
+      name = db["name"]
+    else:
+      name = db
     subprocess.run(f"kubectl delete service {name} && kubectl delete deployment {name}",
                    shell=True, check=True)
 
 
+def mongo_db_port_forward(db):
+    name = db["name"]
+    cmd = f"kubectl port-forward service/{name} 27017:27017"
+    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return proc
+
+
+# Note: this class only works within pods right now.
 class WorkflowState:
-    def __init__(self, name=None):
-        if name is None:
-            # Generate a name.
-            self.name = "wfs-" + k8s.util.random_string(5)
-
-            # Create a small rwx volume named wfs-{name}.
-            k8s.volumes.create_volume("100Mi", name=self.name, accessModes=["ReadWriteMany"])
+    def __init__(self, db=None):
+        if db is None:
+          self.db = create_mongo_db()
         else:
-            self.connect(name)
+          self.db = db
+        self.name = db["url"]
 
-    def set(key, val):
-        self.data[key] = val
-        return self.data[key]
+    def set(self, key, val):
+        client = pymongo.client(self.db["url"])
+        client.state.state.update(dict(key=key), dict(val=val), dict(upsert=True))
+        return None
 
-    def get(key):
-        return self.data[key]
+    def get(self, key):
+        client = pymongo.client(self.db["url"])
+        result = client.state.state.find_one(dict(key=key))
+        return result["val"]
 
-    def connect(self, name):
-        self.name = name
+    def __setitem__(self, key, val):
+        return self.set(key, val)
+
+    def __getitem__(self, key):
+        return self.get(key)
+
+    def __delitem__(self, key):
+        raise NotImplementedError
