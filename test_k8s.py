@@ -196,18 +196,56 @@ def test_mongodb():
     print(result1)
     print(result2)
 
-    k8s.delete_mongo_db(db["name"])
+    k8s.delete_mongo_db(db)
 
     assert(result2.__class__ == dict)
     assert(result2["payload"] == 42)
 
 
+# This is a basic test of our ability to deploy a transient MongoDB service, and use it to maintain workflow state:
+def test_workflow_with_state():
+    image = k8s.docker_build("pymongo", ancestor="jobs", pip=["pymongo"], push=False)
+    state_db = k8s.create_mongo_db()
+
+    def wf(state_db, bail_early=False):
+        import pymongo
+
+        client = pymongo.MongoClient(state_db["url"])
+
+        memo1 = client.state.state.find_one(dict(step="step1"))
+        if memo1 is not None:
+            result1 = memo1["result"]
+        else:
+            result1 = k8s.run(lambda: 1, nowait=False)
+            client.state.state.insert_one(dict(step="step1", result=result1))
+
+        if bail_early:
+            return "bailed early"
+
+        memo2 = client.state.state.find_one(dict(step="step2"))
+        if memo2 is not None:
+            result2 = memo2["result"]
+        else:
+            result2 = k8s.run(lambda: 2, nowait=False)
+            client.state.state.insert_one(dict(step="step2", result=result2))
+        
+        return result2
+
+    result1 = k8s.run(wf, state_db, True, nowait=False, image=image)
+    result2 = k8s.run(wf, state_db, False, nowait=False, image=image)
+
+    print(state_db)
+    print(result1)
+    print(result2)
+
+    k8s.delete_mongo_db(state_db["name"])
+
+    assert((result1 == "bailed early") and (result2 == 2))  # not really a good check, but we'll leave it for now.
+
+
 #def test_workflowstate():
-#
 #    def wf(state=None):
 #        if state is None:
-#            state = WorkflowState()
-#        job1 = k8s.run(lambda a, b: a+b, 1, 2)
-#        state["jobs"] = [job1]
-#        job1_result = k8s.wait(job1, timeout=30)
+#            state = k8s.WorkflowState()
+#        job1 = k8s.run(lambda a, b: a+b, 1, 2, state=state, nowait=True)
 #        state["jobs1_result"] = [job1_result]
