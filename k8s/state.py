@@ -1,11 +1,11 @@
 
-from re import A
 import jinja2
 import subprocess
 import pymongo
 import k8s.util
 import k8s.volumes
 import hashlib
+import sys
 
 
 default_mongodb_template = """apiVersion: apps/v1
@@ -144,7 +144,7 @@ class WorkflowState:
         return self.database
 
     def __setstate__(self, state):
-        return self.database
+        self.init_from_db(state)
 
     @property
     def db(self):
@@ -158,12 +158,13 @@ class WorkflowState:
 
     def memoize(self, func, *args):
         hash = self.func_2_md5(func, *args)
-        def new_func(args=args, db=self.database, hash=hash):
-            import k8s
-            state = k8s.WorkflowState(db)
+        print(hash, file=sys.stderr)
+        def new_func(args=args, state=self, hash=hash):
             if hash in state:
-                memo = state[hash]
-                return dict(memo=memo["result"])
+                result = state[hash]
+                return dict(memoized_result=result)
             else:
-                return func(*args)
+                result = func(*args)
+                state[hash] = result
+                return result
         return new_func

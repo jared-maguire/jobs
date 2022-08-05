@@ -39,13 +39,13 @@ def random_string(length):
 
 
 def get_k8s_config():
-    cmd = "kubectl config view --minify"
+    cmd = "kubectl config view"
     config = yaml.load(io.StringIO(subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8")), yaml.Loader)
     return config
 
 
 def get_current_namespace():
-    cmd = "kubectl config view --minify"
+    cmd = "kubectl config view"
     config = get_k8s_config()
     return config["contexts"][0]["context"]["namespace"]   # I might really regret the hardcoded '[0]' here.
 
