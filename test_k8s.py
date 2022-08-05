@@ -250,3 +250,20 @@ def test_stateful_workflow():
     assert(c != d)
     assert(c != a)
     assert(d != a)
+
+
+def test_freeform_state():
+    with k8s.WorkflowState() as state:
+        def wf1():
+            def leave_message():
+                state["message"] = "Hello from the trenches!"
+            def get_message():
+                return state["message"]
+            k8s.run(leave_message, nowait=False, timeout=30)
+            message = k8s.run(get_message, nowait=False, timeout=30)
+            return message
+
+        message = k8s.run(wf1, nowait=False)
+        assert(state["message"] == "Hello from the trenches!")
+
+    assert(message == "Hello from the trenches!")
