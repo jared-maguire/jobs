@@ -158,11 +158,10 @@ class WorkflowState:
 
     def memoize(self, func, *args):
         hash = self.func_2_md5(func, *args)
-        print(hash, file=sys.stderr)
         def new_func(args=args, state=self, hash=hash):
             if hash in state:
                 result = state[hash]
-                return dict(memoized_result=result)
+                return result
             else:
                 result = func(*args)
                 state[hash] = result
