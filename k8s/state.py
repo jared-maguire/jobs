@@ -111,6 +111,7 @@ class WorkflowState:
     def init_from_db(self, db):
         self.database = db
         self.name = self.database["name"]
+        self.local_mode = False
         self.client = pymongo.MongoClient(self.database["url"])
 
     def set(self, key, val):
@@ -118,15 +119,28 @@ class WorkflowState:
         return None
 
     def get(self, key):
-        result = self.client.memos.state.find_one(dict(key=key))
+        result = self.client.state.memos.find_one(dict(key=key))
         if result is None: return None
         return result["val"]
 
     def contains(self, key):
-        result = self.client.memos.state.find_one(dict(key=key))
+        result = self.client.state.memos.find_one(dict(key=key))
         return result is not None
 
+    def enter_local_mode(self):
+        self.port_forward_proc = subprocess.Popen(f"kubectl port-forward service/{self.name} 27017:27017", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.local_mode = True
+        self.local_url = "mongodb://localhost:27017"
+        self.client = pymongo.MongoClient(self.local_url)
+
+    def exit_local_mode(self):
+        if self.local_mode:
+          self.port_forward_proc.terminate()
+          self.port_forward_proc.wait()
+          self.init_from_db(self.database)  # refresh the whole thing
+
     def teardown(self):
+        self.exit_local_mode()
         subprocess.run(f"kubectl delete service {self.name}", shell=True, check=True)
         subprocess.run(f"kubectl delete deployment {self.name}", shell=True, check=True)
 
