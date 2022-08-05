@@ -114,16 +114,16 @@ class WorkflowState:
         self.client = pymongo.MongoClient(self.database["url"])
 
     def set(self, key, val):
-        self.client.state.state.update_one(dict(key=key), {"$set": {"val": val}}, upsert=True)
+        self.client.state.memos.update_one(dict(key=key), {"$set": {"val": val}}, upsert=True)
         return None
 
     def get(self, key):
-        result = self.client.state.state.find_one(dict(key=key))
+        result = self.client.memos.state.find_one(dict(key=key))
         if result is None: return None
         return result["val"]
 
     def contains(self, key):
-        result = self.client.state.state.find_one(dict(key=key))
+        result = self.client.memos.state.find_one(dict(key=key))
         return result is not None
 
     def teardown(self):
