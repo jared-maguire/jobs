@@ -6,6 +6,11 @@ import inspect
 import string
 import random
 import yaml
+import json
+import os
+import time
+
+import k8s
 
 
 def run_cmd(cmd):
@@ -43,3 +48,42 @@ def get_current_namespace():
     cmd = "kubectl config view --minify"
     config = get_k8s_config()
     return config["contexts"][0]["context"]["namespace"]   # I might really regret the hardcoded '[0]' here.
+
+
+def get_pods_from_job(job):
+    get_pods = f"kubectl get pods --selector=job-name={job} --output=json"
+    pods = json.loads(run_cmd(get_pods))
+    return pods
+
+
+def get_pod_names_from_job(job):
+    pods = get_pods_from_job(job)
+    pod_names = [p["metadata"]["name"] for p in pods["items"]]
+    return pod_names
+
+def interactive_job(lifespan):
+    # this bit is fun...
+
+    def hang(lifespan=lifespan):
+        import time
+        time.sleep(lifespan)
+
+    job = k8s.run(hang)
+
+    pods = get_pods_from_job(job)
+    phases = [pods["items"][i]["status"]["phase"]
+              for i in range(len(pods["items"]))]
+    
+
+    print(f"Wating for {job} to get started...")
+    while (phases[0] != "Running"):
+        pods = get_pods_from_job(job)
+        phases = [pods["items"][i]["status"]["phase"]
+                  for i in range(len(pods["items"]))]
+        time.sleep(1)
+        print(phases)
+
+    pod_names = get_pod_names_from_job(job)
+    pod_name = pod_names[0]
+
+    return os.system(f"kubectl exec --stdin --tty {pod_name} -- /bin/bash")
