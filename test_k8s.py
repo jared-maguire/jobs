@@ -140,8 +140,6 @@ def test_containers():
 
     def test_pysam():
         import pysam
-        import json
-        import sys
         return pysam.__file__
 
     result = k8s.wait(k8s.run(test_pysam, image=image))
@@ -167,3 +165,110 @@ def test_resource_limits():
         return
 
     assert(False)
+
+
+# Workflow State
+
+# Test that we can actually spin up and shut down a MongoDB service
+def test_mongodb():
+    # Create a container that has pymongo installed
+    image = k8s.docker_build("pymongo", ancestor="jobs", pip=["pymongo"], push=False)
+    db = k8s.create_mongo_db()
+
+    def insert_document(data, url=db["url"]):
+        import pymongo
+        client = pymongo.MongoClient(url)
+        client.state.state.insert_one(data)
+        return None
+
+    def retrieve_document(query, url=db["url"]):
+        import pymongo
+        import json
+        import bson.json_util
+        client = pymongo.MongoClient(url)
+        result = json.loads(bson.json_util.dumps(client.state.state.find_one(query)))  # little hack to work around serializing MongoDB ObjectId's
+        return result
+
+    result1 = k8s.run(insert_document, dict(hello="world", payload=42), image=image, nowait=False)
+    result2 = k8s.run(retrieve_document, dict(hello="world"), image=image, nowait=False)
+
+    print(result1)
+    print(result2)
+
+    k8s.delete_mongo_db(db)
+
+    assert(result2.__class__ == dict)
+    assert(result2["payload"] == 42)
+
+
+# This is a test of our WorkflowState class:
+def test_workflowstate():
+    wfs = k8s.WorkflowState()
+
+    def wf(wfs=wfs):
+        answers = []
+
+        wfs["foo"] = "bar"
+        answers.append(wfs["foo"])
+
+        wfs["fnord"] = "dronf"
+        answers.append(wfs["fnord"])
+
+        wfs["foo"] = "baz"
+        answers.append(wfs["foo"])
+
+        return answers
+    
+    answers = k8s.run(wf, nowait=False)
+    assert(tuple(answers) == ("bar", "dronf", "baz"))
+
+
+# Put all the workflow state together:
+def test_stateful_workflow():
+    image = k8s.docker_build("numpy", ancestor="jobs", pip=["numpy"], push=False)
+
+    with k8s.WorkflowState() as state:
+        def wf1():
+            def func():
+                import numpy
+                return numpy.random.random()
+            return k8s.run(func, state=state, timeout=30, nowait=False)  # Pass state as a parameter to run to benefit from memoization.
+
+        a = k8s.run(wf1, nowait=False, image=image)
+        b = k8s.run(wf1, nowait=False, image=image)
+
+        def wf2():
+            def func():
+                import numpy
+                return numpy.random.random()
+            return k8s.run(func, timeout=30, nowait=False)
+
+        c = k8s.run(wf2, nowait=False, image=image)
+        d = k8s.run(wf2, nowait=False, image=image)
+
+    assert(a == b)
+    assert(c != d)
+    assert(c != a)
+    assert(d != a)
+
+
+# WorkflowState can also be used as a hash table, globally available to all jobs, backed by a MongoDB
+def test_freeform_state():
+    with k8s.WorkflowState() as state:
+        def wf1():
+
+            def leave_message():
+                state["message"] = "Hello from the trenches!"
+
+            def get_message():
+                return state["message"]
+
+            k8s.run(leave_message, nowait=False, timeout=30)
+            message = k8s.run(get_message, nowait=False, timeout=30)
+            return message
+
+        message = k8s.run(wf1, nowait=False)
+        state.enter_local_mode()
+        assert(state["message"] == "Hello from the trenches!")
+
+    assert(message == "Hello from the trenches!")

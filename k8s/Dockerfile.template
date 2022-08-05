@@ -12,7 +12,7 @@ RUN conda install -y {% for package in conda %} {{package}} {% endfor %}
 {% endif %}
 
 {% if pip is defined and pip|length > 0 %}
-RUN pip install -y {% for package in pip %} {{package}} {% endfor %}
+RUN pip install {% for package in pip %} {{package}} {% endfor %}
 {% endif %}
 
 
