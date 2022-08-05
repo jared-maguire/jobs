@@ -140,8 +140,6 @@ def test_containers():
 
     def test_pysam():
         import pysam
-        import json
-        import sys
         return pysam.__file__
 
     result = k8s.wait(k8s.run(test_pysam, image=image))
