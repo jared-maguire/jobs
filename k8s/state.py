@@ -126,6 +126,10 @@ class WorkflowState:
         result = self.client.state.state.find_one(dict(key=key))
         return result is not None
 
+    def teardown(self):
+        subprocess.run(f"kubectl delete service {self.name}", shell=True, check=True)
+        subprocess.run(f"kubectl delete deployment {self.name}", shell=True, check=True)
+
     # dictionary operators:
     def __setitem__(self, key, val):
         return self.set(key, val)
@@ -145,6 +149,12 @@ class WorkflowState:
 
     def __setstate__(self, state):
         self.init_from_db(state)
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, type, value, traceback):
+      self.teardown()
 
     @property
     def db(self):

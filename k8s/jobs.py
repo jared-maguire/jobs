@@ -83,12 +83,24 @@ spec:
 
 
 def run(func, *args, image="jobs",
-        volumes=[], requests=dict(), limits=dict(),
-        nowait=True, timeout=None, job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
+        volumes=[],
+        requests=dict(),
+        limits=dict(),
+        nowait=True,
+        timeout=None,
+        job_template=default_job_template,
+        imagePullPolicy="Never",
+        test=False,
+        dryrun=False,
+        state=None,
+        debug=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
 
-    code = serialize_func(lambda a=args: func(*a))
+    if state is None:
+        code = serialize_func(lambda a=args: func(*a))
+    else:
+        code = serialize_func(state.memoize(lambda a=args: func(*a)))
 
     if test:
         func_2 = pickle.loads(base64.b64decode(code))
