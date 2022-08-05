@@ -169,6 +169,7 @@ def test_resource_limits():
 
 # Workflow State
 
+# Test that we can actually spin up and shut down a MongoDB service
 def test_mongodb():
     # Create a container that has pymongo installed
     image = k8s.docker_build("pymongo", ancestor="jobs", pip=["pymongo"], push=False)
@@ -225,34 +226,33 @@ def test_workflowstate():
 # Put all the workflow state together:
 def test_stateful_workflow():
     image = k8s.docker_build("numpy", ancestor="jobs", pip=["numpy"], push=False)
-    wfs = k8s.WorkflowState()
 
-    def wf1(wfs=wfs):
-        def func():
-            import numpy
-            return numpy.random.random()
+    with k8s.WorkflowState() as state:
+        def wf1(state=state):
+            def func():
+                import numpy
+                return numpy.random.random()
 
-        job = k8s.run(wfs.memoize(func))
-        result = k8s.wait(job, timeout=30)
-        return result
+            job = k8s.run(state.memoize(func))
+            result = k8s.wait(job, timeout=30)
+            return result
 
-    a = k8s.run(wf1, nowait=False, image=image)
-    b = k8s.run(wf1, nowait=False, image=image)
+        a = k8s.run(wf1, nowait=False, image=image)
+        b = k8s.run(wf1, nowait=False, image=image)
+
+        def wf2(state=state):
+            def func():
+                import numpy
+                return numpy.random.random()
+
+            job = k8s.run(func)
+            result = k8s.wait(job, timeout=30)
+            return result
+
+        c = k8s.run(wf2, nowait=False, image=image)
+        d = k8s.run(wf2, nowait=False, image=image)
 
     assert(a == b)
-
-    def wf2(wfs=wfs):
-        def func():
-            import numpy
-            return numpy.random.random()
-
-        job = k8s.run(func)
-        result = k8s.wait(job, timeout=30)
-        return result
-
-    c = k8s.run(wf2, nowait=False, image=image)
-    d = k8s.run(wf2, nowait=False, image=image)
-
     assert(c != d)
     assert(c != a)
     assert(d != a)
