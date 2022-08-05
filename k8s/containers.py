@@ -2,8 +2,6 @@ import subprocess
 import importlib
 import importlib.resources
 import jinja2
-import os
-import re
 
 
 def docker_push(tag):
