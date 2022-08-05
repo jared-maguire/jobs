@@ -243,9 +243,44 @@ def test_workflow_with_state():
     assert((result1 == "bailed early") and (result2 == 2))  # not really a good check, but we'll leave it for now.
 
 
-#def test_workflowstate():
-#    def wf(state=None):
-#        if state is None:
-#            state = k8s.WorkflowState()
-#        job1 = k8s.run(lambda a, b: a+b, 1, 2, state=state, nowait=True)
-#        state["jobs1_result"] = [job1_result]
+# This is a test of our WorkflowState class:
+def test_workflowstate():
+    wfs = k8s.WorkflowState()
+
+    def wf(wfs=wfs):
+        answers = []
+
+        wfs["foo"] = "bar"
+        answers.append(wfs["foo"])
+
+        wfs["fnord"] = "dronf"
+        answers.append(wfs["fnord"])
+
+        wfs["foo"] = "baz"
+        answers.append(wfs["foo"])
+
+        return answers
+    
+    answers = k8s.run(wf, nowait=False)
+    assert(tuple(answers) == ("bar", "dronf", "baz"))
+
+
+"""
+# Put all the workflow state together:
+def test_stateful_workflow():
+    wfs = k8s.WorkflowState()
+
+    def func():
+        return 1
+
+    def wf(func=func, wfs=wfs):
+        job = k8s.run(wfs.memoize(func))
+        result = k8s.wait(job, timeout=30)
+        return result
+
+    a = k8s.run(wf, nowait=False)
+    b = k8s.run(wf, nowait=False)
+
+    assert(a.__class__ == int)
+    assert(b.__class__ == dict)
+"""
