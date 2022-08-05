@@ -102,43 +102,68 @@ def mongo_db_port_forward(db):
 
 
 # Note: this class only works within pods right now.
-class StatefulWorkflow:
+class WorkflowState:
     def __init__(self, db=None):
         if db is None:
-          self.db = create_mongo_db()
-        else:
-          self.db = db
-        self.name = db["url"]
+          db = create_mongo_db()
+        return self.init_from_db(db)
+
+    def init_from_db(self, db):
+        self.database = db
+        self.name = self.database["name"]
+        self.client = pymongo.MongoClient(self.database["url"])
 
     def set(self, key, val):
-        client = pymongo.client(self.db["url"])
-        client.state.state.update(dict(key=key), dict(val=val), dict(upsert=True))
+        self.client.state.state.update_one(dict(key=key), {"$set": {"val": val}}, upsert=True)
         return None
 
     def get(self, key):
-        client = pymongo.client(self.db["url"])
-        result = client.state.state.find_one(dict(key=key))
+        result = self.client.state.state.find_one(dict(key=key))
+        if result is None: return None
         return result["val"]
 
     def contains(self, key):
-        client = pymongo.client(self.db["url"])
-        result = client.state.state.find_one(dict(key=key))
+        result = self.client.state.state.find_one(dict(key=key))
         return result is not None
 
+    # dictionary operators:
     def __setitem__(self, key, val):
         return self.set(key, val)
 
     def __getitem__(self, key):
         return self.get(key)
 
+    def __contains__(self, key):
+        return self.contains(key)
+
     def __delitem__(self, key):
         raise NotImplementedError
 
-    # this isn't quite right; WIP
-    def run(func, *args, **kwargs):
+    # (de)pickling procedures:    
+    def __getstate__(self):
+        return self.database
+
+    def __setstate__(self, state):
+        return self.database
+
+    @property
+    def db(self):
+        return self.database
+
+    @staticmethod
+    def func_2_md5(func, *args):
         code = k8s.util.serialize_func(lambda a=args: func(*a))
         hash = hashlib.sha1(code.encode("utf-8")).hexdigest()
-        if self.contains(hash):
-            return self.get(hash)["val"]
-        else:
-            return k8s.jobs.run(func, *args, **kwargs)
+        return hash
+
+    def memoize(self, func, *args):
+        hash = self.func_2_md5(func, *args)
+        def new_func(args=args, db=self.database, hash=hash):
+            import k8s
+            state = k8s.WorkflowState(db)
+            if hash in state:
+                memo = state[hash]
+                return dict(memo=memo["result"])
+            else:
+                return func(*args)
+        return new_func
