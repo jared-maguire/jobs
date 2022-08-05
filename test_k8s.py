@@ -228,26 +228,20 @@ def test_stateful_workflow():
     image = k8s.docker_build("numpy", ancestor="jobs", pip=["numpy"], push=False)
 
     with k8s.WorkflowState() as state:
-        def wf1(state=state):
+        def wf1():
             def func():
                 import numpy
                 return numpy.random.random()
-
-            job = k8s.run(state.memoize(func))
-            result = k8s.wait(job, timeout=30)
-            return result
+            return k8s.run(func, state=state, timeout=30, nowait=False)  # Pass state as a parameter to run to benefit from memoization.
 
         a = k8s.run(wf1, nowait=False, image=image)
         b = k8s.run(wf1, nowait=False, image=image)
 
-        def wf2(state=state):
+        def wf2():
             def func():
                 import numpy
                 return numpy.random.random()
-
-            job = k8s.run(func)
-            result = k8s.wait(job, timeout=30)
-            return result
+            return k8s.run(func, timeout=30, nowait=False)
 
         c = k8s.run(wf2, nowait=False, image=image)
         d = k8s.run(wf2, nowait=False, image=image)
