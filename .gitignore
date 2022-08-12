@@ -8,3 +8,5 @@ k8s/counts.txt
 .vs/
 .vscode/
 .vscode/settings.json
+./build/
+./k8s.egg-info/
