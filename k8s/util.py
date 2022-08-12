@@ -88,17 +88,3 @@ def interactive_job(lifespan):
     pod_name = pod_names[0]
 
     return os.system(f"kubectl exec --stdin --tty {pod_name} -- /bin/bash")
-
-
-def deep_reload():
-    # Deep stuff:
-    import k8s
-    exec("importlib.reload(k8s.util)")
-    exec("importlib.reload(k8s.configs)")
-    exec("importlib.reload(k8s.containers)")
-    exec("importlib.reload(k8s.jobs)")
-    exec("importlib.reload(k8s.volumes)")
-    exec("importlib.reload(k8s.containers)")
-    exec("importlib.reload(k8s.state)")
-    exec("importlib.reload(k8s)")
-    return None

@@ -33,7 +33,6 @@ def save_config(config, fname=default_fname):
         os.mkdir(dir)
     with open(fname, "w") as fp:
         json.dump(config, fp)
-    k8s.util.deep_reload()
 
 
 def reset_config(fname=default_fname):
