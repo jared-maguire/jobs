@@ -3,6 +3,8 @@ import os
 import json
 import subprocess
 
+import k8s.util
+
 
 def get_homedir():
     return os.environ.get("HOME", os.environ.get("USERPROFILE", None))
@@ -33,6 +35,7 @@ def save_config(config, fname=default_fname):
         os.mkdir(dir)
     with open(fname, "w") as fp:
         json.dump(config, fp)
+    k8s.util.deep_reload()
 
 
 def reset_config(fname=default_fname):
