@@ -91,13 +91,14 @@ def interactive_job(lifespan):
 
 
 def deep_reload():
-    # Order Matters Here:
-    importlib.reload(k8s.containers)
-    importlib.reload(k8s.jobs)
-    importlib.reload(k8s.volumes)
-    importlib.reload(k8s.containers)
-    importlib.reload(k8s.state)
-    importlib.reload(k8s.util)
-    importlib.reload(k8s.configs)
-    importlib.reload(k8s)
+    # Deep stuff:
+    import k8s
+    exec("importlib.reload(k8s.util)")
+    exec("importlib.reload(k8s.configs)")
+    exec("importlib.reload(k8s.containers)")
+    exec("importlib.reload(k8s.jobs)")
+    exec("importlib.reload(k8s.volumes)")
+    exec("importlib.reload(k8s.containers)")
+    exec("importlib.reload(k8s.state)")
+    exec("importlib.reload(k8s)")
     return None
