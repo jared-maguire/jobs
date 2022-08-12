@@ -12,6 +12,7 @@ import jinja2
 import subprocess
 
 from k8s.util import *
+from k8s.configs import *
 
 
 def check_cluster_config():
@@ -19,6 +20,9 @@ def check_cluster_config():
                                                     check=True,
                                                     stdout=subprocess.PIPE).stdout.decode("utf-8")
     return svc_acct
+
+
+current_config = load_config()
 
 
 # This should be in a file inside the package, but I'm having problems with that right now...
@@ -82,7 +86,8 @@ spec:
 """
 
 
-def run(func, *args, image="jobs",
+def run(func, *args,
+        image=current_config["docker_image_prefix"] + "jobs",
         volumes=[],
         requests=dict(),
         limits=dict(),
@@ -93,6 +98,7 @@ def run(func, *args, image="jobs",
         test=False,
         dryrun=False,
         state=None,
+        config=current_config,
         debug=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
@@ -108,7 +114,13 @@ def run(func, *args, image="jobs",
 
     t = jinja2.Template(job_template)
     s = random_string(5)
-    j = t.render(name=f"job-{s}", code=code, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy)
+    j = t.render(name=f"job-{s}",
+                 code=code,
+                 image=image,
+                 requests=requests,
+                 limits=limits,
+                 volumes=volumes,
+                 imagePullPolicy=imagePullPolicy)
 
     if dryrun:
         return j
