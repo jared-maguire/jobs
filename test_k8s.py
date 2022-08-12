@@ -272,3 +272,8 @@ def test_freeform_state():
         assert(state["message"] == "Hello from the trenches!")
 
     assert(message == "Hello from the trenches!")
+
+
+# Module Config Files (WIP)
+def test_configs():
+    return None
