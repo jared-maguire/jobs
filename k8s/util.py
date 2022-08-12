@@ -9,6 +9,7 @@ import yaml
 import json
 import os
 import time
+import importlib
 
 import k8s
 
@@ -87,3 +88,16 @@ def interactive_job(lifespan):
     pod_name = pod_names[0]
 
     return os.system(f"kubectl exec --stdin --tty {pod_name} -- /bin/bash")
+
+
+def deep_reload():
+    # Order Matters Here:
+    importlib.reload(k8s.containers)
+    importlib.reload(k8s.jobs)
+    importlib.reload(k8s.volumes)
+    importlib.reload(k8s.containers)
+    importlib.reload(k8s.state)
+    importlib.reload(k8s.util)
+    importlib.reload(k8s.configs)
+    importlib.reload(k8s)
+    return None
