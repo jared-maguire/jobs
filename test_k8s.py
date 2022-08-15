@@ -272,3 +272,22 @@ def test_freeform_state():
         assert(state["message"] == "Hello from the trenches!")
 
     assert(message == "Hello from the trenches!")
+
+
+# Module Config Files
+def test_configs():
+    def test_config_job():
+        import k8s
+        original = k8s.load_config()
+        new_config = original.copy()
+        new_config["fnord"] = "dronf"
+        if original == new_config:
+            return "fail-1"
+        k8s.save_config(new_config)
+        new_new_config = k8s.load_config()
+        if new_new_config != new_config:
+            return "fail-2"
+        return "pass"
+
+    result = k8s.run(test_config_job, nowait=False)
+    assert(result == "pass")
