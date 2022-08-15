@@ -17,6 +17,7 @@ from k8s.util import *
 def check_cluster_config():
     svc_acct = "internal-kubectl" in subprocess.run("kubectl get serviceaccounts",
                                                     check=True,
+                                                    shell=True,
                                                     stdout=subprocess.PIPE).stdout.decode("utf-8")
     return svc_acct
 
