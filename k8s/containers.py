@@ -11,7 +11,7 @@ def docker_push(tag):
 def docker_template(tag, ancestor=None, conda=[], pip=[], channels=[], push=True):
     #cwd = re.sub("^/C", "/c", re.sub("^", "/", re.sub(":", "", re.sub(r"\\", "/", os.getcwd()))))
     template = jinja2.Template(importlib.resources.read_text("k8s", "Dockerfile.template"))
-    rendered = template.render(conda=conda, pip=pip, channels=channels)
+    rendered = template.render(conda=conda, pip=pip, channels=channels, ancestor=ancestor)
     return rendered
 
 
