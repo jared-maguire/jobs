@@ -80,7 +80,7 @@ def test_ngs_workflow():
 def test_volumes():
     def wf():
         import json
-        volume = k8s.create_volume("10Mi")
+        volume = k8s.create_volume("10Mi", accessModes=["ReadOnlyMany"])
 
         def func1():
             with open(f"/mnt/{volume}/test.json", "w") as fp:
@@ -92,6 +92,8 @@ def test_volumes():
 
         k8s.wait(k8s.run(func1, volumes=[volume]))
         result = k8s.wait(k8s.run(func2, volumes=[volume]))
+
+        k8s.delete_volume(volume)
                                   
         return result
 
@@ -127,6 +129,9 @@ def test_rwx_volumes():
         job2 = k8s.run(writer, volumes=[volume])
         k8s.wait(job2)
         result = k8s.wait(job1)
+
+        k8s.delete_volume(volume)
+
         return result
 
     result = wf()
@@ -136,7 +141,7 @@ def test_rwx_volumes():
 # containers
 
 def test_containers():
-    image = k8s.docker_build("pysam", ancestor="jobs", conda=["pysam"], channels=["bioconda"], push=False)
+    image = k8s.docker_build("pysam", conda=["pysam"], channels=["bioconda"])
 
     def test_pysam():
         import pysam
@@ -172,7 +177,7 @@ def test_resource_limits():
 # Test that we can actually spin up and shut down a MongoDB service
 def test_mongodb():
     # Create a container that has pymongo installed
-    image = k8s.docker_build("pymongo", ancestor="jobs", pip=["pymongo"], push=False)
+    image = k8s.docker_build("pymongo", pip=["pymongo"])
     db = k8s.create_mongo_db()
 
     def insert_document(data, url=db["url"]):
@@ -225,7 +230,7 @@ def test_workflowstate():
 
 # Put all the workflow state together:
 def test_stateful_workflow():
-    image = k8s.docker_build("numpy", ancestor="jobs", pip=["numpy"], push=False)
+    image = k8s.docker_build("numpy", pip=["numpy"])
 
     with k8s.WorkflowState() as state:
         def wf1():
@@ -275,19 +280,19 @@ def test_freeform_state():
 
 
 # Module Config Files
-def test_configs():
-    def test_config_job():
-        import k8s
-        original = k8s.load_config()
-        new_config = original.copy()
-        new_config["fnord"] = "dronf"
-        if original == new_config:
-            return "fail-1"
-        k8s.save_config(new_config)
-        new_new_config = k8s.load_config()
-        if new_new_config != new_config:
-            return "fail-2"
-        return "pass"
-
-    result = k8s.run(test_config_job, nowait=False)
-    assert(result == "pass")
+#def test_configs():
+#    def test_config_job():
+#        import k8s
+#        original = k8s.load_config()
+#        new_config = original.copy()
+#        new_config["fnord"] = "dronf"
+#        if original == new_config:
+#            return "fail-1"
+#        k8s.save_config(new_config)
+#        new_new_config = k8s.load_config()
+#        if new_new_config != new_config:
+#            return "fail-2"
+#        return "pass"
+#
+#    result = k8s.run(test_config_job, nowait=False)
+#    assert(result == "pass")

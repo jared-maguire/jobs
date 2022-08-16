@@ -128,6 +128,7 @@ class WorkflowState:
         return result is not None
 
     def enter_local_mode(self):
+        # TODO: pick a random open port to forward through, in case 27017 is in use.
         self.port_forward_proc = subprocess.Popen(f"kubectl port-forward service/{self.name} 27017:27017", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.local_mode = True
         self.local_url = "mongodb://localhost:27017"
@@ -168,6 +169,9 @@ class WorkflowState:
       return self
 
     def __exit__(self, type, value, traceback):
+      self.teardown()
+
+    def __del__(self):
       self.teardown()
 
     @property

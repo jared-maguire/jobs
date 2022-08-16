@@ -65,3 +65,10 @@ pip install .
 docker build -t jobs .         # build the default docker image that jobs will run in
 python -m k8s config -apply    # create a service account on the cluster that allows jobs to submit other jobs
 ```
+
+
+# Some cloud-specific notes:
+
+## GKE
+
+- Provisioning ReadWriteMany volumes on GKE is quite slow. Avoid it if you can.
