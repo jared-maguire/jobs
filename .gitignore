@@ -8,3 +8,16 @@ k8s/counts.txt
 .vs/
 .vscode/
 .vscode/settings.json
+k8s.egg-info/top_level.txt
+k8s.egg-info/SOURCES.txt
+k8s.egg-info/requires.txt
+k8s.egg-info/PKG-INFO
+k8s.egg-info/dependency_links.txt
+build/lib/k8s/volumes.py
+build/lib/k8s/util.py
+build/lib/k8s/state.py
+build/lib/k8s/jobs.py
+build/lib/k8s/containers.py
+build/lib/k8s/configs.py
+build/lib/k8s/__main__.py
+build/lib/k8s/__init__.py
