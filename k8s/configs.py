@@ -16,6 +16,7 @@ default_fname = get_homedir() + f"/.sk8s/config.json"
 default_config = dict(
                       docker_image_prefix="",
                       docker_default_pull_policy="Never",
+                      docker_build_default_push_policy=False,
                      ) 
 
 
