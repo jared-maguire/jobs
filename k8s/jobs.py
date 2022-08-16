@@ -91,7 +91,7 @@ def run(func, *args,
         nowait=True,
         timeout=None,
         job_template=default_job_template,
-        imagePullPolicy="Never",
+        imagePullPolicy=None,
         test=False,
         dryrun=False,
         state=None,
@@ -105,6 +105,9 @@ def run(func, *args,
 
     if image is None:
         image = config["docker_image_prefix"] + "jobs"
+
+    if imagePullPolicy is None:
+        imagePullPolicy = config["docker_default_pull_policy"]
 
     if state is None:
         code = k8s.util.serialize_func(lambda a=args: func(*a))
