@@ -53,6 +53,9 @@ spec:
 
           func = k8s.deserialize_func("{{code}}")
 
+          config = {{config}}
+          k8s.configs.save_config(config)
+
           json.dump(func(), sys.stdout)
 
         {%- if (requests is defined and requests|length > 0) or (limits is defined and limits|length > 0) %}
@@ -96,9 +99,8 @@ def run(func, *args,
         dryrun=False,
         state=None,
         config=None,
+        export_config=True,
         debug=False):
-    # Should do it this way, but having problems. Reverting for now:
-    # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
 
     if config is None:
         config = k8s.configs.load_config()
@@ -126,6 +128,7 @@ def run(func, *args,
                  requests=requests,
                  limits=limits,
                  volumes=volumes,
+                 config=config if export_config else k8s.configs.default_config,
                  imagePullPolicy=imagePullPolicy)
 
     if dryrun:
@@ -183,9 +186,15 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         return list(logs.values())[0]
 
 
-def map(func, iterable, 
-        requests=dict(), limits=dict(),
-        image="jobs", imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
+def map(func,
+        iterable, 
+        requests=dict(),
+        limits=dict(),
+        image=None,
+        imagePullPolicy=None,
+        timeout=None,
+        nowait=False,
+        verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
     job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]

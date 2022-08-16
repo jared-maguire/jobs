@@ -29,7 +29,16 @@ if __name__ == '__main__':
             print(config)
         if args.check:
             print("Cluster configured:", k8s.check_cluster_config())
-        if args.apply:
+        elif args.apply:
             subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
+
+    if args.command == "config-gke":
+        config = importlib.resources.read_text("k8s", "cluster_config.yaml")
+        import k8s.clouds.gke
+        if args.dryrun:
+            print(k8s.clouds.gke.config_cluster(dryrun=True))
+        elif args.apply:
+            k8s.clouds.gke.config_cluster(dryrun=False)
+
     if args.command == "containers":
         raise NotImplementedError("container setup not implemented yet")
