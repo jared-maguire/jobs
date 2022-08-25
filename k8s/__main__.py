@@ -30,6 +30,6 @@ if __name__ == '__main__':
         if args.check:
             print("Cluster configured:", k8s.check_cluster_config())
         if args.apply:
-            subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True) 
+            subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
     if args.command == "containers":
         raise NotImplementedError("container setup not implemented yet")
