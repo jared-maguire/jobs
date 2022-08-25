@@ -12,9 +12,11 @@ def get_homedir():
 
 default_fname = get_homedir() + f"/.sk8s/config.json"
 
-
+# These defaults are good for a local cluster
 default_config = dict(
                       docker_image_prefix="",
+                      docker_default_pull_policy="Never",
+                      docker_build_default_push_policy=False,
                      ) 
 
 
