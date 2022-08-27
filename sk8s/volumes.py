@@ -1,6 +1,6 @@
 import jinja2
 import subprocess
-import k8s.util as util
+import sk8s.util as util
 
 
 default_volume_template = """apiVersion: v1

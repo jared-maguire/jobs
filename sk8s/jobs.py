@@ -11,7 +11,7 @@ import json
 import jinja2
 import subprocess
 
-import k8s
+import sk8s
 
 
 def check_cluster_config():
@@ -98,10 +98,10 @@ def run(func, *args,
         config=None,
         debug=False):
     # Should do it this way, but having problems. Reverting for now:
-    # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
+    # job_template = importlib.resources.read_text("sk8s", "job_template.yaml")
 
     if config is None:
-        config = k8s.configs.load_config()
+        config = sk8s.configs.load_config()
 
     if image is None:
         image = config["docker_image_prefix"] + "jobs"
@@ -110,16 +110,16 @@ def run(func, *args,
         imagePullPolicy = config["docker_default_pull_policy"]
 
     if state is None:
-        code = k8s.util.serialize_func(lambda a=args: func(*a))
+        code = sk8s.util.serialize_func(lambda a=args: func(*a))
     else:
-        code = k8s.util.serialize_func(state.memoize(lambda a=args: func(*a)))
+        code = sk8s.util.serialize_func(state.memoize(lambda a=args: func(*a)))
 
     if test:
         func_2 = pickle.loads(base64.b64decode(code))
         return func_2()
 
     t = jinja2.Template(job_template)
-    s = k8s.util.random_string(5)
+    s = sk8s.util.random_string(5)
     j = t.render(name=f"job-{s}",
                  code=code,
                  image=image,
@@ -155,7 +155,7 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         current = time.time()
         if (timeout is not None) and (current - start) > timeout:
             raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
-        result = json.loads(k8s.util.run_cmd(get_job))
+        result = json.loads(sk8s.util.run_cmd(get_job))
         if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
             raise RuntimeError(f"k8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
@@ -166,15 +166,15 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
 
     # Collect the names of the pods:
     get_pods = f"kubectl get pods --selector=job-name={job_name} --output=json"
-    pods = json.loads(k8s.util.run_cmd(get_pods))
+    pods = json.loads(sk8s.util.run_cmd(get_pods))
     pod_names = [p["metadata"]["name"] for p in pods["items"]]
 
     logs = {}
     for pod_name in pod_names:
-        logs[pod_name] = json.loads(k8s.util.run_cmd(f"kubectl logs {pod_name}"))
+        logs[pod_name] = json.loads(sk8s.util.run_cmd(f"kubectl logs {pod_name}"))
 
     if delete:
-        k8s.util.run_cmd(f"kubectl delete job {job_name}")
+        sk8s.util.run_cmd(f"kubectl delete job {job_name}")
 
     if verbose:
         return logs

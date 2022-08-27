@@ -1,14 +1,14 @@
 from setuptools import setup
 
 setup(
-    name='k8s',
+    name='sk8s',
     version='0.1.0',    
     description='Run python functions on Kubernetes',
     url='https://github.com/jared-maguire/jobs',
     author='Jared Maguire',
     author_email='jared.maguire@gmail.com',
     license='MIT',
-    packages=['k8s'],
+    packages=['sk8s'],
     install_requires=['dill',
                       'requests',
                       'jinja2',

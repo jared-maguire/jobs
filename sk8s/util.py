@@ -11,7 +11,7 @@ import os
 import time
 import importlib
 
-import k8s
+import sk8s
 
 
 def run_cmd(cmd):
@@ -69,7 +69,7 @@ def interactive_job(lifespan):
         import time
         time.sleep(lifespan)
 
-    job = k8s.run(hang)
+    job = sk8s.run(hang)
 
     pods = get_pods_from_job(job)
     phases = [pods["items"][i]["status"]["phase"]
