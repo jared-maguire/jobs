@@ -1,9 +1,9 @@
-import k8s
+import sk8s
 import os
 import json
 import subprocess
 
-import k8s.util
+import sk8s.util
 
 
 def get_homedir():
