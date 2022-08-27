@@ -49,9 +49,9 @@ spec:
           import base64
           import json
           import sys
-          import k8s
+          import sk8s
 
-          func = k8s.deserialize_func("{{code}}")
+          func = sk8s.deserialize_func("{{code}}")
 
           json.dump(func(), sys.stdout)
 
