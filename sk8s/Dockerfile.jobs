@@ -25,7 +25,6 @@ RUN pip install dill flask jupyter requests numpy scipy pandas pyyaml pymongo
 # Installing in dev mode here is a hack to work around
 # the fact that MANIFEST.in doesn't seem to be working in linux :-/
 # also, WARNING: relative paths are a bit surprising in this docker setup.
-ARG CACHEBUST=2 
 RUN pip install git+https://github.com/jared-maguire/jobs.git@{{branch|default('master', True)}}
 #COPY . /app/module/sk8s     
 #RUN cd /app/module && pip install -e .   
