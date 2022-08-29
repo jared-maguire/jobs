@@ -54,7 +54,7 @@ spec:
           func = sk8s.deserialize_func("{{code}}")
 
           config = {{config}}
-          k8s.configs.save_config(config)
+          sk8s.configs.save_config(config)
 
           json.dump(func(), sys.stdout)
 
