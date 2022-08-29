@@ -1,7 +1,7 @@
 import jinja2
 import subprocess
-import k8s.util as util
-import k8s.configs as configs
+import sk8s.configs as configs
+import sk8s.util as util
 
 
 # NOTE: To get ReadWriteMany volumes on these providers, you need to do some cluster config:

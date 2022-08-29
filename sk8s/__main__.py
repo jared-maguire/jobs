@@ -1,4 +1,4 @@
-import k8s
+import sk8s
 
 import argparse
 import importlib
@@ -6,7 +6,7 @@ import subprocess
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser("k8s")
+    parser = argparse.ArgumentParser("sk8s")
     subparsers = parser.add_subparsers(help="commands", dest="command")
 
     config = subparsers.add_parser('config', help='configure k8s cluster')
@@ -24,21 +24,21 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.command == "config":
-        config = importlib.resources.read_text("k8s", "cluster_config.yaml")
+        config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
         if args.dryrun:
             print(config)
         if args.check:
-            print("Cluster configured:", k8s.check_cluster_config())
+            print("Cluster configured:", sk8s.check_cluster_config())
         elif args.apply:
             subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
 
     if args.command == "config-gke":
         config = importlib.resources.read_text("k8s", "cluster_config.yaml")
-        import k8s.clouds.gke
+        import sk8s.clouds.gke
         if args.dryrun:
-            print(k8s.clouds.gke.config_cluster(dryrun=True))
+            print(sk8s.clouds.gke.config_cluster(dryrun=True))
         elif args.apply:
-            k8s.clouds.gke.config_cluster(dryrun=False)
+            sk8s.clouds.gke.config_cluster(dryrun=False)
 
     if args.command == "containers":
         raise NotImplementedError("container setup not implemented yet")
