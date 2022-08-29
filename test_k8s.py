@@ -1,31 +1,31 @@
 #!/usr/bin/env python
 
-import k8s
+import sk8s
 
 
 ## Cluster
 
 def test_cluster_config():
-    assert(k8s.check_cluster_config())
+    assert(sk8s.check_cluster_config())
 
 
 ## Jobs
 
 def test_run_and_wait():
-    result = k8s.wait(k8s.run(lambda: "Hooray"), timeout=30)
+    result = sk8s.wait(sk8s.run(lambda: "Hooray"), timeout=30)
     assert(result=="Hooray")
 
 
 def test_run_and_wait_2():
-    result = k8s.run(lambda: "Hooray", nowait=False, timeout=30)
+    result = sk8s.run(lambda: "Hooray", nowait=False, timeout=30)
     assert(result=="Hooray")
 
 
 def test_fail():
     import os
     try:
-        job = k8s.run(lambda: 1/0)
-        job = k8s.wait(job)
+        job = sk8s.run(lambda: 1/0)
+        job = sk8s.wait(job)
     except RuntimeError:
         assert(os.system(f"kubectl delete job {job}") == 0)
         return
@@ -33,7 +33,7 @@ def test_fail():
 
 
 def test_map():
-    results = k8s.map(lambda i: i*2, (0,1,2))
+    results = sk8s.map(lambda i: i*2, (0,1,2))
     assert(tuple(results) == (0,2,4))
 
 
@@ -42,30 +42,30 @@ def test_imports():
         import numpy
         return numpy.pi
 
-    result = k8s.wait(k8s.run(pi), timeout=30)
+    result = sk8s.wait(sk8s.run(pi), timeout=30)
 
     import numpy
     assert(result == numpy.pi)
 
 
 def test_deps():
-    job1 = k8s.run(lambda: "job-1")
-    job2 = k8s.run(lambda result=k8s.wait(job1): "job-2 " + result) 
-    result = k8s.wait(job2, timeout=30)
+    job1 = sk8s.run(lambda: "job-1")
+    job2 = sk8s.run(lambda result=sk8s.wait(job1): "job-2 " + result) 
+    result = sk8s.wait(job2, timeout=30)
     assert(result == "job-2 job-1")
 
 
 def test_simple_workflow():
     def wf():
-        jobs1 = k8s.map(lambda i: i, range(3), nowait=True)
-        return k8s.wait(k8s.run(lambda inputs: sum(inputs), map(k8s.wait, jobs1)), timeout=30)
-    result = k8s.wait(k8s.run(wf), timeout=60)
+        jobs1 = sk8s.map(lambda i: i, range(3), nowait=True)
+        return sk8s.wait(sk8s.run(lambda inputs: sum(inputs), map(sk8s.wait, jobs1)), timeout=30)
+    result = sk8s.wait(sk8s.run(wf), timeout=60)
     assert(result == 3)
 
 
 def test_nested_lambda():
-    job = k8s.run(lambda i, j: 10 * k8s.wait(k8s.run(lambda a=i, b=j: a+b)), 1,2)
-    result = k8s.wait(job)
+    job = sk8s.run(lambda i, j: 10 * sk8s.wait(sk8s.run(lambda a=i, b=j: a+b)), 1,2)
+    result = sk8s.wait(job)
     assert(result == 30)
 
 
@@ -80,7 +80,7 @@ def test_ngs_workflow():
 def test_volumes():
     def wf():
         import json
-        volume = k8s.create_volume("10Mi", accessModes=["ReadOnlyMany"])
+        volume = sk8s.create_volume("10Mi", accessModes=["ReadOnlyMany"])
 
         def func1():
             with open(f"/mnt/{volume}/test.json", "w") as fp:
@@ -90,10 +90,8 @@ def test_volumes():
             with open(f"/mnt/{volume}/test.json") as fp:
                 return json.load(fp)
 
-        k8s.wait(k8s.run(func1, volumes=[volume]))
-        result = k8s.wait(k8s.run(func2, volumes=[volume]))
-
-        k8s.delete_volume(volume)
+        sk8s.wait(sk8s.run(func1, volumes=[volume]))
+        result = sk8s.wait(sk8s.run(func2, volumes=[volume]))
                                   
         return result
 
@@ -105,7 +103,7 @@ def test_rwx_volumes():
     import time
 
     def wf():
-        volume = k8s.create_volume("1Mi")
+        volume = sk8s.create_volume("1Mi")
 
         def waiter():
             import json, os, time
@@ -124,13 +122,14 @@ def test_rwx_volumes():
                 json.dump("the writer has writ", fp)
             return True
 
-        job1 = k8s.run(waiter, volumes=[volume])
+        job1 = sk8s.run(waiter, volumes=[volume])
         time.sleep(5)
-        job2 = k8s.run(writer, volumes=[volume])
-        k8s.wait(job2)
-        result = k8s.wait(job1)
 
-        k8s.delete_volume(volume)
+        job2 = sk8s.run(writer, volumes=[volume])
+
+        sk8s.wait(job2)
+        result = sk8s.wait(job1)
+        sk8s.delete_volume(volume)
 
         return result
 
@@ -141,13 +140,13 @@ def test_rwx_volumes():
 # containers
 
 def test_containers():
-    image = k8s.docker_build("pysam", conda=["pysam"], channels=["bioconda"])
+    image = sk8s.docker_build("pysam", conda=["pysam"], channels=["bioconda"])
 
     def test_pysam():
         import pysam
         return pysam.__file__
 
-    result = k8s.wait(k8s.run(test_pysam, image=image))
+    result = sk8s.wait(sk8s.run(test_pysam, image=image))
     assert(result.__class__ == str)
 
 
@@ -160,11 +159,11 @@ def test_resource_limits():
         numpy.random.bytes(size * int(1e6))
         return True
 
-    assert(k8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, nowait=False, timeout=20))
+    assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, nowait=False, timeout=20))
 
     try:
-        job = k8s.run(allocate_memory, 1000, requests={"memory": "6Mi", "cpu": 1}, limits={"memory":"6Mi"})
-        k8s.wait(job)
+        job = sk8s.run(allocate_memory, 1000, requests={"memory": "6Mi", "cpu": 1}, limits={"memory":"6Mi"})
+        sk8s.wait(job)
     except RuntimeError:
         assert(os.system(f"kubectl delete job {job}") == 0)
         return
@@ -177,8 +176,8 @@ def test_resource_limits():
 # Test that we can actually spin up and shut down a MongoDB service
 def test_mongodb():
     # Create a container that has pymongo installed
-    image = k8s.docker_build("pymongo", pip=["pymongo"])
-    db = k8s.create_mongo_db()
+    image = sk8s.docker_build("pymongo", pip=["pymongo"])
+    db = sk8s.create_mongo_db()
 
     def insert_document(data, url=db["url"]):
         import pymongo
@@ -194,13 +193,13 @@ def test_mongodb():
         result = json.loads(bson.json_util.dumps(client.state.state.find_one(query)))  # little hack to work around serializing MongoDB ObjectId's
         return result
 
-    result1 = k8s.run(insert_document, dict(hello="world", payload=42), image=image, nowait=False)
-    result2 = k8s.run(retrieve_document, dict(hello="world"), image=image, nowait=False)
+    result1 = sk8s.run(insert_document, dict(hello="world", payload=42), image=image, nowait=False)
+    result2 = sk8s.run(retrieve_document, dict(hello="world"), image=image, nowait=False)
 
     print(result1)
     print(result2)
 
-    k8s.delete_mongo_db(db)
+    sk8s.delete_mongo_db(db)
 
     assert(result2.__class__ == dict)
     assert(result2["payload"] == 42)
@@ -208,7 +207,7 @@ def test_mongodb():
 
 # This is a test of our WorkflowState class:
 def test_workflowstate():
-    wfs = k8s.WorkflowState()
+    wfs = sk8s.WorkflowState()
 
     def wf(wfs=wfs):
         answers = []
@@ -224,32 +223,32 @@ def test_workflowstate():
 
         return answers
     
-    answers = k8s.run(wf, nowait=False)
+    answers = sk8s.run(wf, nowait=False)
     assert(tuple(answers) == ("bar", "dronf", "baz"))
 
 
 # Put all the workflow state together:
 def test_stateful_workflow():
-    image = k8s.docker_build("numpy", pip=["numpy"])
+    image = sk8s.docker_build("numpy", pip=["numpy"])
 
-    with k8s.WorkflowState() as state:
+    with sk8s.WorkflowState() as state:
         def wf1():
             def func():
                 import numpy
                 return numpy.random.random()
-            return k8s.run(func, state=state, timeout=30, nowait=False)  # Pass state as a parameter to run to benefit from memoization.
+            return sk8s.run(func, state=state, timeout=30, nowait=False)  # Pass state as a parameter to run to benefit from memoization.
 
-        a = k8s.run(wf1, nowait=False, image=image)
-        b = k8s.run(wf1, nowait=False, image=image)
+        a = sk8s.run(wf1, nowait=False, image=image)
+        b = sk8s.run(wf1, nowait=False, image=image)
 
         def wf2():
             def func():
                 import numpy
                 return numpy.random.random()
-            return k8s.run(func, timeout=30, nowait=False)
+            return sk8s.run(func, timeout=30, nowait=False)
 
-        c = k8s.run(wf2, nowait=False, image=image)
-        d = k8s.run(wf2, nowait=False, image=image)
+        c = sk8s.run(wf2, nowait=False, image=image)
+        d = sk8s.run(wf2, nowait=False, image=image)
 
     assert(a == b)
     assert(c != d)
@@ -259,7 +258,7 @@ def test_stateful_workflow():
 
 # WorkflowState can also be used as a hash table, globally available to all jobs, backed by a MongoDB
 def test_freeform_state():
-    with k8s.WorkflowState() as state:
+    with sk8s.WorkflowState() as state:
         def wf1():
 
             def leave_message():
@@ -268,11 +267,11 @@ def test_freeform_state():
             def get_message():
                 return state["message"]
 
-            k8s.run(leave_message, nowait=False, timeout=30)
-            message = k8s.run(get_message, nowait=False, timeout=30)
+            sk8s.run(leave_message, nowait=False, timeout=30)
+            message = sk8s.run(get_message, nowait=False, timeout=30)
             return message
 
-        message = k8s.run(wf1, nowait=False)
+        message = sk8s.run(wf1, nowait=False)
         state.enter_local_mode()
         assert(state["message"] == "Hello from the trenches!")
 
@@ -280,19 +279,19 @@ def test_freeform_state():
 
 
 # Module Config Files
-#def test_configs():
-#    def test_config_job():
-#        import k8s
-#        original = k8s.load_config()
-#        new_config = original.copy()
-#        new_config["fnord"] = "dronf"
-#        if original == new_config:
-#            return "fail-1"
-#        k8s.save_config(new_config)
-#        new_new_config = k8s.load_config()
-#        if new_new_config != new_config:
-#            return "fail-2"
-#        return "pass"
-#
-#    result = k8s.run(test_config_job, nowait=False)
-#    assert(result == "pass")
+def test_configs():
+    def test_config_job():
+        import sk8s
+        original = sk8s.load_config()
+        new_config = original.copy()
+        new_config["fnord"] = "dronf"
+        if original == new_config:
+            return "fail-1"
+        sk8s.save_config(new_config)
+        new_new_config = sk8s.load_config()
+        if new_new_config != new_config:
+            return "fail-2"
+        return "pass"
+
+    result = sk8s.run(test_config_job, nowait=False)
+    assert(result == "pass")

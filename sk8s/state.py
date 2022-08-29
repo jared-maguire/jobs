@@ -2,8 +2,8 @@
 import jinja2
 import subprocess
 import pymongo
-import k8s.util
-import k8s.volumes
+import sk8s.util
+import sk8s.volumes
 import hashlib
 import sys
 
@@ -61,11 +61,11 @@ def create_mongo_db(name=None, namespace=None, dryrun=False, template=default_mo
     template = jinja2.Template(template)
 
     if name is None:
-        string = k8s.util.random_string(5)
+        string = sk8s.util.random_string(5)
         name = f"mongodb-{string}"
 
     if namespace is None:
-        namespace = k8s.util.get_current_namespace()
+        namespace = sk8s.util.get_current_namespace()
 
     template_args = kwargs.copy()
     template_args["name"] = name
@@ -180,7 +180,7 @@ class WorkflowState:
 
     @staticmethod
     def func_2_md5(func, *args):
-        code = k8s.util.serialize_func(lambda a=args: func(*a))
+        code = sk8s.util.serialize_func(lambda a=args: func(*a))
         hash = hashlib.sha1(code.encode("utf-8")).hexdigest()
         return hash
 

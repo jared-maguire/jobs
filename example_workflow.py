@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 
-import k8s
+import sk8s
 import requests
 import collections
 import re
@@ -24,8 +24,8 @@ def func2(i):
 
 
 def basic_wf(i):
-    a = k8s.wait(k8s.run(func1, i))
-    b = k8s.wait(k8s.run(func2, a))
+    a = sk8s.wait(sk8s.run(func1, i))
+    b = sk8s.wait(sk8s.run(func2, a))
     return b
 
 
@@ -54,17 +54,17 @@ def count_words_workflow(url):
     text = requests.get(url).text.lower()
     words = re.split(r"\s+", text)
 
-    count_jobs = k8s.map(count_words,
+    count_jobs = sk8s.map(count_words,
                          chunk_list(words, chunk_size=1000),
                          imports=["collections"],
                          nowait=True)
 
-    merged_counts_job = k8s.run(lambda func=merge_counts, **kwargs: func(kwargs["inputs"].values()),
+    merged_counts_job = sk8s.run(lambda func=merge_counts, **kwargs: func(kwargs["inputs"].values()),
                                 deps=count_jobs,
                                 imports=["collections", "re", "functools"])
 
     #from IPython import embed; embed(header="inside_workflow")
-    return collections.Counter(k8s.wait(merged_counts_job))
+    return collections.Counter(sk8s.wait(merged_counts_job))
 
 
 
@@ -104,11 +104,11 @@ def call_snps(bam):
 def ngs_workflow(batch_folder):
     def wf(batch_folder):
         import json, sys
-        fastqs = k8s.wait(k8s.run(demux_batch, batch_folder))
-        bams = k8s.map(align_bam, fastqs)
-        sample_qcs = k8s.map(sample_qc, bams)
-        snps = k8s.map(call_snps, bams)
-        basic_stats = k8s.wait(k8s.run(merge_qc, sample_qcs))
+        fastqs = sk8s.wait(sk8s.run(demux_batch, batch_folder))
+        bams = sk8s.map(align_bam, fastqs)
+        sample_qcs = sk8s.map(sample_qc, bams)
+        snps = sk8s.map(call_snps, bams)
+        basic_stats = sk8s.wait(sk8s.run(merge_qc, sample_qcs))
         return dict(fastq=fastqs,
                     bams=bams,
                     sample_qcs=sample_qcs,
@@ -117,9 +117,9 @@ def ngs_workflow(batch_folder):
 
     #print(k8s.run(wf, batch_folder, test=True))
 
-    wf_job = k8s.run(wf, batch_folder)
+    wf_job = sk8s.run(wf, batch_folder)
     print("wf_job:", wf_job, flush=True)
-    results = k8s.wait(wf_job)
+    results = sk8s.wait(wf_job)
     print(json.dumps(results, indent=4))
     return results
 
