@@ -49,7 +49,7 @@ def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[]
     return tag
 
 
-def docker_build_jobs_image(tag=None, push=None, dryrun=False, extra_options=""):
+def docker_build_jobs_image(tag=None, push=None, dryrun=False, branch=None, extra_options=""):
     config = sk8s.configs.load_config()
 
     if tag is None:
