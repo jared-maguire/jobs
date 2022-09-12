@@ -14,17 +14,17 @@ def docker_push(tag):
     subprocess.run(f"docker push {tag}", check=True, shell=True)
 
 
-def docker_template(tag, ancestor=None, conda=[], pip=[], channels=[], push=True):
+def docker_template(tag, ancestor=None, conda=[], pip=[], channels=[], additional_config="", push=True):
     #cwd = re.sub("^/C", "/c", re.sub("^", "/", re.sub(":", "", re.sub(r"\\", "/", os.getcwd()))))
     if ancestor is None:
         config = sk8s.configs.load_config()
         ancestor = config["docker_image_prefix"] + "jobs"
     template = jinja2.Template(importlib.resources.read_text("sk8s", "Dockerfile.template"))
-    rendered = template.render(conda=conda, pip=pip, channels=channels, ancestor=ancestor)
+    rendered = template.render(conda=conda, pip=pip, channels=channels, additional_config=additional_config, ancestor=ancestor)
     return rendered
 
 
-def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[], pip=[], channels=[], push=None, dryrun=False, extra_options=""):
+def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[], pip=[], channels=[], push=None, dryrun=False, additional_config="", extra_options=""):
     config = sk8s.configs.load_config()
 
     if push is None:
@@ -39,7 +39,8 @@ def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[]
     if image_name is None:
         assert(tag is not None)
 
-    rendered = docker_template(tag=tag, ancestor=ancestor, conda=conda, pip=pip, channels=channels, push=push)
+    rendered = docker_template(tag=tag, ancestor=ancestor, conda=conda, pip=pip, channels=channels, additional_config=additional_config, push=push)
+
     if dryrun:
         return rendered
 
