@@ -8,6 +8,7 @@ import random
 import yaml
 import json
 import os
+import re
 import time
 import importlib
 
@@ -88,3 +89,16 @@ def interactive_job(lifespan):
     pod_name = pod_names[0]
 
     return os.system(f"kubectl exec --stdin --tty {pod_name} -- /bin/bash")
+
+
+def wipe_namespace(namespace=None):
+    namespace_arg = f"-n {namespace}" if namespace is not None else ""
+
+    resources = []
+    for line in run_cmd(f"kubectl get all {namespace_arg}").decode("utf-8").split("\n"):
+        if re.match("^\s*$", line): continue
+        if re.match("^NAME", line): continue
+        resources.append(line.strip().split()[0])
+
+    resources_string = " ".join(resources)
+    run_cmd(f"kubectl delete {resources_string}")

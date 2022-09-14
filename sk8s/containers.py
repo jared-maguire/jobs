@@ -13,18 +13,18 @@ def docker_push(tag):
     subprocess.run(f"docker push {tag}", check=True, shell=True)
 
 
-def docker_template(tag, ancestor=None, conda=[], pip=[], channels=[], push=True):
+def docker_template(tag, ancestor=None, conda=[], pip=[], channels=[], additional_config="", push=True):
     #cwd = re.sub("^/C", "/c", re.sub("^", "/", re.sub(":", "", re.sub(r"\\", "/", os.getcwd()))))
     template = jinja2.Template(importlib.resources.read_text("sk8s", "Dockerfile.template"))
-    rendered = template.render(conda=conda, pip=pip, channels=channels, ancestor=ancestor)
+    rendered = template.render(conda=conda, pip=pip, channels=channels, additional_config=additional_config, ancestor=ancestor)
     return rendered
 
 
-def docker_build(tag, ancestor=None, conda=[], pip=[], channels=[], push=None, dryrun=False, extra_options=""):
+def docker_build(tag, ancestor=None, conda=[], pip=[], channels=[], additional_config="", push=None, dryrun=False, extra_options=""):
     if push is None:
         push = sk8s.configs.load_config()["docker_build_default_push_policy"]
 
-    rendered = docker_template(tag=tag, ancestor=ancestor, conda=conda, pip=pip, channels=channels, push=push)
+    rendered = docker_template(tag=tag, ancestor=ancestor, conda=conda, pip=pip, channels=channels, additional_config=additional_config, push=push)
     if dryrun:
         return rendered
 

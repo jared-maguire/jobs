@@ -15,6 +15,9 @@ RUN conda install -y {% for package in conda %} {{package}} {% endfor %}
 RUN pip install {% for package in pip %} {{package}} {% endfor %}
 {% endif %}
 
-
 #ENV PYTHONPATH "${PYTHONPATH}:/app"
 CMD ["bash"]
+
+{% if additional_config is defined %}
+{{ additional_config }}
+{% endif %}
