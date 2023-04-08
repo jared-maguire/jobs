@@ -11,27 +11,23 @@ RUN apt update && \
 WORKDIR /app
 
 RUN conda config --add channels defaults 
-RUN conda config --add channels bioconda 
 RUN conda config --add channels conda-forge
 
+{% for channel in channels %}
+RUN conda config --add channels {{channel}}
+{% endfor %}
+
 RUN conda update -n base conda
+
 RUN conda install -y pip tqdm
-RUN pip install dill flask jupyter requests numpy scipy pandas
-
-{% if conda is defined and conda|length > 0 %}
-RUN conda install -y{% for pkg in conda %} {{pkg}}{% endfor %}
-{% endif %}
-
-{% if pip is defined and pip|length > 0 %}
-RUN pip install {% for pkg in pip %} {{pkg}}{% endfor %}
-{% endif %}
-
-
-COPY . /app/module
+RUN pip install dill flask jupyter requests numpy scipy pandas pyyaml pymongo
 
 # Installing in dev mode here is a hack to work around
 # the fact that MANIFEST.in doesn't seem to be working in linux :-/
-RUN cd /app/module && pip install -e .   
+# also, WARNING: relative paths are a bit surprising in this docker setup.
+RUN pip install git+https://github.com/jared-maguire/jobs.git@{{branch|default('master', True)}}
+#COPY . /app/module/sk8s     
+#RUN cd /app/module && pip install -e .   
 
 #ENV PYTHONPATH "${PYTHONPATH}:/app"
 CMD ["bash"]

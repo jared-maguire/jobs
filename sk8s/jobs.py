@@ -5,54 +5,21 @@ import os
 import dill as pickle
 pickle.settings['recurse'] = True
 
-import threading
 import time
-import multiprocessing
-from multiprocessing.pool import ThreadPool
-import requests
 import base64
 import json
-import sys
-import functools
-import string
-import random
 import jinja2
 import subprocess
-import inspect
-import importlib
-import importlib.resources
+
+import sk8s
 
 
 def check_cluster_config():
     svc_acct = "internal-kubectl" in subprocess.run("kubectl get serviceaccounts",
                                                     check=True,
+                                                    shell=True,
                                                     stdout=subprocess.PIPE).stdout.decode("utf-8")
     return svc_acct
-
-
-def run_cmd(cmd):
-    result = subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout
-    return result
-
-
-def serialize_func(func):
-    code = base64.b64encode(pickle.dumps(func)).decode("utf-8")
-    return code
-
-
-def deserialize_func(code):
-    func = pickle.loads(base64.b64decode(code))
-    return func
-
-
-def check_for_kwargs(func):
-    varkw = inspect.getfullargspec(func).varkw
-    return (varkw=='kwargs')
-
-
-def random_string(length):
-    letters = string.ascii_lowercase
-    return ''.join(random.choice(letters) for i in range(length))
 
 
 # This should be in a file inside the package, but I'm having problems with that right now...
@@ -63,6 +30,12 @@ metadata:
 spec:
   template:
     spec:
+      volumes:
+      {% for volume in volumes %}
+      - name: {{volume}}
+        persistentVolumeClaim:
+          claimName: {{volume}}
+      {% endfor %}
       serviceAccountName: internal-kubectl
       containers:
       - name: worker
@@ -76,33 +49,84 @@ spec:
           import base64
           import json
           import sys
-          import k8s
+          import sk8s
 
-          {% for module in imports %}
-          import {{module}} {% endfor %}
-
-          func = k8s.deserialize_func("{{code}}")
+          func = sk8s.deserialize_func("{{code}}")
 
           json.dump(func(), sys.stdout)
+
+        {%- if (requests is defined and requests|length > 0) or (limits is defined and limits|length > 0) %}
+        resources:
+        {%- endif %}
+        {%- if requests is defined and requests|length > 0 %}
+            requests:
+        {%- endif %}
+        {%- for key, value in requests.items() %}
+                {{key}}: {{value}}
+        {%- endfor %}
+        {%- if limits is defined and limits|length > 0 %}
+            limits:
+        {%- endif %}
+        {%- for key, value in limits.items() %}
+                {{key}}: {{value}}
+        {%- endfor %}
+        {%- if volumes is defined and volumes|length > 0 %}
+        volumeMounts:
+        {%- for volume in volumes %}
+        - mountPath: "/mnt/{{volume}}"
+          name: {{volume}}
+        {%- endfor %}
+        {%- endif %}
 
       restartPolicy: Never
   backoffLimit: 1
 """
 
 
-def run(func, *args, image="jobs", imports=[], job_template=default_job_template, imagePullPolicy="Never", test=False, dryrun=False, debug=False):
+def run(func, *args,
+        image=None,
+        volumes=[],
+        requests=dict(),
+        limits=dict(),
+        nowait=True,
+        timeout=None,
+        job_template=default_job_template,
+        imagePullPolicy=None,
+        test=False,
+        dryrun=False,
+        state=None,
+        config=None,
+        debug=False):
     # Should do it this way, but having problems. Reverting for now:
-    # job_template = importlib.resources.read_text("k8s", "job_template.yaml")
+    # job_template = importlib.resources.read_text("sk8s", "job_template.yaml")
 
-    code = serialize_func(lambda a=args: func(*a))
+    if config is None:
+        config = sk8s.configs.load_config()
+
+    if image is None:
+        image = config["docker_image_prefix"] + "jobs"
+
+    if imagePullPolicy is None:
+        imagePullPolicy = config["docker_default_pull_policy"]
+
+    if state is None:
+        code = sk8s.util.serialize_func(lambda a=args: func(*a))
+    else:
+        code = sk8s.util.serialize_func(state.memoize(lambda a=args: func(*a)))
 
     if test:
         func_2 = pickle.loads(base64.b64decode(code))
         return func_2()
 
     t = jinja2.Template(job_template)
-    s = random_string(5)
-    j = t.render(name=f"job-{s}", code=code, image=image, imports=imports, imagePullPolicy=imagePullPolicy)
+    s = sk8s.util.random_string(5)
+    j = t.render(name=f"job-{s}",
+                 code=code,
+                 image=image,
+                 requests=requests,
+                 limits=limits,
+                 volumes=volumes,
+                 imagePullPolicy=imagePullPolicy)
 
     if dryrun:
         return j
@@ -111,9 +135,15 @@ def run(func, *args, image="jobs", imports=[], job_template=default_job_template
                    shell=True,
                    input=j.encode("utf-8"),
                    stdout=subprocess.PIPE,
-                   stderr=subprocess.PIPE,
                    check=True)
-    return f"job-{s}"
+                   #stderr=subprocess.PIPE,
+
+    job = f"job-{s}"
+
+    if nowait:
+        return f"job-{s}"
+    else:
+        return wait(job, timeout=timeout)
 
 
 def wait(job_name, timeout=None, verbose=False, delete=True):
@@ -125,7 +155,7 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         current = time.time()
         if (timeout is not None) and (current - start) > timeout:
             raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
-        result = json.loads(run_cmd(get_job))
+        result = json.loads(sk8s.util.run_cmd(get_job))
         if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
             raise RuntimeError(f"k8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
@@ -136,15 +166,15 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
 
     # Collect the names of the pods:
     get_pods = f"kubectl get pods --selector=job-name={job_name} --output=json"
-    pods = json.loads(run_cmd(get_pods))
+    pods = json.loads(sk8s.util.run_cmd(get_pods))
     pod_names = [p["metadata"]["name"] for p in pods["items"]]
 
     logs = {}
     for pod_name in pod_names:
-        logs[pod_name] = json.loads(run_cmd(f"kubectl logs {pod_name}"))
+        logs[pod_name] = json.loads(sk8s.util.run_cmd(f"kubectl logs {pod_name}"))
 
     if delete:
-        run_cmd(f"kubectl delete job {job_name}")
+        sk8s.util.run_cmd(f"kubectl delete job {job_name}")
 
     if verbose:
         return logs
@@ -153,10 +183,12 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         return list(logs.values())[0]
 
 
-def map(func, iterable, image="jobs", imports=[], imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
+def map(func, iterable, 
+        requests=dict(), limits=dict(),
+        image="jobs", imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
-    job_names = [run(thunk, image=image, imports=imports, imagePullPolicy=imagePullPolicy) for thunk in thunks]
+    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
 
     if not nowait:
         if verbose:

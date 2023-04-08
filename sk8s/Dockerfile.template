@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+FROM {{ancestor|default('jobs', True)}}
+
+WORKDIR /app
+
+{% if channels is defined and channels|length > 0 %}
+RUN conda config --add channels {% for channel in channels %} {{channel}} {% endfor %}
+{% endif %}
+
+{% if conda is defined and conda|length > 0 %}
+RUN conda install -y {% for package in conda %} {{package}} {% endfor %}
+{% endif %}
+
+{% if pip is defined and pip|length > 0 %}
+RUN pip install {% for package in pip %} {{package}} {% endfor %}
+{% endif %}
+
+
+#ENV PYTHONPATH "${PYTHONPATH}:/app"
+CMD ["bash"]
