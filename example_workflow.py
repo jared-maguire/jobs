@@ -73,18 +73,17 @@ def count_words_workflow(url):
                          imports=["collections"],
                          timeout=30)
 
-        merged_counts = k8s.wait(k8s.run(merge_counts, counts,
+    merged_counts = sk8s.wait(k8s.run(merge_counts, counts,
                                          imports=["collections", "re", "functools"]),
                                  timeout=30)
 
-        probs = k8s.wait(k8s.run(counts_to_probs, merged_counts,
+    probs = sk8s.wait(sk8s.run(counts_to_probs, merged_counts,
                                  imports=["collections", "re", "functools"]),
                          timeout=30)
 
     merged_counts_job = sk8s.run(lambda func=merge_counts, **kwargs: func(kwargs["inputs"].values()),
                                 deps=count_jobs,
                                 imports=["collections", "re", "functools"])
-        return collections.Counter(words)
 
     #from IPython import embed; embed(header="inside_workflow")
     return collections.Counter(sk8s.wait(merged_counts_job))
