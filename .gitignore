@@ -4,11 +4,11 @@ __pycache__/jobs.cpython-39.pyc
 *.swp
 *.pyc
 fnord
-k8s/counts.txt
+sk8s/counts.txt
 .vs/
 .vscode/
 .vscode/settings.json
 build/
-k8s.egg-info/
+sk8s.egg-info/
 kafka_2.13-3.2.1.tgz
 kafka_2.13-3.2.1/
