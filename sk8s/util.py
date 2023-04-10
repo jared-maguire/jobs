@@ -47,9 +47,11 @@ def get_k8s_config():
 
 
 def get_current_namespace():
-    cmd = "kubectl config view"
     config = get_k8s_config()
-    return config["contexts"][0]["context"]["namespace"]   # I might really regret the hardcoded '[0]' here.
+    if "namespace" in config["contexts"][0]["context"]:   # I might really regret the hardcoded '[0]' here.
+        return config["contexts"][0]["context"]["namespace"]   # I might really regret the hardcoded '[0]' here.
+    else:
+        return "default"
 
 
 def get_pods_from_job(job):
