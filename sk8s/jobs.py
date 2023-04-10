@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os
+import sys
 
 import dill as pickle
 pickle.settings['recurse'] = True
@@ -146,6 +147,21 @@ def run(func, *args,
         return wait(job, timeout=timeout)
 
 
+def logs(job_name, decode=True):
+    # Collect the names of the pods:
+    get_pods = f"kubectl get pods --selector=job-name={job_name} --output=json"
+    pods = json.loads(sk8s.util.run_cmd(get_pods))
+    pod_names = [p["metadata"]["name"] for p in pods["items"]]
+
+    logs = {}
+    for pod_name in pod_names:
+        if decode:
+            logs[pod_name] = json.loads(sk8s.util.run_cmd(f"kubectl logs {pod_name}"))
+        else:
+            logs[pod_name] = sk8s.util.run_cmd(f"kubectl logs {pod_name}").decode("utf-8")
+    return logs
+
+
 def wait(job_name, timeout=None, verbose=False, delete=True):
     get_job = f"kubectl get job -o json {job_name}"
 
@@ -157,6 +173,10 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
             raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
         result = json.loads(sk8s.util.run_cmd(get_job))
         if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
+            log_data = logs(job_name, decode=False)
+            print(f"🔥sk8s: job {job_name} failed.")
+            for pod_name, log in log_data.items():
+                print(f"---- {pod_name} ----:", log, sep="\n") #, file=sys.stderr)
             raise RuntimeError(f"k8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
             continue
@@ -164,23 +184,17 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
             break
         time.sleep(1)
 
-    # Collect the names of the pods:
-    get_pods = f"kubectl get pods --selector=job-name={job_name} --output=json"
-    pods = json.loads(sk8s.util.run_cmd(get_pods))
-    pod_names = [p["metadata"]["name"] for p in pods["items"]]
-
-    logs = {}
-    for pod_name in pod_names:
-        logs[pod_name] = json.loads(sk8s.util.run_cmd(f"kubectl logs {pod_name}"))
+    log_text = logs(job_name)
 
     if delete:
         sk8s.util.run_cmd(f"kubectl delete job {job_name}")
 
     if verbose:
-        return logs
+        return log_text
     else:
-        assert(len(logs.values()) == 1)
-        return list(logs.values())[0]
+        print(log_text)
+        assert(len(log_text.values()) == 1)
+        return list(log_text.values())[0]
 
 
 def map(func, iterable, 
