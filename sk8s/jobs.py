@@ -197,7 +197,6 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
     if verbose:
         return log_text
     else:
-        print(log_text)
         assert(len(log_text.values()) == 1)
         return list(log_text.values())[0]
 
