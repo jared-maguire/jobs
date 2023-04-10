@@ -9,6 +9,6 @@ k8s/counts.txt
 .vscode/
 .vscode/settings.json
 build/
-k8s.egg-info/
+sk8s.egg-info/
 kafka_2.13-3.2.1.tgz
 kafka_2.13-3.2.1/
