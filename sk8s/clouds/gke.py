@@ -45,4 +45,17 @@ def config_storageclass_defaults():
 
 def config_cluster(dryrun=False):
     rwm_result = config_readwritemany_storage(dryrun=dryrun)
-    return rwm_result
+    config_storageclass_defaults()
+
+    # TODO: get current google project
+
+    google_config = dict(
+                      docker_image_prefix=f"gcr.io/{project}/",
+                      docker_default_pull_policy="Always",
+                      docker_build_default_push_policy=True,
+                      default_storageclass="standard",
+                     )
+    config = k8s.configs.load_config()
+    config.update(google_config)
+
+    return config
