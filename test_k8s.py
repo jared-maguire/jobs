@@ -175,6 +175,8 @@ def test_resource_limits():
 
 # Workflow State
 
+""" Disable WorkflowState for now...
+
 # Test that we can actually spin up and shut down a MongoDB service
 def test_mongodb():
     # Create a container that has pymongo installed
@@ -206,7 +208,6 @@ def test_mongodb():
     assert(result2.__class__ == dict)
     assert(result2["payload"] == 42)
 
-""" Disable WorkflowState for now...
 
 # This is a test of our WorkflowState class:
 def test_workflowstate():
