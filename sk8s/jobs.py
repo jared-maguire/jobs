@@ -178,10 +178,10 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
             raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
         result = json.loads(sk8s.util.run_cmd(get_job))
         if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
-            log_data = logs(job_name, decode=False)
-            print(f"🔥sk8s: job {job_name} failed.")
-            for pod_name, log in log_data.items():
-                print(f"---- {pod_name} ----:", log, sep="\n") #, file=sys.stderr)
+            #log_data = logs(job_name, decode=False)
+            #print(f"🔥sk8s: job {job_name} failed.")
+            #for pod_name, log in log_data.items():
+            #    print(f"---- {pod_name} ----:", log, sep="\n") #, file=sys.stderr)
             raise RuntimeError(f"k8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
             continue
