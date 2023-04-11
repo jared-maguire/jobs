@@ -161,7 +161,11 @@ def logs(job_name, decode=True):
     logs = {}
     for pod_name in pod_names:
         if decode:
-            logs[pod_name] = json.loads(sk8s.util.run_cmd(f"kubectl logs {pod_name}"))
+            try:
+                pod_logs_text = sk8s.util.run_cmd(f"kubectl logs {pod_name}")
+                logs[pod_name] = json.loads(pod_logs_text)
+            except json.JSONDecodeError as e:
+                print("job failed with error:", pod_logs_text, sep="\n", flush=True)
         else:
             logs[pod_name] = sk8s.util.run_cmd(f"kubectl logs {pod_name}").decode("utf-8")
     return logs
