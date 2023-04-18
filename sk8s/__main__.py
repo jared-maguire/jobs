@@ -18,6 +18,10 @@ if __name__ == '__main__':
     config.add_argument('-tag', default="jobs", help='the tag we should use for the default jobs image')
     config.add_argument('-push', default=False, action='store_true', help="also push the image when it's built")
 
+    config = subparsers.add_parser('clean_namespace', help='build worker container')
+    config.add_argument('-tag', default="jobs", help='the tag we should use for the default jobs image')
+    config.add_argument('-push', default=False, action='store_true', help="also push the image when it's built")
+
     #test = subparsers.add_parser('test', help='test k8s')
     #test.add_argument('-opt-one', action='store', help='option one')
 
@@ -41,4 +45,10 @@ if __name__ == '__main__':
             sk8s.clouds.gke.config_cluster(dryrun=False)
 
     if args.command == "containers":
-        raise NotImplementedError("container setup not implemented yet")
+        ### Note: only works on local clusters right now
+        sk8s.docker_build_jobs_image()
+
+    if args.command == "clean_namespace":
+        subprocess.run("kubectl get all | awk '{print $1}' | grep -v NAME | xargs kubectl delete",
+                       shell=True, check=True)
+        #raise NotImplementedError("clean_namespace setup not implemented yet")
