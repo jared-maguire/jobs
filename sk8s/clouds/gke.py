@@ -2,7 +2,7 @@
 
 import jinja2
 import subprocess
-import k8s.configs
+import sk8s.configs
 
 
 
@@ -43,7 +43,7 @@ def config_storageclass_defaults():
 
 # Overall GKE cluster config:
 
-def config_cluster(dryrun=False):
+def config_cluster(project, dryrun=False):
     rwm_result = config_readwritemany_storage(dryrun=dryrun)
     config_storageclass_defaults()
 
