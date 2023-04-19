@@ -2,7 +2,7 @@
 
 Run many python functions as kubernetes jobs. Functions can run other functions as new jobs, and wait for their output, enabling complex workflows entirely in python.
 
-## k8s.run(function, args, **kwargs)
+## sk8s.run(function, args, **kwargs)
 
 Pickle `function` and `args`. 
 
@@ -10,7 +10,7 @@ Submit a kubernets job that (basically) unpickles and calls `print(json.dumps(fu
 
 return the name of the kubernetes job that was submitted.
 
-## k8s.wait(job)
+## sk8s.wait(job)
 
 Poll k8s until `job` is completed. Throw an exception if there was an error.
 
@@ -20,36 +20,35 @@ In english, read whatever the job printed to stdout, decode it as json text, and
 
 ## Examples
 
-``` python
-In [1]: import k8s
+### Basics: run(), wait() and map()
+These three functions are the foundation of most everything else.
 
-In [2]: k8s.run(lambda i, j: i+j, 2,3)
+``` python
+In [1]: import sk8s
+
+In [2]: sk8s.run(lambda i, j: i+j, 2,3)
 Out[2]: 'job-yealh'
 
-In [3]: k8s.wait('job-yealh')
+In [3]: sk8s.wait('job-yealh')
 Out[3]: 5
 
-In [4]: k8s.map(lambda i: 2*i, range(3))
+In [4]: sk8s.map(lambda i: 2*i, range(3))
 Out[4]: [0, 2, 4]
 ```
 
-
+### Workflows
+Jobs can submit other jobs, enabling fully-functional workflows.
 
 ``` python
-def wf(batch_folder):
-    import json, sys
-    fastqs = k8s.wait(k8s.run(demux_batch, batch_folder))
-    bams = k8s.map(align_bam, fastqs)
-    sample_qcs = k8s.map(sample_qc, bams)
-    snps = k8s.map(call_snps, bams)
-    basic_stats = k8s.wait(k8s.run(merge_qc, sample_qcs))
-    return dict(fastq=fastqs,
-                bams=bams,
-                sample_qcs=sample_qcs,
-                snps=snps,
-                basic_stats=basic_stats)
+In [1]: import sk8s
 
-wf_job = k8s.run(wf, batch_folder)
+In [2]: def wf():
+   ...:     step1_results = sk8s.map(lambda i: i, range(3))
+   ...:     step2_result = sk8s.run(lambda inputs: sum(inputs), step1_results, nowait=False)
+   ...:     return step2_result
+   ...:
+   ...: sk8s.run(wf, nowait=False, timeout=60)
+Out[2]: 3
 ```
 
 # Installation
@@ -58,17 +57,17 @@ First, have a k8s cluster configured. Docker Desktop can give you a single node 
 
 It's not on pypi yet, so...
 
-```
+```bash
+# Get yourself a kubernetes cluster and a docker repo, then:
+
 git clone git@github.com:jared-maguire/jobs.git
 cd jobs
-pip install .
-docker build -t jobs .         # build the default docker image that jobs will run in
-python -m k8s config -apply    # create a service account on the cluster that allows jobs to submit other jobs
+conda create -c conda-forge -n sk8s_test pip python=3.10  # make a python environment
+conda activate sk8s_test                                  # activate the python environment
+pip install -e .                                          # install this package in developer mode
+python -m sk8s containers -tag docs2                      # build the "jobs" docker image
+python -m sk8s config                                     # configure the k8s cluster (adds a service account)
+pytest                                                    # run the tests!
 ```
 
-
-# Some cloud-specific notes:
-
-## GKE
-
-- Provisioning ReadWriteMany volumes on GKE is quite slow. Avoid it if you can.
+This takes a little while. It's setting up a lot of things.
