@@ -46,7 +46,7 @@ if __name__ == '__main__':
 
     if args.command == "containers":
         ### Note: only works on local clusters right now
-        sk8s.docker_build_jobs_image()
+        sk8s.docker_build_jobs_image(branch=args.tag, extra_options="--no-cache")
 
     if args.command == "clean_namespace":
 
