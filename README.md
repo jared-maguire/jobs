@@ -34,22 +34,16 @@ Out[4]: [0, 2, 4]
 ```
 
 
-
 ``` python
-def wf(batch_folder):
-    import json, sys
-    fastqs = sk8s.wait(k8s.run(demux_batch, batch_folder))
-    bams = sk8s.map(align_bam, fastqs)
-    sample_qcs = k8s.map(sample_qc, bams)
-    snps = sk8s.map(call_snps, bams)
-    basic_stats = sk8s.wait(k8s.run(merge_qc, sample_qcs))
-    return dict(fastq=fastqs,
-                bams=bams,
-                sample_qcs=sample_qcs,
-                snps=snps,
-                basic_stats=basic_stats)
+In [1]: import sk8s
 
-wf_job = sk8s.run(wf, batch_folder)
+In [2]: def wf():
+   ...:     step1_results = sk8s.map(lambda i: i, range(3))
+   ...:     step2_result = sk8s.run(lambda inputs: sum(inputs), step1_results, nowait=False)
+   ...:     return step2_result
+   ...:
+   ...: sk8s.run(wf, nowait=False, timeout=60)
+Out[2]: 3
 ```
 
 # Installation
@@ -59,18 +53,16 @@ First, have a k8s cluster configured. Docker Desktop can give you a single node 
 It's not on pypi yet, so...
 
 ```
-# Get yourself a kubernetes cluster, then:
+# Get yourself a kubernetes cluster and a docker repo, then:
 
 git clone git@github.com:jared-maguire/jobs.git
 cd jobs
-pip install .
-docker build -t jobs .         # build the default docker image that jobs will run in
-python -m sk8s config -apply   # create a service account on the cluster that allows jobs to submit other jobs
+conda create -c conda-forge -n sk8s_test pip python=3.10
+conda activate sk8s_test
+pip install -e .
+python -m sk8s containers -tag docs2
+python -m sk8s config
+pytest
 ```
 
-
-# Some cloud-specific notes:
-
-## GKE
-
-- Provisioning ReadWriteMany volumes on GKE is quite slow. Avoid it if you can.
+This takes a little while. It's setting up a lot of things.
