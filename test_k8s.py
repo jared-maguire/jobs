@@ -17,7 +17,7 @@ def test_run_and_wait():
 
 
 def test_run_and_wait_2():
-    result = sk8s.run(lambda: "Hooray", nowait=False, timeout=30)
+    result = sk8s.run(lambda: "Hooray", asynchro=False, timeout=30)
     assert(result=="Hooray")
 
 
@@ -57,7 +57,7 @@ def test_deps():
 
 def test_simple_workflow():
     def wf():
-        jobs1 = sk8s.map(lambda i: i, range(3), nowait=True)
+        jobs1 = sk8s.map(lambda i: i, range(3), asynchro=True)
         return sk8s.wait(sk8s.run(lambda inputs: sum(inputs), map(sk8s.wait, jobs1)), timeout=30)
     result = sk8s.wait(sk8s.run(wf), timeout=60)
     assert(result == 3)
@@ -161,7 +161,7 @@ def test_resource_limits():
         numpy.random.bytes(size * int(1e6))
         return True
 
-    assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, nowait=False, timeout=20))
+    assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, asynchro=False, timeout=20))
 
     try:
         job = sk8s.run(allocate_memory, 1000, requests={"memory": "6Mi", "cpu": 1}, limits={"memory":"6Mi"})
@@ -197,8 +197,8 @@ def test_mongodb():
         result = json.loads(bson.json_util.dumps(client.state.state.find_one(query)))  # little hack to work around serializing MongoDB ObjectId's
         return result
 
-    result1 = sk8s.run(insert_document, dict(hello="world", payload=42), image=image, nowait=False)
-    result2 = sk8s.run(retrieve_document, dict(hello="world"), image=image, nowait=False)
+    result1 = sk8s.run(insert_document, dict(hello="world", payload=42), image=image, asynchro=False)
+    result2 = sk8s.run(retrieve_document, dict(hello="world"), image=image, asynchro=False)
 
     print(result1)
     print(result2)
@@ -227,7 +227,7 @@ def test_workflowstate():
 
         return answers
     
-    answers = sk8s.run(wf, nowait=False)
+    answers = sk8s.run(wf, asynchro=False)
     assert(tuple(answers) == ("bar", "dronf", "baz"))
 
 
@@ -240,19 +240,19 @@ def test_stateful_workflow():
             def func():
                 import numpy
                 return numpy.random.random()
-            return sk8s.run(func, state=state, timeout=30, nowait=False)  # Pass state as a parameter to run to benefit from memoization.
+            return sk8s.run(func, state=state, timeout=30, asynchro=False)  # Pass state as a parameter to run to benefit from memoization.
 
-        a = sk8s.run(wf1, nowait=False, image=image)
-        b = sk8s.run(wf1, nowait=False, image=image)
+        a = sk8s.run(wf1, asynchro=False, image=image)
+        b = sk8s.run(wf1, asynchro=False, image=image)
 
         def wf2():
             def func():
                 import numpy
                 return numpy.random.random()
-            return sk8s.run(func, timeout=30, nowait=False)
+            return sk8s.run(func, timeout=30, asynchro=False)
 
-        c = sk8s.run(wf2, nowait=False, image=image)
-        d = sk8s.run(wf2, nowait=False, image=image)
+        c = sk8s.run(wf2, asynchro=False, image=image)
+        d = sk8s.run(wf2, asynchro=False, image=image)
 
     assert(a == b)
     assert(c != d)
@@ -271,11 +271,11 @@ def test_freeform_state():
             def get_message():
                 return state["message"]
 
-            sk8s.run(leave_message, nowait=False, timeout=30)
-            message = sk8s.run(get_message, nowait=False, timeout=30)
+            sk8s.run(leave_message, asynchro=False, timeout=30)
+            message = sk8s.run(get_message, asynchro=False, timeout=30)
             return message
 
-        message = sk8s.run(wf1, nowait=False)
+        message = sk8s.run(wf1, asynchro=False)
         state.enter_local_mode()
         assert(state["message"] == "Hello from the trenches!")
 
@@ -298,5 +298,5 @@ def test_configs():
             return "fail-2"
         return "pass"
 
-    result = sk8s.run(test_config_job, nowait=False)
+    result = sk8s.run(test_config_job, asynchro=False)
     assert(result == "pass")
