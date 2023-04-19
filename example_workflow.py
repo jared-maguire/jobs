@@ -57,7 +57,7 @@ def count_words_workflow(url):
     count_jobs = sk8s.map(count_words,
                          chunk_list(words, chunk_size=1000),
                          imports=["collections"],
-                         nowait=True)
+                         asynchro=True)
 
     merged_counts_job = sk8s.run(lambda func=merge_counts, **kwargs: func(kwargs["inputs"].values()),
                                 deps=count_jobs,
