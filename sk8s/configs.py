@@ -17,6 +17,8 @@ default_config = dict(
                       docker_image_prefix="",
                       docker_default_pull_policy="Never",
                       docker_build_default_push_policy=False,
+                      default_storageclass="",
+                      default_readwritemany_storageclass="",
                      ) 
 
 

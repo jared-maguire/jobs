@@ -54,6 +54,9 @@ spec:
 
           func = sk8s.deserialize_func("{{code}}")
 
+          config = {{config}}
+          sk8s.configs.save_config(config)
+
           json.dump(func(), sys.stdout)
 
         {%- if (requests is defined and requests|length > 0) or (limits is defined and limits|length > 0) %}
@@ -80,7 +83,7 @@ spec:
         {%- endif %}
 
       restartPolicy: Never
-  backoffLimit: 1
+  backoffLimit: 0
 """
 
 
@@ -89,7 +92,7 @@ def run(func, *args,
         volumes=[],
         requests=dict(),
         limits=dict(),
-        nowait=True,
+        asynchro=True,
         timeout=None,
         job_template=default_job_template,
         imagePullPolicy=None,
@@ -97,6 +100,7 @@ def run(func, *args,
         dryrun=False,
         state=None,
         config=None,
+        export_config=True,
         debug=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("sk8s", "job_template.yaml")
@@ -127,6 +131,7 @@ def run(func, *args,
                  requests=requests,
                  limits=limits,
                  volumes=volumes,
+                 config=config if export_config else sk8s.configs.default_config,
                  imagePullPolicy=imagePullPolicy)
 
     if dryrun:
@@ -141,7 +146,7 @@ def run(func, *args,
 
     job = f"job-{s}"
 
-    if nowait:
+    if asynchro:
         return f"job-{s}"
     else:
         return wait(job, timeout=timeout)
@@ -156,7 +161,11 @@ def logs(job_name, decode=True):
     logs = {}
     for pod_name in pod_names:
         if decode:
-            logs[pod_name] = json.loads(sk8s.util.run_cmd(f"kubectl logs {pod_name}"))
+            try:
+                pod_logs_text = sk8s.util.run_cmd(f"kubectl logs {pod_name}")
+                logs[pod_name] = json.loads(pod_logs_text)
+            except json.JSONDecodeError as e:
+                print("job failed with error:", pod_logs_text, sep="\n", flush=True)
         else:
             logs[pod_name] = sk8s.util.run_cmd(f"kubectl logs {pod_name}").decode("utf-8")
     return logs
@@ -177,14 +186,14 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
             print(f"🔥sk8s: job {job_name} failed.")
             for pod_name, log in log_data.items():
                 print(f"---- {pod_name} ----:", log, sep="\n") #, file=sys.stderr)
-            raise RuntimeError(f"k8s: Job {job_name} failed.")
+            raise RuntimeError(f"sk8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
             continue
         if result["status"]["succeeded"] == 1:
             break
         time.sleep(1)
 
-    log_text = logs(job_name)
+    log_text = logs(job_name, decode=True)
 
     if delete:
         sk8s.util.run_cmd(f"kubectl delete job {job_name}")
@@ -192,19 +201,24 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
     if verbose:
         return log_text
     else:
-        print(log_text)
         assert(len(log_text.values()) == 1)
         return list(log_text.values())[0]
 
 
-def map(func, iterable, 
-        requests=dict(), limits=dict(),
-        image="jobs", imagePullPolicy="Never", timeout=None, nowait=False, verbose=False):
+def map(func,
+        iterable, 
+        requests=dict(),
+        limits=dict(),
+        image=None,
+        imagePullPolicy=None,
+        timeout=None,
+        asynchro=False,
+        verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
     job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
 
-    if not nowait:
+    if not asynchro:
         if verbose:
             results = {j: wait(j, timeout=timeout, verbose=verbose) for j in job_names}
         else:

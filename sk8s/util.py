@@ -8,6 +8,7 @@ import random
 import yaml
 import json
 import os
+import re
 import time
 import importlib
 
@@ -46,9 +47,15 @@ def get_k8s_config():
 
 
 def get_current_namespace():
-    cmd = "kubectl config view"
     config = get_k8s_config()
-    return config["contexts"][0]["context"]["namespace"]   # I might really regret the hardcoded '[0]' here.
+    if "namespace" in config["contexts"][0]["context"]:   # I might really regret the hardcoded '[0]' here.
+        return config["contexts"][0]["context"]["namespace"]   # I might really regret the hardcoded '[0]' here.
+    else:
+        return "default"
+
+
+def set_namespace(ns):
+    subprocess.run(f"kubectl config set-context --current --namespace={ns}")
 
 
 def get_pods_from_job(job):
@@ -88,3 +95,16 @@ def interactive_job(lifespan):
     pod_name = pod_names[0]
 
     return os.system(f"kubectl exec --stdin --tty {pod_name} -- /bin/bash")
+
+
+def wipe_namespace(namespace=None):
+    namespace_arg = f"-n {namespace}" if namespace is not None else ""
+
+    resources = []
+    for line in run_cmd(f"kubectl get all {namespace_arg}").decode("utf-8").split("\n"):
+        if re.match("^\s*$", line): continue
+        if re.match("^NAME", line): continue
+        resources.append(line.strip().split()[0])
+
+    resources_string = " ".join(resources)
+    run_cmd(f"kubectl delete {resources_string}")
