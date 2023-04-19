@@ -57,7 +57,7 @@ First, have a k8s cluster configured. Docker Desktop can give you a single node 
 
 It's not on pypi yet, so...
 
-```
+```bash
 # Get yourself a kubernetes cluster and a docker repo, then:
 
 git clone git@github.com:jared-maguire/jobs.git
