@@ -92,7 +92,7 @@ def run(func, *args,
         volumes=[],
         requests=dict(),
         limits=dict(),
-        nowait=True,
+        asynchro=True,
         timeout=None,
         job_template=default_job_template,
         imagePullPolicy=None,
@@ -146,7 +146,7 @@ def run(func, *args,
 
     job = f"job-{s}"
 
-    if nowait:
+    if asynchro:
         return f"job-{s}"
     else:
         return wait(job, timeout=timeout)
@@ -212,13 +212,13 @@ def map(func,
         image=None,
         imagePullPolicy=None,
         timeout=None,
-        nowait=False,
+        asynchro=False,
         verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
     job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
 
-    if not nowait:
+    if not asynchro:
         if verbose:
             results = {j: wait(j, timeout=timeout, verbose=verbose) for j in job_names}
         else:

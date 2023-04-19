@@ -44,10 +44,10 @@ In [1]: import sk8s
 
 In [2]: def wf():
    ...:     step1_results = sk8s.map(lambda i: i, range(3))
-   ...:     step2_result = sk8s.run(lambda inputs: sum(inputs), step1_results, nowait=False)
+   ...:     step2_result = sk8s.run(lambda inputs: sum(inputs), step1_results, asynchro=False)
    ...:     return step2_result
    ...:
-   ...: sk8s.run(wf, nowait=False, timeout=60)
+   ...: sk8s.run(wf, asynchro=False, timeout=60)
 Out[2]: 3
 ```
 
