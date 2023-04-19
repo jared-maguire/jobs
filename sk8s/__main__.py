@@ -49,6 +49,12 @@ if __name__ == '__main__':
         sk8s.docker_build_jobs_image()
 
     if args.command == "clean_namespace":
-        subprocess.run("kubectl get all | awk '{print $1}' | grep -v NAME | xargs kubectl delete",
-                       shell=True, check=True)
-        #raise NotImplementedError("clean_namespace setup not implemented yet")
+
+        #subprocess.run("kubectl get all | awk '{print $1}' | grep -v NAME | xargs kubectl delete",
+        #               shell=True, check=True)
+
+        lines = subprocess.run("kubectl get all",
+                                shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8").split("\n")
+        objects = [l.split()[0] for l in lines if (len(l.split()) > 2) and ("NAME" not in l)]
+        objects_str = " ".join(objects)
+        subprocess.run(f"kubectl delete {objects_str}", shell=True, check=True)
