@@ -16,6 +16,7 @@ if __name__ == '__main__':
 
     config = subparsers.add_parser('containers', help='build worker container')
     config.add_argument('-tag', default="jobs", help='the tag we should use for the default jobs image')
+    config.add_argument('-extra_options', default="--no-cache", help='extra options for docker build')
     config.add_argument('-push', default=False, action='store_true', help="also push the image when it's built")
 
     config = subparsers.add_parser('clean_namespace', help='build worker container')
@@ -46,7 +47,7 @@ if __name__ == '__main__':
 
     if args.command == "containers":
         ### Note: only works on local clusters right now
-        sk8s.docker_build_jobs_image(branch=args.tag, extra_options="--no-cache")
+        sk8s.docker_build_jobs_image(branch=args.tag, extra_options=args.extra_options)
 
     if args.command == "clean_namespace":
 
