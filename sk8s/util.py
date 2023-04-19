@@ -54,6 +54,10 @@ def get_current_namespace():
         return "default"
 
 
+def set_namespace(ns):
+    subprocess.run(f"kubectl config set-context --current --namespace={ns}")
+
+
 def get_pods_from_job(job):
     get_pods = f"kubectl get pods --selector=job-name={job} --output=json"
     pods = json.loads(run_cmd(get_pods))

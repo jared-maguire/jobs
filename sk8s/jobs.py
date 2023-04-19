@@ -131,7 +131,7 @@ def run(func, *args,
                  requests=requests,
                  limits=limits,
                  volumes=volumes,
-                 config=config if export_config else k8s.configs.default_config,
+                 config=config if export_config else sk8s.configs.default_config,
                  imagePullPolicy=imagePullPolicy)
 
     if dryrun:
