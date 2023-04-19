@@ -62,12 +62,12 @@ It's not on pypi yet, so...
 
 git clone git@github.com:jared-maguire/jobs.git
 cd jobs
-conda create -c conda-forge -n sk8s_test pip python=3.10
-conda activate sk8s_test
-pip install -e .
-python -m sk8s containers -tag docs2
-python -m sk8s config
-pytest
+conda create -c conda-forge -n sk8s_test pip python=3.10  # make a python environment
+conda activate sk8s_test                                  # activate the python environment
+pip install -e .                                          # install this package in developer mode
+python -m sk8s containers -tag docs2                      # build the "jobs" docker image
+python -m sk8s config                                     # configure the k8s cluster (adds a service account)
+pytest                                                    # run the tests!
 ```
 
 This takes a little while. It's setting up a lot of things.
