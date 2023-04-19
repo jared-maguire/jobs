@@ -20,6 +20,9 @@ In english, read whatever the job printed to stdout, decode it as json text, and
 
 ## Examples
 
+### Basics: run(), wait() and map()
+These three functions are the foundation of most everything else.
+
 ``` python
 In [1]: import sk8s
 
@@ -33,6 +36,8 @@ In [4]: sk8s.map(lambda i: 2*i, range(3))
 Out[4]: [0, 2, 4]
 ```
 
+### Workflows
+Jobs can submit other jobs, enabling fully-functional workflows.
 
 ``` python
 In [1]: import sk8s
