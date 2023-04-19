@@ -1,2 +1,3 @@
-include ./k8s/*.txt 
-include ./k8s/*.yaml 
+include sk8s/*.txt 
+include sk8s/*.yaml 
+include sk8s/*.template 
