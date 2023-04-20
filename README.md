@@ -53,6 +53,8 @@ Out[2]: 3
 
 # Installation
 
+## Local Cluster
+
 First, have a k8s cluster configured. Docker Desktop can give you a single node k8s cluster with a few clicks. The examples here are all trivially small compute load, and should run locally just fine. The instructions below assume a local k8s cluster via Docker Desktop.
 
 It's not on pypi yet, so...
@@ -71,3 +73,14 @@ pytest                                                    # run the tests!
 ```
 
 This takes a little while. It's setting up a lot of things.
+
+## Google
+
+First, create a cluster and a container registry on Google Cloud. Configure `kubectl` and `docker` to use them.
+
+Then:
+
+```
+python -m sk8s containers -tag master
+python -m sk8s config-gke
+```
