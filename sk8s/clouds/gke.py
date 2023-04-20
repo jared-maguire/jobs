@@ -36,9 +36,9 @@ def config_readwritemany_storage(network="default", dryrun=False):
 
 
 def config_storageclass_defaults():
-    config = k8s.configs.load_config()
+    config = sk8s.configs.load_config()
     config["default_readwritemany_storageclass"] = "standard-readwritemany"
-    k8s.configs.save_config(config)
+    sk8s.configs.save_config(config)
 
 
 # Overall GKE cluster config:
@@ -55,7 +55,8 @@ def config_cluster(project, dryrun=False):
                       docker_build_default_push_policy=True,
                       default_storageclass="standard",
                      )
-    config = k8s.configs.load_config()
+    config = sk8s.configs.load_config()
     config.update(google_config)
+    sk8s.configs.save_config(config)
 
     return config

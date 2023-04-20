@@ -137,12 +137,12 @@ def run(func, *args,
     if dryrun:
         return j
 
-    subprocess.run("kubectl apply -f -",
-                   shell=True,
-                   input=j.encode("utf-8"),
-                   stdout=subprocess.PIPE,
-                   check=True)
-                   #stderr=subprocess.PIPE,
+    proc = subprocess.run("kubectl apply -f -",
+                          shell=True,
+                          input=j.encode("utf-8"),
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL,
+                          check=True)
 
     job = f"job-{s}"
 
