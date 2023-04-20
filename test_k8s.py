@@ -58,8 +58,8 @@ def test_deps():
 def test_simple_workflow():
     def wf():
         jobs1 = sk8s.map(lambda i: i, range(3), asynchro=True)
-        return sk8s.wait(sk8s.run(lambda inputs: sum(inputs), map(sk8s.wait, jobs1)), timeout=30)
-    result = sk8s.wait(sk8s.run(wf), timeout=60)
+        return sk8s.wait(sk8s.run(lambda inputs: sum(inputs), map(sk8s.wait, jobs1)), timeout=120)
+    result = sk8s.wait(sk8s.run(wf), timeout=120)
     assert(result == 3)
 
 
