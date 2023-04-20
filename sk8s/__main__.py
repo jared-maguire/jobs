@@ -38,7 +38,6 @@ if __name__ == '__main__':
             subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
 
     if args.command == "config-gke":
-        config = importlib.resources.read_text("k8s", "cluster_config.yaml")
         import sk8s.clouds.gke
         if args.dryrun:
             print(sk8s.clouds.gke.config_cluster(dryrun=True))
@@ -47,7 +46,7 @@ if __name__ == '__main__':
 
     if args.command == "containers":
         ### Note: only works on local clusters right now
-        sk8s.docker_build_jobs_image(branch=args.tag, extra_options=args.extra_options)
+        sk8s.docker_build_jobs_image(branch=args.branch, extra_options=args.extra_options)
 
     if args.command == "clean_namespace":
 
