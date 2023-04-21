@@ -14,6 +14,9 @@ if __name__ == '__main__':
     config.add_argument('-check', default=False, action='store_true', help='check that the cluster is properly configured')
     config.add_argument('-apply', default=False, action='store_true', help='apply the configuration to the cluster')
 
+    config = subparsers.add_parser('config-gke', help='configure k8s cluster')
+    config.add_argument('-project', help='google cloud project name (required)')
+
     config = subparsers.add_parser('containers', help='build worker container')
     config.add_argument('-branch', default="master", help='the tag we should use for the default jobs image')
     config.add_argument('-extra_options', default="--no-cache", help='extra options for docker build')
@@ -39,10 +42,7 @@ if __name__ == '__main__':
 
     if args.command == "config-gke":
         import sk8s.clouds.gke
-        if args.dryrun:
-            print(sk8s.clouds.gke.config_cluster(dryrun=True))
-        elif args.apply:
-            sk8s.clouds.gke.config_cluster(dryrun=False)
+        sk8s.clouds.gke.config_cluster(project=args.project)
 
     if args.command == "containers":
         ### Note: only works on local clusters right now
