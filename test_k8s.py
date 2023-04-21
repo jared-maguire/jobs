@@ -132,8 +132,8 @@ def test_rwx_volumes():
 
         job2 = sk8s.run(writer, volumes=[volume])
 
-        sk8s.wait(job2)
-        result = sk8s.wait(job1)
+        sk8s.wait(job2, timeout=60*5)
+        result = sk8s.wait(job1, timeout=60*5)
         sk8s.delete_volume(volume)
 
         return result
