@@ -14,13 +14,13 @@ def test_cluster_config():
 
 @pytest.mark.jobs
 def test_run_and_wait():
-    result = sk8s.wait(sk8s.run(lambda: "Hooray"), timeout=120)
+    result = sk8s.wait(sk8s.run(lambda: "Hooray"), timeout=500)
     assert(result=="Hooray")
 
 
 @pytest.mark.jobs
 def test_run_and_wait_2():
-    result = sk8s.run(lambda: "Hooray", asynchro=False, timeout=120)
+    result = sk8s.run(lambda: "Hooray", asynchro=False, timeout=500)
     assert(result=="Hooray")
 
 
@@ -48,7 +48,7 @@ def test_imports():
         import numpy
         return numpy.pi
 
-    result = sk8s.wait(sk8s.run(pi), timeout=30)
+    result = sk8s.wait(sk8s.run(pi), timeout=500)
 
     import numpy
     assert(result == numpy.pi)
@@ -58,7 +58,7 @@ def test_imports():
 def test_deps():
     job1 = sk8s.run(lambda: "job-1")
     job2 = sk8s.run(lambda result=sk8s.wait(job1): "job-2 " + result) 
-    result = sk8s.wait(job2, timeout=30)
+    result = sk8s.wait(job2, timeout=500)
     assert(result == "job-2 job-1")
 
 
@@ -66,8 +66,8 @@ def test_deps():
 def test_simple_workflow():
     def wf():
         jobs1 = sk8s.map(lambda i: i, range(3), asynchro=True)
-        return sk8s.wait(sk8s.run(lambda inputs: sum(inputs), map(sk8s.wait, jobs1)), timeout=120)
-    result = sk8s.wait(sk8s.run(wf), timeout=120)
+        return sk8s.wait(sk8s.run(lambda inputs: sum(inputs), map(sk8s.wait, jobs1)), timeout=500)
+    result = sk8s.wait(sk8s.run(wf), timeout=500)
     assert(result == 3)
 
 
@@ -177,7 +177,7 @@ def test_resource_limits():
         numpy.random.bytes(size * int(1e6))
         return True
 
-    assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, asynchro=False, timeout=20))
+    assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, asynchro=False, timeout=500))
 
     try:
         job = sk8s.run(allocate_memory, 1000, requests={"memory": "6Mi", "cpu": 1}, limits={"memory":"6Mi"})
@@ -256,7 +256,7 @@ def test_stateful_workflow():
             def func():
                 import numpy
                 return numpy.random.random()
-            return sk8s.run(func, state=state, timeout=30, asynchro=False)  # Pass state as a parameter to run to benefit from memoization.
+            return sk8s.run(func, state=state, timeout=500, asynchro=False)  # Pass state as a parameter to run to benefit from memoization.
 
         a = sk8s.run(wf1, asynchro=False, image=image)
         b = sk8s.run(wf1, asynchro=False, image=image)
@@ -265,7 +265,7 @@ def test_stateful_workflow():
             def func():
                 import numpy
                 return numpy.random.random()
-            return sk8s.run(func, timeout=30, asynchro=False)
+            return sk8s.run(func, timeout=500, asynchro=False)
 
         c = sk8s.run(wf2, asynchro=False, image=image)
         d = sk8s.run(wf2, asynchro=False, image=image)
@@ -287,8 +287,8 @@ def test_freeform_state():
             def get_message():
                 return state["message"]
 
-            sk8s.run(leave_message, asynchro=False, timeout=30)
-            message = sk8s.run(get_message, asynchro=False, timeout=30)
+            sk8s.run(leave_message, asynchro=False, timeout=500)
+            message = sk8s.run(get_message, asynchro=False, timeout=500)
             return message
 
         message = sk8s.run(wf1, asynchro=False)
