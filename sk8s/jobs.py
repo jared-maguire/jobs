@@ -180,7 +180,7 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         current = time.time()
         if (timeout is not None) and (current - start) > timeout:
             raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
-        result = json.loads(sk8s.util.run_cmd(get_job))
+        result = json.loads(sk8s.util.run_cmd(get_job, retries=5))
         if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
             log_data = logs(job_name, decode=False)
             print(f"🔥sk8s: job {job_name} failed.")
