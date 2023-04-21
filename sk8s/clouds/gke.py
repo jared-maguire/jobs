@@ -16,7 +16,7 @@ def config_storageclass_defaults():
 
 # Overall GKE cluster config:
 
-def config_cluster(project, dryrun=False):
+def config_cluster(project):
     config_storageclass_defaults()
 
     # TODO: get current google project
