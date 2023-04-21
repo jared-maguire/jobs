@@ -80,7 +80,8 @@ def test_nested_lambda():
 def test_volumes():
     def wf():
         import json
-        volume = sk8s.create_volume("10Mi", accessModes=["ReadOnlyMany"])
+        #volume = sk8s.create_volume("10Mi", accessModes=["ReadOnlyMany"])
+        volume = sk8s.create_volume("10Mi", accessModes=["ReadWriteOnce"])
 
         def func1():
             with open(f"/mnt/{volume}/test.json", "w") as fp:
@@ -94,6 +95,8 @@ def test_volumes():
         #result = sk8s.wait(sk8s.run(func2, volumes=[volume]))
         result = sk8s.wait(sk8s.run(func1, volumes=[volume]))
         result = "hey"
+
+        sk8s.delete_volume(volume)
                                   
         return result
 
