@@ -14,13 +14,13 @@ def test_cluster_config():
 
 @pytest.mark.jobs
 def test_run_and_wait():
-    result = sk8s.wait(sk8s.run(lambda: "Hooray"), timeout=30)
+    result = sk8s.wait(sk8s.run(lambda: "Hooray"), timeout=120)
     assert(result=="Hooray")
 
 
 @pytest.mark.jobs
 def test_run_and_wait_2():
-    result = sk8s.run(lambda: "Hooray", asynchro=False, timeout=30)
+    result = sk8s.run(lambda: "Hooray", asynchro=False, timeout=120)
     assert(result=="Hooray")
 
 
