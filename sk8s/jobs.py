@@ -83,7 +83,7 @@ spec:
         {%- endif %}
 
       restartPolicy: Never
-  backoffLimit: 0
+  backoffLimit: {{backoffLimit}}
 """
 
 
@@ -96,6 +96,7 @@ def run(func, *args,
         timeout=None,
         job_template=default_job_template,
         imagePullPolicy=None,
+        backoffLimit=0,
         test=False,
         dryrun=False,
         state=None,
@@ -132,7 +133,8 @@ def run(func, *args,
                  limits=limits,
                  volumes=volumes,
                  config=config if export_config else sk8s.configs.default_config,
-                 imagePullPolicy=imagePullPolicy)
+                 imagePullPolicy=imagePullPolicy,
+                 backoffLimit=backoffLimit)
 
     if dryrun:
         return j
