@@ -78,6 +78,8 @@ This takes a little while. It's setting up a lot of things.
 
 First, create a cluster and a container registry on Google Cloud. Configure `kubectl` and `docker` to use them.
 
+I've found (as of april 2023) that a totally default GKE autopilot cluster works if you enable 'Filestore CSI driver' in the cluster config. You can do this via the google web ui.
+
 Then:
 
 ```
