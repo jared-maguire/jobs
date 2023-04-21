@@ -1,26 +1,30 @@
 #!/usr/bin/env python
-
+import pytest
 import sk8s
 
 
 ## Cluster
 
+@pytest.mark.cluster
 def test_cluster_config():
     assert(sk8s.check_cluster_config())
 
 
 ## Jobs
 
+@pytest.mark.jobs
 def test_run_and_wait():
     result = sk8s.wait(sk8s.run(lambda: "Hooray"), timeout=30)
     assert(result=="Hooray")
 
 
+@pytest.mark.jobs
 def test_run_and_wait_2():
     result = sk8s.run(lambda: "Hooray", asynchro=False, timeout=30)
     assert(result=="Hooray")
 
 
+@pytest.mark.jobs
 def test_fail():
     import os
     try:
@@ -32,11 +36,13 @@ def test_fail():
     assert(False)
 
 
+@pytest.mark.jobs
 def test_map():
     results = sk8s.map(lambda i: i*2, (0,1,2))
     assert(tuple(results) == (0,2,4))
 
 
+@pytest.mark.jobs
 def test_imports():
     def pi():
         import numpy
@@ -48,6 +54,7 @@ def test_imports():
     assert(result == numpy.pi)
 
 
+@pytest.mark.jobs
 def test_deps():
     job1 = sk8s.run(lambda: "job-1")
     job2 = sk8s.run(lambda result=sk8s.wait(job1): "job-2 " + result) 
@@ -55,6 +62,7 @@ def test_deps():
     assert(result == "job-2 job-1")
 
 
+@pytest.mark.jobs
 def test_simple_workflow():
     def wf():
         jobs1 = sk8s.map(lambda i: i, range(3), asynchro=True)
@@ -63,6 +71,7 @@ def test_simple_workflow():
     assert(result == 3)
 
 
+@pytest.mark.jobs
 def test_nested_lambda():
     job = sk8s.run(lambda i, j: 10 * sk8s.wait(sk8s.run(lambda a=i, b=j: a+b)), 1,2)
     result = sk8s.wait(job)
@@ -77,6 +86,7 @@ def test_nested_lambda():
 
 ## Volumes
 
+@pytest.mark.volumes
 def test_volumes():
     def wf():
         import json
@@ -104,6 +114,7 @@ def test_volumes():
     assert(result == "hey")
 
 
+@pytest.mark.volumes
 def test_rwx_volumes():
     import time
 
@@ -144,6 +155,7 @@ def test_rwx_volumes():
 
 # containers
 
+@pytest.mark.containers
 def test_containers():
     image = sk8s.docker_build("pysam", conda=["pysam"], channels=["bioconda"])
 
@@ -157,6 +169,7 @@ def test_containers():
 
 # Resources
 
+@pytest.mark.jobs
 def test_resource_limits():
     import os
     def allocate_memory(size):
@@ -287,6 +300,8 @@ def test_freeform_state():
 
 
 # Module Config Files
+
+@pytest.mark.config
 def test_configs():
     def test_config_job():
         import sk8s
