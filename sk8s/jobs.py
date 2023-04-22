@@ -214,6 +214,7 @@ def map(func,
         image=None,
         imagePullPolicy=None,
         timeout=None,
+        delete=True,
         asynchro=False,
         verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
@@ -222,9 +223,9 @@ def map(func,
 
     if not asynchro:
         if verbose:
-            results = {j: wait(j, timeout=timeout, verbose=verbose) for j in job_names}
+            results = {j: wait(j, timeout=timeout, verbose=verbose, delete=delete) for j in job_names}
         else:
-            results = [wait(j, timeout=timeout, verbose=verbose) for j in job_names]
+            results = [wait(j, timeout=timeout, verbose=verbose, delete=delete) for j in job_names]
         return results
     else:
         return job_names
