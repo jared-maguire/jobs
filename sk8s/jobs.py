@@ -173,7 +173,7 @@ def logs(job_name, decode=True):
     return logs
 
 
-def wait(job_name, timeout=None, verbose=False, delete=True):
+def wait(job_name, timeout=None, verbose=False, delete=False, polling_interval=0.1):
     get_job = f"kubectl get job -o json {job_name}"
 
     # Wait until the whole job is finished:
@@ -193,7 +193,7 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
             continue
         if result["status"]["succeeded"] == 1:
             break
-        time.sleep(1)
+        time.sleep(polling_interval)
 
     log_text = logs(job_name, decode=True)
 

@@ -5,15 +5,6 @@ import subprocess
 import sk8s.configs
 
 
-
-# Enable ReadWriteMany volumes via Google FileStore:
-
-#def config_storageclass_defaults():
-#    config = sk8s.configs.load_config()
-#    config["default_readwritemany_storageclass"] = "standard-rwx"
-#    sk8s.configs.save_config(config)
-
-
 # Overall Local cluster config:
 
 def config_cluster():

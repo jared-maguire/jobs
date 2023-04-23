@@ -9,29 +9,33 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser("sk8s")
     subparsers = parser.add_subparsers(help="commands", dest="command")
 
-    config = subparsers.add_parser('config', help='configure k8s cluster')
+    config = subparsers.add_parser('config-cluster', help='configure k8s cluster')
     config.add_argument('-dryrun', default=False, action='store_true', help='print the kubernetes yaml that will be applied')
     config.add_argument('-check', default=False, action='store_true', help='check that the cluster is properly configured')
     config.add_argument('-apply', default=False, action='store_true', help='apply the configuration to the cluster')
 
-    config = subparsers.add_parser('config-gke', help='configure k8s cluster')
+    config = subparsers.add_parser('config-local', help='configure sk8s for a local cluster')
+
+    config = subparsers.add_parser('config-gke', help='configure sk8s for a GKE cluster')
     config.add_argument('-project', help='google cloud project name (required)')
 
     config = subparsers.add_parser('containers', help='build worker container')
     config.add_argument('-branch', default="master", help='the tag we should use for the default jobs image')
-    config.add_argument('-extra_options', default="--no-cache", help='extra options for docker build')
+    config.add_argument('-extra_options', default=" ", help='extra options for docker build')
     config.add_argument('-push', default=False, action='store_true', help="also push the image when it's built")
 
-    config = subparsers.add_parser('clean_namespace', help='build worker container')
+    config = subparsers.add_parser('clean_namespace', help='delete almost everything from the current k8s namespace')
     config.add_argument('-tag', default="jobs", help='the tag we should use for the default jobs image')
     config.add_argument('-push', default=False, action='store_true', help="also push the image when it's built")
+
+    config = subparsers.add_parser('kubewatch', help='watch the cluster')
 
     #test = subparsers.add_parser('test', help='test k8s')
     #test.add_argument('-opt-one', action='store', help='option one')
 
     args = parser.parse_args()
 
-    if args.command == "config":
+    if args.command == "config-cluster":
         config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
         if args.dryrun:
             print(config)
@@ -39,6 +43,10 @@ if __name__ == '__main__':
             print("Cluster configured:", sk8s.check_cluster_config())
         elif args.apply:
             subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
+
+    if args.command == "config-local":
+        import sk8s.clouds.local
+        sk8s.clouds.local.config_cluster()
 
     if args.command == "config-gke":
         import sk8s.clouds.gke
@@ -58,3 +66,12 @@ if __name__ == '__main__':
         objects = [l.split()[0] for l in lines if (len(l.split()) > 2) and ("NAME" not in l)]
         objects_str = " ".join(objects)
         subprocess.run(f"kubectl delete {objects_str}", shell=True, check=True)
+
+    if args.command == "kubewatch":
+        import time
+        while(True):
+            text = subprocess.run("kubectl get all", shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.decode("utf-8")
+            subprocess.run("clear", shell=True, check=False)
+            print("⏹️  👀\n", flush=True)
+            print(text, flush=True)
+            time.sleep(1)
