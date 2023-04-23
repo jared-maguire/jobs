@@ -57,7 +57,11 @@ spec:
           config = {{config}}
           sk8s.configs.save_config(config)
 
-          json.dump(func(), sys.stdout)
+          try:
+              json.dump(func(), sys.stdout)
+          except Exception as e:
+              print("🔔🔔🔔 error running function. sleeping.", flush=True)
+              raise e
 
         {%- if (requests is defined and requests|length > 0) or (limits is defined and limits|length > 0) %}
         resources:
@@ -97,6 +101,7 @@ def run(func, *args,
         job_template=default_job_template,
         imagePullPolicy=None,
         backoffLimit=0,
+        name="job-{s}",
         test=False,
         dryrun=False,
         state=None,
@@ -126,7 +131,8 @@ def run(func, *args,
 
     t = jinja2.Template(job_template)
     s = sk8s.util.random_string(5)
-    j = t.render(name=f"job-{s}",
+    job = name=name.format(s=s)
+    j = t.render(name=job,
                  code=code,
                  image=image,
                  requests=requests,
@@ -146,10 +152,8 @@ def run(func, *args,
                           stderr=subprocess.DEVNULL,
                           check=True)
 
-    job = f"job-{s}"
-
     if asynchro:
-        return f"job-{s}"
+        return job
     else:
         return wait(job, timeout=timeout)
 
@@ -173,7 +177,7 @@ def logs(job_name, decode=True):
     return logs
 
 
-def wait(job_name, timeout=None, verbose=False, delete=False, polling_interval=0.1):
+def wait(job_name, timeout=None, verbose=False, delete=False, polling_interval=1.0):
     get_job = f"kubectl get job -o json {job_name}"
 
     # Wait until the whole job is finished:
@@ -185,9 +189,9 @@ def wait(job_name, timeout=None, verbose=False, delete=False, polling_interval=0
         result = json.loads(sk8s.util.run_cmd(get_job, retries=5))
         if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
             log_data = logs(job_name, decode=False)
-            print(f"🔥sk8s: job {job_name} failed.")
+            print(f"🔥sk8s: job {job_name} failed.", flush=True)
             for pod_name, log in log_data.items():
-                print(f"---- {pod_name} ----:", log, sep="\n") #, file=sys.stderr)
+                print(f"---- {pod_name} ----:", log, sep="\n", flush=True) #, file=sys.stderr)
             raise RuntimeError(f"sk8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
             continue
@@ -197,8 +201,8 @@ def wait(job_name, timeout=None, verbose=False, delete=False, polling_interval=0
 
     log_text = logs(job_name, decode=True)
 
-    if delete:
-        sk8s.util.run_cmd(f"kubectl delete job {job_name}")
+    #if delete:
+    #    sk8s.util.run_cmd(f"kubectl delete job {job_name}")
 
     if verbose:
         return log_text
