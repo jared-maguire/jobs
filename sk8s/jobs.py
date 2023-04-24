@@ -60,7 +60,6 @@ spec:
           try:
               json.dump(func(), sys.stdout)
           except Exception as e:
-              print("🔔🔔🔔 error running function. sleeping.", flush=True)
               raise e
 
         {%- if (requests is defined and requests|length > 0) or (limits is defined and limits|length > 0) %}

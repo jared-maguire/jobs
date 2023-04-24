@@ -71,7 +71,7 @@ def test_simple_workflow():
                                   name="job2",
                                   asynchro=True),
                          timeout=500)
-    result = sk8s.wait(sk8s.run(wf, name="wf"), timeout=500)
+    result = sk8s.wait(sk8s.run(wf, name="wf-{s}"), timeout=500)
     assert(result == 3)
 
 
