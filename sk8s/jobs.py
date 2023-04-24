@@ -57,7 +57,10 @@ spec:
           config = {{config}}
           sk8s.configs.save_config(config)
 
-          json.dump(func(), sys.stdout)
+          try:
+              json.dump(func(), sys.stdout)
+          except Exception as e:
+              raise e
 
         {%- if (requests is defined and requests|length > 0) or (limits is defined and limits|length > 0) %}
         resources:
@@ -83,7 +86,7 @@ spec:
         {%- endif %}
 
       restartPolicy: Never
-  backoffLimit: 0
+  backoffLimit: {{backoffLimit}}
 """
 
 
@@ -96,6 +99,8 @@ def run(func, *args,
         timeout=None,
         job_template=default_job_template,
         imagePullPolicy=None,
+        backoffLimit=0,
+        name="job-{s}",
         test=False,
         dryrun=False,
         state=None,
@@ -125,29 +130,29 @@ def run(func, *args,
 
     t = jinja2.Template(job_template)
     s = sk8s.util.random_string(5)
-    j = t.render(name=f"job-{s}",
+    job = name=name.format(s=s)
+    j = t.render(name=job,
                  code=code,
                  image=image,
                  requests=requests,
                  limits=limits,
                  volumes=volumes,
                  config=config if export_config else sk8s.configs.default_config,
-                 imagePullPolicy=imagePullPolicy)
+                 imagePullPolicy=imagePullPolicy,
+                 backoffLimit=backoffLimit)
 
     if dryrun:
         return j
 
-    subprocess.run("kubectl apply -f -",
-                   shell=True,
-                   input=j.encode("utf-8"),
-                   stdout=subprocess.PIPE,
-                   check=True)
-                   #stderr=subprocess.PIPE,
-
-    job = f"job-{s}"
+    proc = subprocess.run("kubectl apply -f -",
+                          shell=True,
+                          input=j.encode("utf-8"),
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL,
+                          check=True)
 
     if asynchro:
-        return f"job-{s}"
+        return job
     else:
         return wait(job, timeout=timeout)
 
@@ -171,7 +176,7 @@ def logs(job_name, decode=True):
     return logs
 
 
-def wait(job_name, timeout=None, verbose=False, delete=True):
+def wait(job_name, timeout=None, verbose=False, delete=False, polling_interval=1.0):
     get_job = f"kubectl get job -o json {job_name}"
 
     # Wait until the whole job is finished:
@@ -180,23 +185,23 @@ def wait(job_name, timeout=None, verbose=False, delete=True):
         current = time.time()
         if (timeout is not None) and (current - start) > timeout:
             raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
-        result = json.loads(sk8s.util.run_cmd(get_job))
+        result = json.loads(sk8s.util.run_cmd(get_job, retries=5))
         if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
             log_data = logs(job_name, decode=False)
-            print(f"🔥sk8s: job {job_name} failed.")
+            print(f"🔥sk8s: job {job_name} failed.", flush=True)
             for pod_name, log in log_data.items():
-                print(f"---- {pod_name} ----:", log, sep="\n") #, file=sys.stderr)
+                print(f"---- {pod_name} ----:", log, sep="\n", flush=True) #, file=sys.stderr)
             raise RuntimeError(f"sk8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
             continue
         if result["status"]["succeeded"] == 1:
             break
-        time.sleep(1)
+        time.sleep(polling_interval)
 
     log_text = logs(job_name, decode=True)
 
-    if delete:
-        sk8s.util.run_cmd(f"kubectl delete job {job_name}")
+    #if delete:
+    #    sk8s.util.run_cmd(f"kubectl delete job {job_name}")
 
     if verbose:
         return log_text
@@ -212,6 +217,7 @@ def map(func,
         image=None,
         imagePullPolicy=None,
         timeout=None,
+        delete=True,
         asynchro=False,
         verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
@@ -220,9 +226,9 @@ def map(func,
 
     if not asynchro:
         if verbose:
-            results = {j: wait(j, timeout=timeout, verbose=verbose) for j in job_names}
+            results = {j: wait(j, timeout=timeout, verbose=verbose, delete=delete) for j in job_names}
         else:
-            results = [wait(j, timeout=timeout, verbose=verbose) for j in job_names]
+            results = [wait(j, timeout=timeout, verbose=verbose, delete=delete) for j in job_names]
         return results
     else:
         return job_names
