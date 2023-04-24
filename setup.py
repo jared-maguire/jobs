@@ -14,6 +14,7 @@ setup(
                       'jinja2',
                       'pyyaml',
                       'pytest',
+                      'pytest-xdist',
                       'numpy',
                       'scipy',
                       'pandas',

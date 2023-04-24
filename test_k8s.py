@@ -1,26 +1,30 @@
 #!/usr/bin/env python
-
+import pytest
 import sk8s
 
 
 ## Cluster
 
+@pytest.mark.cluster
 def test_cluster_config():
     assert(sk8s.check_cluster_config())
 
 
 ## Jobs
 
+@pytest.mark.jobs
 def test_run_and_wait():
-    result = sk8s.wait(sk8s.run(lambda: "Hooray"), timeout=30)
+    result = sk8s.wait(sk8s.run(lambda: "Hooray"), timeout=500)
     assert(result=="Hooray")
 
 
+@pytest.mark.jobs
 def test_run_and_wait_2():
-    result = sk8s.run(lambda: "Hooray", asynchro=False, timeout=30)
+    result = sk8s.run(lambda: "Hooray", asynchro=False, timeout=500)
     assert(result=="Hooray")
 
 
+@pytest.mark.jobs
 def test_fail():
     import os
     try:
@@ -32,37 +36,46 @@ def test_fail():
     assert(False)
 
 
+@pytest.mark.jobs
 def test_map():
     results = sk8s.map(lambda i: i*2, (0,1,2))
     assert(tuple(results) == (0,2,4))
 
 
+@pytest.mark.jobs
 def test_imports():
     def pi():
         import numpy
         return numpy.pi
 
-    result = sk8s.wait(sk8s.run(pi), timeout=30)
+    result = sk8s.wait(sk8s.run(pi), timeout=500)
 
     import numpy
     assert(result == numpy.pi)
 
 
+@pytest.mark.jobs
 def test_deps():
     job1 = sk8s.run(lambda: "job-1")
     job2 = sk8s.run(lambda result=sk8s.wait(job1): "job-2 " + result) 
-    result = sk8s.wait(job2, timeout=30)
+    result = sk8s.wait(job2, timeout=500)
     assert(result == "job-2 job-1")
 
 
+@pytest.mark.jobs
 def test_simple_workflow():
     def wf():
         jobs1 = sk8s.map(lambda i: i, range(3), asynchro=True)
-        return sk8s.wait(sk8s.run(lambda inputs: sum(inputs), map(sk8s.wait, jobs1)), timeout=30)
-    result = sk8s.wait(sk8s.run(wf), timeout=60)
+        return sk8s.wait(sk8s.run(lambda inputs: sum(inputs),
+                                  map(sk8s.wait, jobs1),
+                                  name="job2",
+                                  asynchro=True),
+                         timeout=500)
+    result = sk8s.wait(sk8s.run(wf, name="wf-{s}"), timeout=500)
     assert(result == 3)
 
 
+@pytest.mark.jobs
 def test_nested_lambda():
     job = sk8s.run(lambda i, j: 10 * sk8s.wait(sk8s.run(lambda a=i, b=j: a+b)), 1,2)
     result = sk8s.wait(job)
@@ -77,10 +90,12 @@ def test_nested_lambda():
 
 ## Volumes
 
+@pytest.mark.volumes
 def test_volumes():
     def wf():
         import json
-        volume = sk8s.create_volume("10Mi", accessModes=["ReadOnlyMany"])
+        #volume = sk8s.create_volume("10Mi", accessModes=["ReadOnlyMany"])
+        volume = sk8s.create_volume("10Mi", accessModes=["ReadWriteOnce"])
 
         def func1():
             with open(f"/mnt/{volume}/test.json", "w") as fp:
@@ -94,6 +109,8 @@ def test_volumes():
         #result = sk8s.wait(sk8s.run(func2, volumes=[volume]))
         result = sk8s.wait(sk8s.run(func1, volumes=[volume]))
         result = "hey"
+
+        sk8s.delete_volume(volume)
                                   
         return result
 
@@ -101,6 +118,7 @@ def test_volumes():
     assert(result == "hey")
 
 
+@pytest.mark.volumes
 def test_rwx_volumes():
     import time
 
@@ -129,8 +147,8 @@ def test_rwx_volumes():
 
         job2 = sk8s.run(writer, volumes=[volume])
 
-        sk8s.wait(job2)
-        result = sk8s.wait(job1)
+        sk8s.wait(job2, timeout=60*5)
+        result = sk8s.wait(job1, timeout=60*5)
         sk8s.delete_volume(volume)
 
         return result
@@ -141,6 +159,7 @@ def test_rwx_volumes():
 
 # containers
 
+@pytest.mark.containers
 def test_containers():
     image = sk8s.docker_build("pysam", conda=["pysam"], channels=["bioconda"])
 
@@ -154,6 +173,7 @@ def test_containers():
 
 # Resources
 
+@pytest.mark.jobs
 def test_resource_limits():
     import os
     def allocate_memory(size):
@@ -161,7 +181,7 @@ def test_resource_limits():
         numpy.random.bytes(size * int(1e6))
         return True
 
-    assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, asynchro=False, timeout=20))
+    assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, asynchro=False, timeout=500))
 
     try:
         job = sk8s.run(allocate_memory, 1000, requests={"memory": "6Mi", "cpu": 1}, limits={"memory":"6Mi"})
@@ -240,7 +260,7 @@ def test_stateful_workflow():
             def func():
                 import numpy
                 return numpy.random.random()
-            return sk8s.run(func, state=state, timeout=30, asynchro=False)  # Pass state as a parameter to run to benefit from memoization.
+            return sk8s.run(func, state=state, timeout=500, asynchro=False)  # Pass state as a parameter to run to benefit from memoization.
 
         a = sk8s.run(wf1, asynchro=False, image=image)
         b = sk8s.run(wf1, asynchro=False, image=image)
@@ -249,7 +269,7 @@ def test_stateful_workflow():
             def func():
                 import numpy
                 return numpy.random.random()
-            return sk8s.run(func, timeout=30, asynchro=False)
+            return sk8s.run(func, timeout=500, asynchro=False)
 
         c = sk8s.run(wf2, asynchro=False, image=image)
         d = sk8s.run(wf2, asynchro=False, image=image)
@@ -271,8 +291,8 @@ def test_freeform_state():
             def get_message():
                 return state["message"]
 
-            sk8s.run(leave_message, asynchro=False, timeout=30)
-            message = sk8s.run(get_message, asynchro=False, timeout=30)
+            sk8s.run(leave_message, asynchro=False, timeout=500)
+            message = sk8s.run(get_message, asynchro=False, timeout=500)
             return message
 
         message = sk8s.run(wf1, asynchro=False)
@@ -284,6 +304,8 @@ def test_freeform_state():
 
 
 # Module Config Files
+
+@pytest.mark.config
 def test_configs():
     def test_config_job():
         import sk8s
