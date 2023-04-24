@@ -176,7 +176,7 @@ def logs(job_name, decode=True):
     return logs
 
 
-def wait(job_name, timeout=None, verbose=False, delete=False, polling_interval=1.0):
+def wait(job_name, timeout=None, verbose=False, delete=True, polling_interval=1.0):
     get_job = f"kubectl get job -o json {job_name}"
 
     # Wait until the whole job is finished:
@@ -190,7 +190,7 @@ def wait(job_name, timeout=None, verbose=False, delete=False, polling_interval=1
             log_data = logs(job_name, decode=False)
             print(f"🔥sk8s: job {job_name} failed.", flush=True)
             for pod_name, log in log_data.items():
-                print(f"---- {pod_name} ----:", log, sep="\n", flush=True) #, file=sys.stderr)
+                print(f"---- {pod_name} ----:", log, f"---- END {pod_name} ----", sep="\n", flush=True) #, file=sys.stderr)
             raise RuntimeError(f"sk8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
             continue
