@@ -9,7 +9,7 @@ import sk8s
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("cmd", choices=["gke", "local"])
+    parser.add_argument("cmd", choices=["gke", "gke2", "local"])
     parser.add_argument("-container", default=False, action="store_true")
     args = parser.parse_args()
 
@@ -17,6 +17,10 @@ if __name__ == "__main__":
 
     if args.cmd == "gke":
         subprocess.run("kubectl config use-context gke_jared-genome-analysis_us-central1_autopilot-cluster-1", check=True, shell=True)
+        subprocess.run("python -m sk8s config-gke -project jared-genome-analysis", check=True, shell=True)
+
+    if args.cmd == "gke2":
+        subprocess.run("kubectl config use-context gke_jared-genome-analysis_us-central1_autopilot-cluster-2", check=True, shell=True)
         subprocess.run("python -m sk8s config-gke -project jared-genome-analysis", check=True, shell=True)
 
     if args.cmd == "local":
