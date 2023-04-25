@@ -11,6 +11,7 @@ import base64
 import json
 import jinja2
 import subprocess
+import multiprocessing
 
 import sk8s
 
@@ -167,7 +168,7 @@ def logs(job_name, decode=True):
     for pod_name in pod_names:
         if decode:
             try:
-                pod_logs_text = sk8s.util.run_cmd(f"kubectl logs {pod_name}")
+                pod_logs_text = sk8s.util.run_cmd(f"kubectl logs {pod_name}", retries=2)
                 logs[pod_name] = json.loads(pod_logs_text)
             except json.JSONDecodeError as e:
                 print("job failed with error:", pod_logs_text, sep="\n", flush=True)
@@ -179,13 +180,16 @@ def logs(job_name, decode=True):
 def wait(job_name, timeout=None, verbose=False, delete=True, polling_interval=1.0):
     get_job = f"kubectl get job -o json {job_name}"
 
+    print(f"waiting for {job_name}")
+
     # Wait until the whole job is finished:
     start = time.time()
     while True:
+        print(f"💤 waiting for {job_name}", flush=True)
         current = time.time()
         if (timeout is not None) and (current - start) > timeout:
             raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
-        result = json.loads(sk8s.util.run_cmd(get_job, retries=5))
+        result = json.loads(sk8s.util.run_cmd(get_job, retries=1))
         if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
             log_data = logs(job_name, decode=False)
             print(f"🔥sk8s: job {job_name} failed.", flush=True)
@@ -193,6 +197,7 @@ def wait(job_name, timeout=None, verbose=False, delete=True, polling_interval=1.
                 print(f"---- {pod_name} ----:", log, f"---- END {pod_name} ----", sep="\n", flush=True) #, file=sys.stderr)
             raise RuntimeError(f"sk8s: Job {job_name} failed.")
         if "succeeded" not in result["status"]:
+            time.sleep(polling_interval)
             continue
         if result["status"]["succeeded"] == 1:
             break
@@ -200,8 +205,12 @@ def wait(job_name, timeout=None, verbose=False, delete=True, polling_interval=1.
 
     log_text = logs(job_name, decode=True)
 
-    #if delete:
-    #    sk8s.util.run_cmd(f"kubectl delete job {job_name}")
+    print(f"done waiting for {job_name}")
+
+    if delete:
+        sk8s.util.run_cmd(f"kubectl delete job {job_name}")
+
+    print(f"cleaned up from {job_name}")
 
     if verbose:
         return log_text
@@ -232,4 +241,3 @@ def map(func,
         return results
     else:
         return job_names
-

@@ -20,7 +20,7 @@ def run_cmd(cmd, retries=1):
     while n < retries:
         result = subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout
         n += 1
-        if n < retries: time.sleep(5)
+        if n < retries: time.sleep(1)
     return result
 
 
