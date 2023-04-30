@@ -28,6 +28,10 @@ if __name__ == '__main__':
     config.add_argument('-tag', default="jobs", help='the tag we should use for the default jobs image')
     config.add_argument('-push', default=False, action='store_true', help="also push the image when it's built")
 
+    config = subparsers.add_parser('shell', help='launch an interactive shell')
+    config.add_argument('-image', default=None, help='name of the image to use')
+    config.add_argument('-volumes', default=None, nargs="+", help='names of any volumes to mount')
+
     config = subparsers.add_parser('kubewatch', help='watch the cluster')
 
     #test = subparsers.add_parser('test', help='test k8s')
@@ -76,3 +80,6 @@ if __name__ == '__main__':
             print("⏹️  👀\n", flush=True)
             print(text, flush=True)
             time.sleep(1)
+
+    if args.command == "shell":
+        job = sk8s.util.interactive_job(image=args.image, volumes=args.volumes)
