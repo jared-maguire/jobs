@@ -25,5 +25,5 @@ gcloud iam service-accounts add-iam-policy-binding $GSA_NAME \
 kubectl annotate serviceaccount $KSA_NAME \
     --namespace $NS \
     261248090722-compute@developer.gserviceaccount.com
-    
+
 #    iam.gke.io/gcp-service-account=$GSA_NAME@$PROJECT_ID.iam.gserviceaccount.com
