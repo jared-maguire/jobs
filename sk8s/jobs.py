@@ -33,7 +33,7 @@ spec:
   template:
     spec:
       volumes:
-      {% for volume in volumes %}
+      {% for volume in volumes.keys() %}
       - name: {{volume}}
         persistentVolumeClaim:
           claimName: {{volume}}
@@ -80,9 +80,9 @@ spec:
         {%- endfor %}
         {%- if volumes is defined and volumes|length > 0 %}
         volumeMounts:
-        {%- for volume in volumes %}
-        - mountPath: "/mnt/{{volume}}"
-          name: {{volume}}
+        {%- for volname, mountpath in volumes.items() %}
+        - mountPath: {{mountpath}}
+          name: {{volname}}
         {%- endfor %}
         {%- endif %}
 
@@ -90,10 +90,11 @@ spec:
   backoffLimit: {{backoffLimit}}
 """
 
+        #- mountPath: "/mnt/{{volume}}"
 
 def run(func, *args,
         image=None,
-        volumes=[],
+        volumes={},
         requests=dict(),
         limits=dict(),
         asynchro=True,
@@ -124,6 +125,11 @@ def run(func, *args,
         code = sk8s.util.serialize_func(lambda a=args: func(*a))
     else:
         code = sk8s.util.serialize_func(state.memoize(lambda a=args: func(*a)))
+
+    if volumes.__class__ == str:
+        volumes = {volumes: f"/mnt/{volumes}"}
+    if volumes.__class__ == list:
+        volumes = {name: f"/mnt/{name}" for name in volumes}
 
     if test:
         func_2 = pickle.loads(base64.b64decode(code))
@@ -180,12 +186,9 @@ def logs(job_name, decode=True):
 def wait(job_name, timeout=None, verbose=False, delete=True, polling_interval=1.0):
     get_job = f"kubectl get job -o json {job_name}"
 
-    print(f"waiting for {job_name}")
-
     # Wait until the whole job is finished:
     start = time.time()
     while True:
-        print(f"💤 waiting for {job_name}", flush=True)
         current = time.time()
         if (timeout is not None) and (current - start) > timeout:
             raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
@@ -205,12 +208,8 @@ def wait(job_name, timeout=None, verbose=False, delete=True, polling_interval=1.
 
     log_text = logs(job_name, decode=True)
 
-    print(f"done waiting for {job_name}")
-
     if delete:
         sk8s.util.run_cmd(f"kubectl delete job {job_name}")
-
-    print(f"cleaned up from {job_name}")
 
     if verbose:
         return log_text
