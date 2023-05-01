@@ -223,6 +223,7 @@ def map(func,
         requests=dict(),
         limits=dict(),
         image=None,
+        volumes=None,
         imagePullPolicy=None,
         timeout=None,
         delete=True,
@@ -230,7 +231,7 @@ def map(func,
         verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
-    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
+    job_names = [run(thunk, image=image, volumes=volumes, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
 
     if not asynchro:
         if verbose:
