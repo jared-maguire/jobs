@@ -17,7 +17,7 @@ if __name__ == '__main__':
     config = subparsers.add_parser('config-local', help='configure sk8s for a local cluster')
 
     config = subparsers.add_parser('config-gke', help='configure sk8s for a GKE cluster')
-    config.add_argument('-project', help='google cloud project name (required)')
+    config.add_argument('-project', help='google cloud project name (required)', required=True)
 
     config = subparsers.add_parser('containers', help='build worker container')
     config.add_argument('-branch', default="master", help='the tag we should use for the default jobs image')
