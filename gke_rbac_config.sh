@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# This is needed for GKE autopilot clusters, circa May 2023
+
 # from: https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity
 
 NS=sk8s
