@@ -204,7 +204,7 @@ def wait(jobs, delete=True, timeout=None):
         log_text = sk8s.logs(job_name, decode=decode)
         if delete:
             sk8s.util.run_cmd(f"kubectl delete job {job_name}")
-        elif decode:
+        if decode:
             return list(log_text.values())[0]
         else:
             return log_text
@@ -213,10 +213,8 @@ def wait(jobs, delete=True, timeout=None):
         jobs = [jobs]
 
     data = get_job_status_json(jobs)
-    print(data, flush=True)
 
     results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
-    print(Counter(results.values()))
 
     actual_results = dict()  # nice variable name doofus 😜
 
@@ -224,42 +222,42 @@ def wait(jobs, delete=True, timeout=None):
     while True:
         data = get_job_status_json(jobs)
         results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
-        #print(Counter(results.values()))
-        print(results)
         if "running" not in results.values(): break
 
         for j, s in results.items():
+            if j in actual_results.keys(): continue
             if s == "success":
                 val = cleanup_job(j, delete=delete)
                 actual_results[j] = val
-                print(j, s, val, flush=True)
             elif s == "failed":
                 val = cleanup_job(j, delete=False, decode=False)
                 actual_results[j] = val
                 failures.add(j)
-                print(j, s, val, flush=True)
+            elif s == "running":
+                continue
+            else:
+                assert(False)
 
         time.sleep(1)
 
     # Now clean up whatever's left
     data = get_job_status_json(jobs)
     results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
-    print(results)
 
     for j, s in results.items():
+        if j in actual_results.keys(): continue
         if s == "success":
             val = cleanup_job(j, delete=delete)
             actual_results[j] = val
-            print(j, s, val, flush=True)
         elif s == "failed":
             val = cleanup_job(j, delete=False, decode=False)
             actual_results[j] = val
             failures.add(j)
-            print(j, s, val, flush=True)
+        else:
+            assert(False)
 
     data = get_job_status_json(jobs)
     results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
-    print(results)
 
     if len(failures) != 0:
         raise RuntimeError(f"Jobs {' '.join(failures)} failed.")
