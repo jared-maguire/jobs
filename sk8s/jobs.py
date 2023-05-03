@@ -2,6 +2,7 @@
 
 import os
 import sys
+from collections import Counter
 
 import dill as pickle
 pickle.settings['recurse'] = True
@@ -183,39 +184,95 @@ def logs(job_name, decode=True):
     return logs
 
 
-def wait(job_name, timeout=None, verbose=False, delete=True, polling_interval=1.0):
-    get_job = f"kubectl get job -o json {job_name}"
+def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
+    def get_job_status_json(jobs):
+        stdout = subprocess.run(f"kubectl get jobs {' '.join(jobs)} -o json --ignore-not-found", 
+                            check=True, shell=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8").stdout
+        try:
+            data = json.loads(stdout)
+            if data["kind"] == "Job":
+                return dict(kind="List", items=[data])
+            else: 
+                return data
+        except json.JSONDecodeError:
+            return dict(kind="List", items=[])
 
-    # Wait until the whole job is finished:
-    start = time.time()
+    def check_job_status_json(data):
+        assert(data["kind"] == "Job")
+        if ("failed" in data["status"]) and (data["status"]["failed"] >= data["spec"]["backoffLimit"]):
+            return "failed"
+        if "succeeded" not in data["status"]:
+            return "running"
+        if data["status"]["succeeded"] == 1:
+            return "success"
+
+    def cleanup_job(job_name, delete=True, decode=True):
+        log_text = sk8s.logs(job_name, decode=decode)
+        if delete:
+            sk8s.util.run_cmd(f"kubectl delete job {job_name}")
+        if decode:
+            return list(log_text.values())[0]
+        else:
+            return log_text
+
+    if jobs.__class__ == str:
+        jobs = [jobs]
+
+    data = get_job_status_json(jobs)
+
+    results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
+
+    actual_results = dict()  # nice variable name doofus 😜
+
+    failures = set()
     while True:
-        current = time.time()
-        if (timeout is not None) and (current - start) > timeout:
-            raise RuntimeError(f"k8s: Job {job_name} timed out waiting.")
-        result = json.loads(sk8s.util.run_cmd(get_job, retries=1))
-        if ("failed" in result["status"]) and (result["status"]["failed"] >= result["spec"]["backoffLimit"]):
-            log_data = logs(job_name, decode=False)
-            print(f"🔥sk8s: job {job_name} failed.", flush=True)
-            for pod_name, log in log_data.items():
-                print(f"---- {pod_name} ----:", log, f"---- END {pod_name} ----", sep="\n", flush=True) #, file=sys.stderr)
-            raise RuntimeError(f"sk8s: Job {job_name} failed.")
-        if "succeeded" not in result["status"]:
-            time.sleep(polling_interval)
-            continue
-        if result["status"]["succeeded"] == 1:
-            break
-        time.sleep(polling_interval)
+        data = get_job_status_json(jobs)
+        results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
+        if "running" not in results.values(): break
 
-    log_text = logs(job_name, decode=True)
+        for j, s in results.items():
+            if j in actual_results.keys(): continue
+            if s == "success":
+                val = cleanup_job(j, delete=delete)
+                actual_results[j] = val
+            elif s == "failed":
+                val = cleanup_job(j, delete=False, decode=False)
+                actual_results[j] = val
+                failures.add(j)
+            elif s == "running":
+                continue
+            else:
+                assert(False)
 
-    if delete:
-        sk8s.util.run_cmd(f"kubectl delete job {job_name}")
+        time.sleep(1)
 
-    if verbose:
-        return log_text
+    # Now clean up whatever's left
+    data = get_job_status_json(jobs)
+    results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
+
+    for j, s in results.items():
+        if j in actual_results.keys(): continue
+        if s == "success":
+            val = cleanup_job(j, delete=delete)
+            actual_results[j] = val
+        elif s == "failed":
+            val = cleanup_job(j, delete=False, decode=False)
+            actual_results[j] = val
+            failures.add(j)
+        else:
+            assert(False)
+
+    data = get_job_status_json(jobs)
+    results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
+
+    if len(failures) != 0:
+        raise RuntimeError(f"Jobs {' '.join(failures)} failed.")
+
+    if len(jobs) != 1:
+        return [actual_results[job] for job in jobs]
     else:
-        assert(len(log_text.values()) == 1)
-        return list(log_text.values())[0]
+        return actual_results[jobs[0]]
 
 
 def map(func,
@@ -231,13 +288,8 @@ def map(func,
         verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
-    job_names = [run(thunk, image=image, volumes=volumes, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
-
-    if not asynchro:
-        if verbose:
-            results = {j: wait(j, timeout=timeout, verbose=verbose, delete=delete) for j in job_names}
-        else:
-            results = [wait(j, timeout=timeout, verbose=verbose, delete=delete) for j in job_names]
-        return results
-    else:
+    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
+    if asynchro:
         return job_names
+    else:
+        return wait(job_names, timeout=timeout)
