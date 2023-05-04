@@ -12,6 +12,7 @@ import base64
 import json
 import jinja2
 import subprocess
+import multiprocessing
 
 import sk8s
 
@@ -33,7 +34,7 @@ spec:
   template:
     spec:
       volumes:
-      {% for volume in volumes %}
+      {% for volume in volumes.keys() %}
       - name: {{volume}}
         persistentVolumeClaim:
           claimName: {{volume}}
@@ -80,9 +81,9 @@ spec:
         {%- endfor %}
         {%- if volumes is defined and volumes|length > 0 %}
         volumeMounts:
-        {%- for volume in volumes %}
-        - mountPath: "/mnt/{{volume}}"
-          name: {{volume}}
+        {%- for volname, mountpath in volumes.items() %}
+        - mountPath: {{mountpath}}
+          name: {{volname}}
         {%- endfor %}
         {%- endif %}
 
@@ -90,10 +91,11 @@ spec:
   backoffLimit: {{backoffLimit}}
 """
 
+        #- mountPath: "/mnt/{{volume}}"
 
 def run(func, *args,
         image=None,
-        volumes=[],
+        volumes={},
         requests=dict(),
         limits=dict(),
         asynchro=True,
@@ -124,6 +126,11 @@ def run(func, *args,
         code = sk8s.util.serialize_func(lambda a=args: func(*a))
     else:
         code = sk8s.util.serialize_func(state.memoize(lambda a=args: func(*a)))
+
+    if volumes.__class__ == str:
+        volumes = {volumes: f"/mnt/{volumes}"}
+    if volumes.__class__ == list:
+        volumes = {name: f"/mnt/{name}" for name in volumes}
 
     if test:
         func_2 = pickle.loads(base64.b64decode(code))
@@ -168,7 +175,7 @@ def logs(job_name, decode=True):
     for pod_name in pod_names:
         if decode:
             try:
-                pod_logs_text = sk8s.util.run_cmd(f"kubectl logs {pod_name}")
+                pod_logs_text = sk8s.util.run_cmd(f"kubectl logs {pod_name}", retries=2)
                 logs[pod_name] = json.loads(pod_logs_text)
             except json.JSONDecodeError as e:
                 print("job failed with error:", pod_logs_text, sep="\n", flush=True)
@@ -177,7 +184,7 @@ def logs(job_name, decode=True):
     return logs
 
 
-def wait(jobs, delete=True, timeout=None):
+def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
     def get_job_status_json(jobs):
         stdout = subprocess.run(f"kubectl get jobs {' '.join(jobs)} -o json --ignore-not-found", 
                             check=True, shell=True,
@@ -273,6 +280,7 @@ def map(func,
         requests=dict(),
         limits=dict(),
         image=None,
+        volumes={},
         imagePullPolicy=None,
         timeout=None,
         delete=True,

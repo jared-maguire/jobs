@@ -5,9 +5,29 @@ import subprocess
 import sk8s.configs
 
 
+filestore_storageclass="""apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: standard-rwx
+provisioner: filestore.csi.storage.gke.io
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+parameters:
+  tier: standard
+  network: default"""
+
+
+# If needed, add a storage class to talk to FileStore. (autopilot clusters come with this by default)
+def add_rwx_storage_class():
+    subprocess.run("kubectl apply -f -",
+                   shell=True,
+                   input=filestore_storageclass.encode("utf-8"),
+                   stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL,
+                   check=True)
+
 
 # Enable ReadWriteMany volumes via Google FileStore:
-
 def config_storageclass_defaults():
     config = sk8s.configs.load_config()
     config["default_readwritemany_storageclass"] = "standard-rwx"
