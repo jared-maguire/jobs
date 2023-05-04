@@ -17,7 +17,7 @@ if __name__ == '__main__':
     config = subparsers.add_parser('config-local', help='configure sk8s for a local cluster')
 
     config = subparsers.add_parser('config-gke', help='configure sk8s for a GKE cluster')
-    config.add_argument('-project', help='google cloud project name (required)')
+    config.add_argument('-project', help='google cloud project name (required)', required=True)
 
     config = subparsers.add_parser('containers', help='build worker container')
     config.add_argument('-branch', default="master", help='the tag we should use for the default jobs image')
@@ -27,6 +27,10 @@ if __name__ == '__main__':
     config = subparsers.add_parser('clean_namespace', help='delete almost everything from the current k8s namespace')
     config.add_argument('-tag', default="jobs", help='the tag we should use for the default jobs image')
     config.add_argument('-push', default=False, action='store_true', help="also push the image when it's built")
+
+    config = subparsers.add_parser('shell', help='launch an interactive shell')
+    config.add_argument('-image', default=None, help='name of the image to use')
+    config.add_argument('-volumes', default=None, nargs="+", help='names of any volumes to mount')
 
     config = subparsers.add_parser('kubewatch', help='watch the cluster')
 
@@ -71,7 +75,11 @@ if __name__ == '__main__':
         import time
         while(True):
             text = subprocess.run("kubectl get all", shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.decode("utf-8")
+            text += "\n\n" + subprocess.run("kubectl get pvc", shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.decode("utf-8")
             subprocess.run("clear", shell=True, check=False)
             print("⏹️  👀\n", flush=True)
             print(text, flush=True)
             time.sleep(1)
+
+    if args.command == "shell":
+        job = sk8s.util.interactive_job(image=args.image, volumes=args.volumes)

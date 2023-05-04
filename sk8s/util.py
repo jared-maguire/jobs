@@ -20,7 +20,7 @@ def run_cmd(cmd, retries=1):
     while n < retries:
         result = subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout
         n += 1
-        if n < retries: time.sleep(5)
+        if n < retries: time.sleep(1)
     return result
 
 
@@ -73,32 +73,33 @@ def get_pod_names_from_job(job):
     pod_names = [p["metadata"]["name"] for p in pods["items"]]
     return pod_names
 
-def interactive_job(lifespan):
+def interactive_job(image=None, volumes=None):
     # this bit is fun...
 
-    def hang(lifespan=lifespan):
+    def hang(lifespan):
         import time
         time.sleep(lifespan)
 
-    job = sk8s.run(hang)
+    job = sk8s.run(hang, 3600, image=image, volumes=volumes)
 
     pods = get_pods_from_job(job)
     phases = [pods["items"][i]["status"]["phase"]
               for i in range(len(pods["items"]))]
     
-
     print(f"Wating for {job} to get started...")
-    while (phases[0] != "Running"):
+    while (len(phases) == 0) or (phases[0] != "Running"):
         pods = get_pods_from_job(job)
         phases = [pods["items"][i]["status"]["phase"]
                   for i in range(len(pods["items"]))]
         time.sleep(1)
-        print(phases)
+        print(",".join(phases), "                 ", end="\r")
 
     pod_names = get_pod_names_from_job(job)
     pod_name = pod_names[0]
 
-    return os.system(f"kubectl exec --stdin --tty {pod_name} -- /bin/bash")
+    print(pod_name)
+
+    return os.system(f"kubectl exec --stdin --tty {pod_name} -- bash")
 
 
 def wipe_namespace(namespace=None):

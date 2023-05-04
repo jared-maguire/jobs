@@ -19,7 +19,7 @@ RUN conda config --add channels {{channel}}
 
 RUN conda update -n base conda
 
-RUN conda install -y pip tqdm
+RUN conda install -y pip tqdm tmux
 RUN pip install dill flask jupyter requests numpy scipy pandas pyyaml pymongo
 
 # Installing in dev mode here is a hack to work around
