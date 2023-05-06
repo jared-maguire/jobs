@@ -163,3 +163,12 @@ def service(func, *args,
     url = f"http://{name}.{namespace}.svc.cluster.local:{port}"
 
     return url
+
+
+def stop_service(url):
+    name, namespace, port = re.findall(f"http://(.+?)\.(.*?)\.svc\.cluster\.local:(\d+)",
+                                       url)[0]
+    subprocess.run(f"kubectl delete service {name}", check=True, shell=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8")
+    subprocess.run(f"kubectl delete deployment {name}", check=True, shell=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8")

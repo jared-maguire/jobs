@@ -82,6 +82,26 @@ def test_nested_lambda():
     assert(result == 30)
 
 
+## Services
+@pytest.mark.services
+def test_services():
+    import sk8s.datastore
+
+    def datastore_service():
+        import sk8s.datastore as ds
+        datastore = ds.Datastore()
+        datastore.run()
+
+    service = sk8s.service(datastore_service)
+
+    sk8s.run(sk8s.datastore.put, service, "hey", "you", asynchro=False)
+    ans = sk8s.run(sk8s.datastore.get, service, "hey", asynchro=False)
+
+    sk8s.stop_service(service)
+
+    assert(ans == "you")
+
+
 #def test_ngs_workflow():
 #    from example_workflow import ngs_workflow
 #    results = ngs_workflow("batch-1")
