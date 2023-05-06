@@ -7,6 +7,8 @@ from flask import Flask
 from flask import request
 import requests
 import json
+import jinja2
+import re
 
 
 class Datastore:
@@ -26,7 +28,7 @@ class Datastore:
         return json.dumps(self.data[key])
 
     def run(self):
-        return self.app.run()
+        return self.app.run(host="0.0.0.0")
 
 
 def put(url, key, val):
