@@ -17,6 +17,7 @@ class Datastore:
         self.data = dict()
         self.app.add_url_rule('/put/<key>', 'put', self.put, methods=["POST"])
         self.app.add_url_rule('/get/<key>', 'get', self.get, methods=["GET"])
+        self.app.add_url_rule('/getall', 'getall', self.getall, methods=["GET"])
     
     def put(self, key):
         data = request.data
@@ -27,6 +28,9 @@ class Datastore:
     def get(self, key):
         return json.dumps(self.data[key])
 
+    def getall(self):
+        return json.dumps(self.data)
+
     def run(self):
         return self.app.run(host="0.0.0.0")
 
@@ -36,7 +40,11 @@ def put(url, key, val):
     return r.content.decode("utf-8")
 
 
-def get(url, key):
-    r = requests.get(f"{url}/get/{key}")
-    return json.loads(r.content.decode("utf-8"))
+def get(url, key=None):
+    if key is not None:
+        r = requests.get(f"{url}/get/{key}")
+        return json.loads(r.content.decode("utf-8"))
+    else:
+        r = requests.get(f"{url}/getall")
+        return json.loads(r.content.decode("utf-8"))
 
