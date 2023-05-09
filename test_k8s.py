@@ -43,6 +43,13 @@ def test_map():
 
 
 @pytest.mark.jobs
+@pytest.mark.services
+def test_map2():
+    results = sk8s.map2(lambda i: i*2, (0,1,2))
+    assert(tuple(results) == (0,2,4))
+
+
+@pytest.mark.jobs
 def test_imports():
     def pi():
         import numpy
