@@ -12,9 +12,13 @@ import base64
 import json
 import jinja2
 import subprocess
+import sys
+import re
+import numpy
 import multiprocessing
 
 import sk8s
+import sk8s.datastore
 
 
 def check_cluster_config():
@@ -101,12 +105,12 @@ def run(func, *args,
         asynchro=True,
         timeout=None,
         job_template=default_job_template,
+        results_url=None,
         imagePullPolicy=None,
         backoffLimit=0,
         name="job-{s}",
         test=False,
         dryrun=False,
-        state=None,
         config=None,
         export_config=True,
         debug=False):
@@ -122,10 +126,20 @@ def run(func, *args,
     if imagePullPolicy is None:
         imagePullPolicy = config["docker_default_pull_policy"]
 
-    if state is None:
-        code = sk8s.util.serialize_func(lambda a=args: func(*a))
+    s = sk8s.util.random_string(5)
+    job = name=name.format(s=s)
+
+    if results_url is not None:
+        def logging_wrapper(func, args, job_name=job, results_url=results_url):
+            import sk8s.datastore
+            result = func(*args)
+            sk8s.datastore.put(results_url, job_name, result)
+            return result
+        final_func = lambda *args: logging_wrapper(func, args, job_name=job, results_url=results_url)
     else:
-        code = sk8s.util.serialize_func(state.memoize(lambda a=args: func(*a)))
+        final_func = func
+
+    code = sk8s.util.serialize_func(lambda a=args: final_func(*a))
 
     if volumes.__class__ == str:
         volumes = {volumes: f"/mnt/{volumes}"}
@@ -137,8 +151,7 @@ def run(func, *args,
         return func_2()
 
     t = jinja2.Template(job_template)
-    s = sk8s.util.random_string(5)
-    job = name=name.format(s=s)
+
     j = t.render(name=job,
                  code=code,
                  image=image,
@@ -182,6 +195,42 @@ def logs(job_name, decode=True):
         else:
             logs[pod_name] = sk8s.util.run_cmd(f"kubectl logs {pod_name}").decode("utf-8")
     return logs
+
+
+def wait2(jobs, results_url, timeout=None, verbose=False, delete=True, polling_interval=1.0):
+
+    # if we're not in a pod, then we need to set up a port forward.
+    if "KUBERNETES_SERVICE_HOST" not in os.environ:
+        # need a port forward
+        service_name = re.search("://(.*?)\.", results_url).groups()[0]
+        remote_port = 5000
+        local_port = int(numpy.random.rand() * 10000 + 10000)
+        cmd = f"kubectl port-forward service/{service_name} {local_port}:{remote_port}"
+        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        local_url = f"http://localhost:{local_port}/"
+        original_url = results_url
+        results_url = local_url
+
+    done = False
+    while not done:
+        results = sk8s.datastore.get(results_url)
+        r = [results.get(job, None) for job in jobs]
+        if None not in r:
+            done = True
+    
+    for job in jobs:
+        sk8s.util.run_cmd(f"kubectl delete job {job}")
+
+    if "KUBERNETES_SERVICE_HOST" not in os.environ:
+        # shut down the port forward
+        proc.terminate()
+        proc.wait()
+
+        # shut down the service
+        sk8s.util.run_cmd(f"kubectl delete service {service_name}")
+        sk8s.util.run_cmd(f"kubectl delete deployment {service_name}")
+
+    return r
 
 
 def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
@@ -275,6 +324,42 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
         return actual_results[jobs[0]]
 
 
+def map2(func,
+        iterable, 
+        requests=dict(),
+        limits=dict(),
+        image=None,
+        volumes={},
+        imagePullPolicy=None,
+        timeout=None,
+        delete=True,
+        asynchro=False,
+        verbose=False):
+
+    thunks = [lambda arg=i: func(arg) for i in iterable]
+
+    def datastore_service():
+        import sk8s.datastore as ds
+        datastore = ds.Datastore()
+        datastore.run()
+
+    results_url = sk8s.services.service(datastore_service)
+    time.sleep(5) # TODO: obviously, this is awful
+
+    job_names = [run(thunk,
+                     image=image,
+                     requests=requests,
+                     limits=limits,
+                     imagePullPolicy=imagePullPolicy,
+                     results_url=results_url,
+                     volumes=volumes)
+                 for thunk in thunks]
+    if asynchro:
+        return results_url, job_names
+    else:
+        return wait2(job_names, results_url, timeout=timeout)
+
+
 def map(func,
         iterable, 
         requests=dict(),
@@ -288,7 +373,13 @@ def map(func,
         verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
-    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
+    job_names = [run(thunk,
+                     image=image,
+                     requests=requests,
+                     limits=limits,
+                     imagePullPolicy=imagePullPolicy,
+                     volumes=volumes)
+                 for thunk in thunks]
     if asynchro:
         return job_names
     else:

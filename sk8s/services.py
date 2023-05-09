@@ -154,6 +154,8 @@ def service(func, *args,
                           stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL,
                           check=True)
+    
+    
 
     namespace = subprocess.run("kubectl config view --minify -o jsonpath='{..namespace}'",
                                check=True, shell=True, stdout=subprocess.PIPE,
