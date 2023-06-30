@@ -101,14 +101,12 @@ def test_volumes():
             with open(f"/mnt/{volume}/test.json", "w") as fp:
                 json.dump("hey", fp)
 
-        #def func2():
-        #    with open(f"/mnt/{volume}/test.json") as fp:
-        #        return json.load(fp)
+        def func2():
+            with open(f"/mnt/{volume}/test.json") as fp:
+                return json.load(fp)
 
-        #sk8s.wait(sk8s.run(func1, volumes=[volume]))
-        #result = sk8s.wait(sk8s.run(func2, volumes=[volume]))
-        result = sk8s.wait(sk8s.run(func1, volumes=[volume]))
-        result = "hey"
+        sk8s.wait(sk8s.run(func1, volumes=[volume]))
+        result = sk8s.wait(sk8s.run(func2, volumes=[volume]))
 
         sk8s.delete_volume(volume)
                                   
