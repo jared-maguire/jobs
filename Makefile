@@ -1,5 +1,5 @@
 test:
-	pytest --pyargs sk8s
+	pytest
 
 local_config:
 	python -m sk8s config-cluster -apply
