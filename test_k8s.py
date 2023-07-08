@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import pytest
 import sk8s
+import sk8s.services
 
 
 ## Cluster
@@ -320,3 +321,59 @@ def test_configs():
 
     result = sk8s.run(test_config_job, asynchro=False)
     assert(result == "pass")
+
+
+# Services
+@pytest.mark.services
+def test_service():
+
+    def echo_service():
+        from flask import Flask, request
+        app = Flask(__name__)
+
+        @app.route('/echo', methods=['POST'])
+        def echo():
+            data = request.get_json()
+            data["response"] = f'{data["message"]} {data["message"]}'
+            return data
+
+        @app.route('/shutdown', methods=['GET', 'POST'])
+        def shutdown():
+            func = request.environ.get('werkzeug.server.shutdown')
+            if func is None:
+                raise RuntimeError('Not running with the Werkzeug Server')
+            print("Shutting down", flush=True)
+            func()
+
+        app.run(host="0.0.0.0")
+
+    # Launch the Service
+    service_name = sk8s.services.service(echo_service, ports=[5000])
+
+    # Set up a local forward to get the url
+    service_forward = sk8s.services.forward(service_name, 5000, 5000)
+    service_url = service_forward["url"]
+
+    import time; time.sleep(10);
+    #print("fwd_stdout:", service_forward["proc"].stdout.read(), flush=True)
+
+    # POST some json to the service and get the result
+    import requests
+    response = requests.post(f"{service_url}/echo",
+                             json=dict(message="awesome"),
+                             timeout=2)
+                                   
+    import json
+    print("Response:", json.loads(response.content))
+
+    # Shut down the port forward
+    service_forward["proc"].terminate()
+    service_forward["proc"].wait()
+
+    # And shut down the service
+    sk8s.services.shutdown_service(service_name)
+
+    # And finally, check that the result is correct
+    resp = json.loads(response.content)
+    assert((resp["message"] == "awesome") and
+           (resp["response"] == "awesome awesome"))
