@@ -162,7 +162,7 @@ def test_containers():
     image = sk8s.docker_build("pysam", conda=["pysam"], channels=["bioconda"])
 
     def test_pysam():
-        import pysam
+        import pysam  # type: ignore
         return pysam.__file__
 
     result = sk8s.wait(sk8s.run(test_pysam, image=image))
