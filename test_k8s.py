@@ -353,7 +353,7 @@ def test_service():
 
     # Set up a local forward to get the url
     service_forward = sk8s.services.forward(service_name, 5000, 5000)
-    service_url = service_forward["url"]
+    service_url = service_forward.url
 
     #print("fwd_stdout:", service_forward["proc"].stdout.read(), flush=True)
 
@@ -376,8 +376,8 @@ def test_service():
     print("Response:", json.loads(response.content))
 
     # Shut down the port forward
-    service_forward["proc"].terminate()
-    service_forward["proc"].wait()
+    service_forward.proc.terminate()
+    service_forward.proc.wait()
 
     # And shut down the service
     sk8s.services.shutdown_service(service_name)
@@ -386,3 +386,28 @@ def test_service():
     #resp = json.loads(response.content)
     #assert((resp["message"] == "awesome") and
     #       (resp["response"] == "awesome awesome"))
+
+
+@pytest.mark.services
+def test_kvs():
+    import sk8s.services as svc
+    import json
+    import time
+
+    s = svc.kvs_service()
+    svc.KeyValueStore.wait_until_up(s)
+    fwd = svc.forward(s, 5000, 5000)
+
+    word = svc.KeyValueStore.get(fwd.url, "word")
+    print("word 1:", word)
+    svc.KeyValueStore.put(fwd.url, "word", "bird")
+    word = svc.KeyValueStore.get(fwd.url, "word")
+    print("word 2:", word)
+
+    fwd.proc.terminate()
+    fwd.proc.wait()
+
+    svc.shutdown_service(s)
+
+    assert(word["key"] == "word")
+    assert(word["value"] == "bird")
