@@ -51,7 +51,9 @@ spec:
               json.dump(func(), sys.stdout)
           except Exception as e:
               #raise e
-              json.dump("😢 ERROR, service function threw exception.", sys.stdout)
+              print(e)
+              json.dump("!!! ERROR, service function threw exception.", sys.stdout)
+              raise e
 
         args:
           - --bind_ip
@@ -91,6 +93,7 @@ spec:
 def service(func, *args,
             name=None,
             ports=[21, 22, 80, 5000],
+            timeout=10.0,
             namespace=None,
             dryrun=False,
             template=default_service_template,
@@ -141,17 +144,33 @@ def service(func, *args,
     
     # wait for it to come up
     import json, time
+    start_time = time.time()
     while True:
-      txt = subprocess.run(f"kubectl get deployment {name} -o json",
-                   check=True, shell=True, stdout=subprocess.PIPE,
-                   encoding="utf-8").stdout
-      d = json.loads(txt)
-      if "readyReplicas" in d["status"]:
-        ready_replicas = d["status"]["readyReplicas"]
-        print(f"waiting... ready_replicas={ready_replicas}", flush=True)
-        if ("readyReplicas" in d["status"]) and (d["status"]["readyReplicas"] > 0):
-          break
-      time.sleep(1)
+
+      try:
+        txt = subprocess.run(f"kubectl get deployment {name} -o json",
+                             check=True, shell=True, stdout=subprocess.PIPE,
+                             encoding="utf-8").stdout
+
+        d = json.loads(txt)
+
+        if "readyReplicas" in d["status"]:
+          ready_replicas = d["status"]["readyReplicas"]
+          print(f"waiting... ready_replicas={ready_replicas}", flush=True)
+          if ("readyReplicas" in d["status"]) and (d["status"]["readyReplicas"] > 0):
+            break
+
+        wait_time = time.time() - start_time
+        if wait_time > timeout:
+          raise Exception(f"sk8s.service(): waiting for service timed out.")
+
+        time.sleep(1)
+
+      except subprocess.CalledProcessError as cpe_exception:
+        wait_time = time.time() - start_time
+        if wait_time > timeout:
+          raise Exception(f"sk8s.service(): waiting for service timed out.") from cpe_exception
+        continue
 
     print(f"proceeding... ready_replicas={ready_replicas}", flush=True)
 
