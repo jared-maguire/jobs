@@ -76,7 +76,13 @@ if __name__ == '__main__':
         while(True):
             text = subprocess.run("kubectl get all", shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.decode("utf-8")
             text += "\n\n" + subprocess.run("kubectl get pvc", shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.decode("utf-8")
-            subprocess.run("clear", shell=True, check=False)
+
+            import platform
+            if "Windows" in platform.platform():
+                subprocess.run("cls", shell=True, check=False)
+            else:
+                subprocess.run("clear", shell=True, check=False)
+
             print("⏹️  👀\n", flush=True)
             print(text, flush=True)
             time.sleep(1)
