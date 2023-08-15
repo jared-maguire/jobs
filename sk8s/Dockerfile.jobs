@@ -10,6 +10,11 @@ RUN apt update && \
 
 WORKDIR /app
 
+RUN conda install -n base conda-libmamba-solver
+RUN conda config --set solver libmamba
+
+RUN conda install python=3.10
+
 RUN conda config --add channels defaults 
 RUN conda config --add channels conda-forge
 

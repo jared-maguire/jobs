@@ -18,7 +18,7 @@ def docker_template(tag, ancestor=None, conda=[], pip=[], channels=[], additiona
     #cwd = re.sub("^/C", "/c", re.sub("^", "/", re.sub(":", "", re.sub(r"\\", "/", os.getcwd()))))
     if ancestor is None:
         config = sk8s.configs.load_config()
-        ancestor = config["docker_image_prefix"] + "jobs"
+        ancestor = config["docker_image_prefix"] + "jobs:latest"
     template = jinja2.Template(importlib.resources.read_text("sk8s", "Dockerfile.template"))
     rendered = template.render(conda=conda, pip=pip, channels=channels, additional_config=additional_config, ancestor=ancestor)
     return rendered
@@ -54,7 +54,7 @@ def docker_build_jobs_image(tag=None, push=None, dryrun=False, branch=None, extr
     config = sk8s.configs.load_config()
 
     if tag is None:
-        tag = config["docker_image_prefix"] + "jobs"
+        tag = config["docker_image_prefix"] + "jobs:latest"
 
     if push is None:
         push = config["docker_build_default_push_policy"]

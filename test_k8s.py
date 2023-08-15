@@ -13,6 +13,13 @@ def test_cluster_config():
 
 ## Jobs
 
+
+@pytest.mark.jobs
+def test_serialization():
+    result = sk8s.deserialize_func(sk8s.serialize_func(lambda: "hey"))()
+    assert(result == "hey")
+
+
 @pytest.mark.jobs
 def test_run_and_wait():
     result = sk8s.wait(sk8s.run(lambda: "Hooray"), timeout=500)

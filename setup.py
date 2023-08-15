@@ -18,6 +18,7 @@ setup(
                       'numpy',
                       'scipy',
                       'pandas',
+                      'pymongo',
                       ],
     package_dir={'sk8s': 'sk8s'},
     package_data={'sk8s': ['sk8s/*.yaml',
