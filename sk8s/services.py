@@ -50,7 +50,6 @@ spec:
           try:
               json.dump(func(), sys.stdout)
           except Exception as e:
-              #raise e
               print(e)
               json.dump("!!! ERROR, service function threw exception.", sys.stdout)
               raise e
