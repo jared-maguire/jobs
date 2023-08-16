@@ -198,7 +198,7 @@ def forward(service, remote_port, local_port):
 
 #####################################################################
 #
-# And now, for fun, some handy services!
+# And now, for fun, a handy service!
 
 from flask import Flask, request, jsonify
 import requests
