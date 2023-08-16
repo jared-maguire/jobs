@@ -6,6 +6,7 @@ import sk8s.util
 import sk8s.volumes
 import hashlib
 import sys
+from collections import namedtuple
 
 
 default_service_template = """apiVersion: apps/v1
@@ -49,6 +50,8 @@ spec:
           try:
               json.dump(func(), sys.stdout)
           except Exception as e:
+              print(e)
+              json.dump("!!! ERROR, service function threw exception.", sys.stdout)
               raise e
 
         args:
@@ -89,6 +92,7 @@ spec:
 def service(func, *args,
             name=None,
             ports=[21, 22, 80, 5000],
+            timeout=10.0,
             namespace=None,
             dryrun=False,
             template=default_service_template,
@@ -139,17 +143,33 @@ def service(func, *args,
     
     # wait for it to come up
     import json, time
+    start_time = time.time()
     while True:
-      txt = subprocess.run(f"kubectl get deployment {name} -o json",
-                   check=True, shell=True, stdout=subprocess.PIPE,
-                   encoding="utf-8").stdout
-      d = json.loads(txt)
-      if "readyReplicas" in d["status"]:
-        ready_replicas = d["status"]["readyReplicas"]
-        print(f"waiting... ready_replicas={ready_replicas}", flush=True)
-        if ("readyReplicas" in d["status"]) and (d["status"]["readyReplicas"] > 0):
-          break
-      time.sleep(1)
+
+      try:
+        txt = subprocess.run(f"kubectl get deployment {name} -o json",
+                             check=True, shell=True, stdout=subprocess.PIPE,
+                             encoding="utf-8").stdout
+
+        d = json.loads(txt)
+
+        if "readyReplicas" in d["status"]:
+          ready_replicas = d["status"]["readyReplicas"]
+          print(f"waiting... ready_replicas={ready_replicas}", flush=True)
+          if ("readyReplicas" in d["status"]) and (d["status"]["readyReplicas"] > 0):
+            break
+
+        wait_time = time.time() - start_time
+        if wait_time > timeout:
+          raise Exception(f"sk8s.service(): waiting for service timed out.")
+
+        time.sleep(1)
+
+      except subprocess.CalledProcessError as cpe_exception:
+        wait_time = time.time() - start_time
+        if wait_time > timeout:
+          raise Exception(f"sk8s.service(): waiting for service timed out.") from cpe_exception
+        continue
 
     print(f"proceeding... ready_replicas={ready_replicas}", flush=True)
 
@@ -172,4 +192,95 @@ def forward(service, remote_port, local_port):
       name = service
     cmd = f"kubectl port-forward service/{name} {remote_port}:{local_port}"
     proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return dict(proc=proc, url=f"http://localhost:{local_port}")
+    d = dict(proc=proc, url=f"http://localhost:{local_port}")
+    return namedtuple('PortForward', d.keys())(**d)
+
+
+#####################################################################
+#
+# And now, for fun, a handy service!
+
+from flask import Flask, request, jsonify
+import requests
+from threading import Thread
+import time
+import json
+
+class KeyValueStore:
+    def __init__(self, host="0.0.0.0"):
+        self.app = Flask(__name__)
+        self.host = host
+        self.store = {}
+        self.app.add_url_rule('/store', view_func=self.handle_request, methods=['POST', 'GET'])
+        self.app.add_url_rule('/store/all', view_func=self.handle_get_all, methods=['GET'])
+
+    def handle_request(self):
+        if request.method == 'POST':
+            data = request.get_json()
+            key = data['key']
+            value = data['value']
+            self.store[key] = value
+            return jsonify({'result': f'Key: {key} and Value: {value} added to the store'})
+        else:
+            key = request.args.get('key')
+            if key in self.store:
+                return jsonify({'key': key, "value": self.store[key]})
+            else:
+                #return jsonify({'ERROR': f'Key {key} not found in store'})
+                return jsonify(None)
+
+    def handle_get_all(self):
+        return jsonify(self.store)
+
+    def background_task(self):
+        while True:
+            # Add your background task code here
+            time.sleep(1)
+
+    def run(self):
+        thread = Thread(target=self.background_task)
+        thread.start()
+        self.app.run(host=self.host)
+
+    @staticmethod
+    def put(url, key, value):
+        response = requests.post(url + "/store", json=dict(key=key, value=value))
+        assert(response.ok)  # Could raise an exception in a more appropriate way...
+        return response
+
+    @staticmethod
+    def get(url, key):
+        response = requests.get(url + "/store", dict(key=key))
+        assert(response.ok)  # Could raise an exception in a more appropriate way...
+        return json.loads(response.content)
+
+    @staticmethod
+    def get_all(url):
+        response = requests.get(url + "/store/all")
+        assert(response.ok)  # Could raise an exception in a more appropriate way...
+        return json.loads(response.content)
+
+    @staticmethod
+    def wait_until_up(service_name):
+      # This checks that the Service is up:
+      not_up = True
+      while not_up:
+          fwd = forward(service_name, 5000, 5000)
+          time.sleep(1)
+          try:
+              KeyValueStore.get_all(fwd.url)
+              not_up = False
+          except Exception as e:
+              fwd.proc.terminate()
+              stdout, stderr = fwd.proc.communicate()
+              fwd.proc.wait()
+              time.sleep(1)
+
+
+def kvs_service():
+
+  def service_func():
+    kvs = KeyValueStore()
+    kvs.run()
+
+  return service(service_func, ports=[5000])

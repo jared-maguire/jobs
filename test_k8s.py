@@ -76,8 +76,7 @@ def test_simple_workflow():
         jobs1 = sk8s.map(lambda i: i, range(3), asynchro=True)
         return sk8s.wait(sk8s.run(lambda inputs: sum(inputs),
                                   map(sk8s.wait, jobs1),
-                                  name="job2-{s}",
-                                  asynchro=True),
+                                  name="job2-{s}"),
                          timeout=500)
     result = sk8s.wait(sk8s.run(wf, name="wf-{s}"), timeout=500)
     assert(result == 3)
@@ -360,7 +359,7 @@ def test_service():
 
     # Set up a local forward to get the url
     service_forward = sk8s.services.forward(service_name, 5000, 5000)
-    service_url = service_forward["url"]
+    service_url = service_forward.url
 
     #print("fwd_stdout:", service_forward["proc"].stdout.read(), flush=True)
 
@@ -383,13 +382,38 @@ def test_service():
     print("Response:", json.loads(response.content))
 
     # Shut down the port forward
-    service_forward["proc"].terminate()
-    service_forward["proc"].wait()
+    service_forward.proc.terminate()
+    service_forward.proc.wait()
 
     # And shut down the service
     sk8s.services.shutdown_service(service_name)
 
     # And finally, check that the result is correct
-    #resp = json.loads(response.content)
-    #assert((resp["message"] == "awesome") and
-    #       (resp["response"] == "awesome awesome"))
+    resp = json.loads(response.content)
+    assert((resp["message"] == "awesome") and
+           (resp["response"] == "awesome awesome"))
+
+
+@pytest.mark.services
+def test_kvs():
+    import sk8s.services as svc
+    import json
+    import time
+
+    s = svc.kvs_service()
+    svc.KeyValueStore.wait_until_up(s)
+    fwd = svc.forward(s, 5000, 5000)
+
+    word = svc.KeyValueStore.get(fwd.url, "word")
+    print("word 1:", word)
+    svc.KeyValueStore.put(fwd.url, "word", "bird")
+    word = svc.KeyValueStore.get(fwd.url, "word")
+    print("word 2:", word)
+
+    fwd.proc.terminate()
+    fwd.proc.wait()
+
+    svc.shutdown_service(s)
+
+    assert(word["key"] == "word")
+    assert(word["value"] == "bird")

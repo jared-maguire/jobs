@@ -25,7 +25,7 @@ def run_cmd(cmd, retries=1):
 
 
 def serialize_func(func):
-    code = base64.b64encode(pickle.dumps(func, byref=True, recurse=True)).decode("utf-8")
+    code = base64.b64encode(pickle.dumps(func, byref=True, recurse=False)).decode("utf-8")
     return code
 
 
