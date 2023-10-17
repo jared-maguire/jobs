@@ -379,7 +379,8 @@ def test_service():
         still_trying = False
                                    
     import json
-    print("Response:", json.loads(response.content))
+    #print("Response:", json.loads(response.content))
+    print("Response:", response.content)
 
     # Shut down the port forward
     service_forward.proc.terminate()
