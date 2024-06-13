@@ -123,9 +123,9 @@ def run(func, *args,
         imagePullPolicy = config["docker_default_pull_policy"]
 
     if state is None:
-        code = sk8s.util.serialize_func(lambda a=args: func(*a))
+        code = sk8s.util.serialize_func(lambda a=args: func(*a, locals=locals()))
     else:
-        code = sk8s.util.serialize_func(state.memoize(lambda a=args: func(*a)))
+        code = sk8s.util.serialize_func(state.memoize(lambda a=args: func(*a, locals=locals())))
 
     if volumes.__class__ == str:
         volumes = {volumes: f"/mnt/{volumes}"}
