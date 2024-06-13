@@ -23,7 +23,8 @@ setup(
     package_dir={'sk8s': 'sk8s'},
     package_data={'sk8s': ['sk8s/*.yaml',
                            'sk8s/*.txt',
-                           'sk8s/*.template']},
+                           'sk8s/*.template',
+                           'sk8s/*.jobs',]},
     include_package_data=True,
     classifiers=[
         #'Development Status :: 1 - Planning',
