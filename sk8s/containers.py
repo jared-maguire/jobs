@@ -1,7 +1,6 @@
 import subprocess
 import importlib
 import importlib.resources
-from tkinter import E
 import jinja2
 import os
 
