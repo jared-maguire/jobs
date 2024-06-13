@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM {{ancestor|default('continuumio/miniconda3:23.5.2-0', True)}}
+FROM {{ancestor|default('continuumio/miniconda3:24.4.0-0', True)}}
 
 # install kubectl
 RUN apt update && \
@@ -13,9 +13,9 @@ WORKDIR /app
 RUN conda install -n base conda-libmamba-solver
 RUN conda config --set solver libmamba
 
-RUN conda install python=3.10
+RUN conda install python=3.11
 
-RUN conda config --add channels defaults 
+#RUN conda config --add channels defaults 
 RUN conda config --add channels conda-forge
 
 {% for channel in channels %}
