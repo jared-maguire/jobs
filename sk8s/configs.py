@@ -19,6 +19,7 @@ default_config = dict(
                       docker_build_default_push_policy=False,
                       default_storageclass="",
                       default_readwritemany_storageclass="",
+                      ecr_create_repo_on_push=False,
                      ) 
 
 

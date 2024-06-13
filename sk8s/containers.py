@@ -3,6 +3,7 @@ import importlib
 import importlib.resources
 import jinja2
 import os
+import re
 
 
 import sk8s
@@ -10,6 +11,13 @@ import sk8s.configs
 
 
 def docker_push(tag):
+    config = sk8s.configs.load_config()
+    if config["ecr_create_repo_on_push"]:
+        # parse the name of the repo from the tag
+        repo_name = tag.split("/")[-1].split(":")[0]
+
+        # create the repo 
+        subprocess.run(f"aws ecr create-repository --repository-name {repo_name}", check=False, shell=True)
     subprocess.run(f"docker push {tag}", check=True, shell=True)
 
 
