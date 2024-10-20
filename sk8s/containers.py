@@ -2,8 +2,7 @@ import subprocess
 import importlib
 import importlib.resources
 import jinja2
-import os
-import re
+import sys
 
 
 import sk8s
@@ -67,7 +66,11 @@ def docker_build_jobs_image(tag=None, push=None, dryrun=False, branch=None, extr
         push = config["docker_build_default_push_policy"]
 
     template = jinja2.Template(importlib.resources.read_text("sk8s", "Dockerfile.jobs"))
-    rendered = template.render(tag=tag, branch=branch)
+
+    # Get the version of python that we are using
+    python_version = sys.version.split()[0]
+
+    rendered = template.render(tag=tag, branch=branch, python_version=python_version)
     if dryrun:
         return rendered
     #cwd = os.getcwd()
