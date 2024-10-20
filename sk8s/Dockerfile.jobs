@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM {{ancestor|default('continuumio/miniconda3:24.4.0-0', True)}}
+FROM {{ancestor|default('continuumio/miniconda3:main', True)}}
 
 # install kubectl
 RUN apt update && \
@@ -13,7 +13,7 @@ WORKDIR /app
 RUN conda install -n base conda-libmamba-solver
 RUN conda config --set solver libmamba
 
-RUN conda install python=3.11
+RUN conda install python={{python_version|default('3.11', True)}}
 
 #RUN conda config --add channels defaults 
 RUN conda config --add channels conda-forge
@@ -24,8 +24,11 @@ RUN conda config --add channels {{channel}}
 
 RUN conda update -n base conda
 
-RUN conda install -y pip tqdm tmux
-RUN pip install dill flask jupyter requests numpy scipy pandas pyyaml pymongo
+#RUN conda install -y pip tqdm tmux
+#RUN pip install dill flask jupyter requests numpy scipy pandas pyyaml pymongo
+
+RUN conda install -y pip tqdm 
+RUN pip install dill flask requests pyyaml pymongo
 
 # Installing in dev mode here is a hack to work around
 # the fact that MANIFEST.in doesn't seem to be working in linux :-/
