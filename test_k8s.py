@@ -53,13 +53,13 @@ def test_map():
 @pytest.mark.jobs
 def test_imports():
     def pi():
-        import numpy
-        return numpy.pi
+        import math
+        return math.pi
 
     result = sk8s.wait(sk8s.run(pi), timeout=500)
 
-    import numpy
-    assert(result == numpy.pi)
+    import math
+    assert(result == math.pi)
 
 
 @pytest.mark.jobs
@@ -182,8 +182,8 @@ def test_containers():
 def test_resource_limits():
     import os
     def allocate_memory(size):
-        import numpy
-        numpy.random.bytes(size * int(1e6))
+        import os
+        os.urandom(size * int(1e6))
         return True
 
     assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, asynchro=False, timeout=500))
