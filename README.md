@@ -67,8 +67,9 @@ cd jobs
 conda create -c conda-forge -n sk8s_test pip python=3.10  # make a python environment
 conda activate sk8s_test                                  # activate the python environment
 pip install -e .                                          # install this package in developer mode
-python -m sk8s containers                                 # build the "jobs" docker image
-python -m sk8s config                                     # configure the k8s cluster (adds a service account)
+python -m sk8s config-local                               # Configure sk8s for a local cluster
+python -m sk8s containers -push                           # build the "jobs" docker image
+python -m sk8s config-cluster -apply                      # configure the k8s cluster (adds a service account)
 pytest                                                    # run the tests!
 ```
 
@@ -82,7 +83,12 @@ I've found (as of april 2023) that a totally default GKE autopilot cluster works
 
 Then:
 
+```bash
+python -m sk8s config-gke -project PROJECT_NAME           # Configure sk8s for GKE
+python -m sk8s containers -push                           # build the "jobs" docker image
+python -m sk8s config-cluster -apply                      # configure the k8s cluster (adds a service account)
 ```
-python -m sk8s containers
-python -m sk8s config-gke
-```
+
+### Amazon
+
+Not implemented yet!
