@@ -30,7 +30,7 @@ def add_rwx_storage_class():
 # Enable ReadWriteMany volumes via Google FileStore:
 def config_storageclass_defaults():
     config = sk8s.configs.load_config()
-    config["default_readwritemany_storageclass"] = "standard-rwx"
+    config["default_readwritemany_storageclass"] = "standard-readwritemany"
     sk8s.configs.save_config(config)
 
 
