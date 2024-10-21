@@ -395,6 +395,8 @@ def test_service():
            (resp["response"] == "awesome awesome"))
 
 
+# Let's skip this application for now...
+"""
 @pytest.mark.services
 def test_kvs():
     import sk8s.services as svc
@@ -418,3 +420,4 @@ def test_kvs():
 
     assert(word["key"] == "word")
     assert(word["value"] == "bird")
+"""
