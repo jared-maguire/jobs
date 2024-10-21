@@ -52,10 +52,7 @@ def get_k8s_config():
 
 def get_current_namespace():
     config = get_k8s_config()
-    if "namespace" in config["contexts"][0]["context"]:   # I might really regret the hardcoded '[0]' here.
-        return config["contexts"][0]["context"]["namespace"]   # I might really regret the hardcoded '[0]' here.
-    else:
-        return "default"
+    return subprocess.run("kubectl config view --minify --output 'jsonpath={..namespace}'", shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8")
 
 
 def set_namespace(ns):
