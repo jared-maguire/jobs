@@ -38,7 +38,7 @@ def config_storageclass_defaults():
 
 def config_cluster(project):
     # Create service account with permissions to apply changes to the cluster 
-    config = importlib.resources.read_text("sk8s", "gke_cluster_config.yaml")
+    config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
     subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
 
     config_storageclass_defaults()
@@ -51,6 +51,7 @@ def config_cluster(project):
                       docker_default_pull_policy="Always",
                       docker_build_default_push_policy=True,
                       default_storageclass="standard",
+                      service_account_name="sk8s",
                      )
     config = sk8s.configs.load_config()
     config.update(google_config)

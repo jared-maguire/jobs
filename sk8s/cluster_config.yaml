@@ -1,0 +1,154 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sk8s
+  namespace: jobs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sk8s-role
+  namespace: jobs
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - get
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sk8s-cluster-role
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/exec
+      - pods/log
+      - events
+      - namespaces
+      - replicationcontrollers
+      - services
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - watch
+      - list
+
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumeclaims
+      - persistentvolumeclaims/finalizers
+    verbs:
+      - create
+      - update
+      - delete
+      - get
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - get
+      - delete
+
+  - apiGroups:
+      - ""
+    resourceNames:
+      - sk8s-workflows-agent-ca-certificates
+    resources:
+      - secrets
+    verbs:
+      - get
+
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - get
+      - watch
+      - list
+      - create
+      - delete
+
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - services
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs:
+      - get
+      - watch
+      - list
+      - create
+      - delete
+ 
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - get
+      - watch
+      - list
+      - create
+      - delete
+      
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sk8s-binding
+  namespace: jobs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sk8s-role
+subjects:
+  - kind: ServiceAccount
+    name: sk8s
+    namespace: jobs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sk8s-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sk8s-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: sk8s
+    namespace: jobs

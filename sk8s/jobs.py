@@ -18,7 +18,7 @@ import sk8s
 
 
 def check_cluster_config():
-    svc_acct = "internal-kubectl" in subprocess.run("kubectl get serviceaccounts",
+    svc_acct = "sk8s" in subprocess.run("kubectl get serviceaccounts",
                                                     check=True,
                                                     shell=True,
                                                     stdout=subprocess.PIPE).stdout.decode("utf-8")
@@ -39,7 +39,7 @@ spec:
         persistentVolumeClaim:
           claimName: {{volume}}
       {% endfor %}
-      serviceAccountName: internal-kubectl
+      serviceAccountName: {{serviceAccountName}}
       containers:
       - name: worker
         image: {{image}}
@@ -103,6 +103,7 @@ def run(func, *args,
         job_template=default_job_template,
         imagePullPolicy=None,
         backoffLimit=0,
+        serviceAccountName=None,
         name="job-{s}",
         test=False,
         dryrun=False,
@@ -121,6 +122,9 @@ def run(func, *args,
 
     if imagePullPolicy is None:
         imagePullPolicy = config["docker_default_pull_policy"]
+
+    if serviceAccountName is None:
+        serviceAccountName = config["service_account_name"]
 
     if state is None:
         code = sk8s.util.serialize_func(lambda a=args: func(*a))
@@ -147,7 +151,8 @@ def run(func, *args,
                  volumes=volumes,
                  config=config if export_config else sk8s.configs.default_config,
                  imagePullPolicy=imagePullPolicy,
-                 backoffLimit=backoffLimit)
+                 backoffLimit=backoffLimit,
+                 serviceAccountName=serviceAccountName)
 
     if dryrun:
         return j

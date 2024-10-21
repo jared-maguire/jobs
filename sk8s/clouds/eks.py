@@ -16,7 +16,7 @@ def config_storageclass_defaults():
 
 def config_cluster(account, region):
     # Create service account with permissions to apply changes to the cluster 
-    config = importlib.resources.read_text("sk8s", "eks_cluster_config.yaml")
+    config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
     subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
 
     # Add the EFS storage class
@@ -27,10 +27,12 @@ def config_cluster(account, region):
                       docker_image_prefix=f"{account}.dkr.ecr.{region}.amazonaws.com/",
                       docker_default_pull_policy="Always",
                       docker_build_default_push_policy=True,
+                      ecr_create_repo_on_push=True,
                       default_storageclass="standard",
+                      service_account_name="sk8s",
                      )
-    config = sk8s.configs.load_config()
-    config.update(eks_config)
-    sk8s.configs.save_config(config)
+    sk8s_config = sk8s.configs.load_config()
+    sk8s_config.update(eks_config)
+    sk8s.configs.save_config(sk8s_config)
 
     return config

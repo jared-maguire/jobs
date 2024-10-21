@@ -70,14 +70,14 @@ def get_pod_names_from_job(job):
     pod_names = [p["metadata"]["name"] for p in pods["items"]]
     return pod_names
 
-def interactive_job(image=None, volumes=None):
+def interactive_job(image=None, volumes=None, service_account_name=None):
     # this bit is fun...
 
     def hang(lifespan):
         import time
         time.sleep(lifespan)
 
-    job = sk8s.run(hang, 3600, image=image, volumes={})
+    job = sk8s.run(hang, 3600, image=image, volumes={}, serviceAccountName=service_account_name)
 
     pods = get_pods_from_job(job)
     phases = [pods["items"][i]["status"]["phase"]
