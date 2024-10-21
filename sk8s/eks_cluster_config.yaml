@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","kind":"ServiceAccount","metadata":{"annotations":{},"name":"internal-kubectl","namespace":"jared"}}
+  creationTimestamp: "2024-06-13T19:04:09Z"
+  name: internal-kubectl
+  resourceVersion: "43274992"
+  uid: 90c98e1b-483f-49b0-ae60-390a52b0d940
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{"annotations":{},"name":"pod-manager-role","namespace":"jared"},"rules":[{"apiGroups":[""],"resources":["pods"],"verbs":["get","list","create","delete"]}]}
+  creationTimestamp: "2024-06-13T19:04:09Z"
+  name: pod-manager-role
+  resourceVersion: "43274994"
+  uid: 91eaab53-89a1-4549-a0a1-e29f947bf220
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - create
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"annotations":{},"name":"pod-manager-rolebinding","namespace":"jared"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"pod-manager-role"},"subjects":[{"kind":"ServiceAccount","name":"internal-kubectl"}]}
+  creationTimestamp: "2024-06-13T19:04:09Z"
+  name: pod-manager-rolebinding
+  resourceVersion: "43274995"
+  uid: ea7e1e36-d8e5-41f3-a0f2-909c90988961
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pod-manager-role
+subjects:
+- kind: ServiceAccount
+  name: internal-kubectl

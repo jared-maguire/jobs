@@ -1,8 +1,8 @@
 ### GKE-specific configuration code.
 
-import jinja2
 import subprocess
 import sk8s.configs
+import importlib
 
 
 filestore_storageclass="""apiVersion: storage.k8s.io/v1
@@ -37,11 +37,16 @@ def config_storageclass_defaults():
 # Overall GKE cluster config:
 
 def config_cluster(project):
+    # Create service account with permissions to apply changes to the cluster 
+    config = importlib.resources.read_text("sk8s", "gke_cluster_config.yaml")
+    subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
+
     config_storageclass_defaults()
 
     # TODO: get current google project
 
     google_config = dict(
+                      cluster_type="gke",
                       docker_image_prefix=f"gcr.io/{project}/",
                       docker_default_pull_policy="Always",
                       docker_build_default_push_policy=True,
