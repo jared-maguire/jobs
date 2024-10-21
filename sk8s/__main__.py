@@ -18,10 +18,12 @@ if __name__ == '__main__':
 
     config = subparsers.add_parser('config-gke', help='configure sk8s for a GKE cluster')
     config.add_argument('-project', help='google cloud project name (required)', required=True)
+    config.add_argument('-namespace', help='k8s namespace to use', required=True)
 
     config = subparsers.add_parser('config-eks', help='configure sk8s for a GKE cluster')
     config.add_argument('-account', help='eks account id (required)', required=True)
     config.add_argument('-region', help='eks region (required)', required=True)
+    config.add_argument('-namespace', help='k8s namespace to use', required=True)
 
     config = subparsers.add_parser('containers', help='build worker container')
     config.add_argument('-branch', default="master", help='the tag we should use for the default jobs image')
@@ -50,11 +52,11 @@ if __name__ == '__main__':
 
     if args.command == "config-gke":
         import sk8s.clouds.gke
-        sk8s.clouds.gke.config_cluster(project=args.project)
+        sk8s.clouds.gke.config_cluster(project=args.project, namespace=args.namespace)
 
     if args.command == "config-eks":
         import sk8s.clouds.eks
-        sk8s.clouds.eks.config_cluster(account=args.account, region=args.region)
+        sk8s.clouds.eks.config_cluster(account=args.account, region=args.region, namespace=args.namespace)
 
     if args.command == "containers":
         ### Note: only works on local clusters right now

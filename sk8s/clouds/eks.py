@@ -3,6 +3,7 @@
 import importlib
 import subprocess
 import sk8s.configs
+import jinja2
 
 
 # Enable ReadWriteMany volumes via EFS:
@@ -14,9 +15,10 @@ def config_storageclass_defaults():
 
 # Overall EKS cluster config:
 
-def config_cluster(account, region):
+def config_cluster(account, region, namespace):
     # Create service account with permissions to apply changes to the cluster 
     config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
+    config = jinja2.Template(config).render(namespace=namespace)
     subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
 
     # Add the EFS storage class

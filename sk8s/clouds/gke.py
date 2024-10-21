@@ -3,6 +3,7 @@
 import subprocess
 import sk8s.configs
 import importlib
+import jinja2
 
 
 filestore_storageclass="""apiVersion: storage.k8s.io/v1
@@ -36,9 +37,10 @@ def config_storageclass_defaults():
 
 # Overall GKE cluster config:
 
-def config_cluster(project):
+def config_cluster(project, namespace):
     # Create service account with permissions to apply changes to the cluster 
     config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
+    config = jinja2.Template(config).render(namespace=namespace)
     subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
 
     config_storageclass_defaults()
@@ -50,6 +52,7 @@ def config_cluster(project):
                       docker_image_prefix=f"gcr.io/{project}/",
                       docker_default_pull_policy="Always",
                       docker_build_default_push_policy=True,
+                      ecr_create_repo_on_push=False,
                       default_storageclass="standard",
                       service_account_name="sk8s",
                      )

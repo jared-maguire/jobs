@@ -3,13 +3,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: sk8s
-  namespace: jobs
+  namespace: {{namespace}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: sk8s-role
-  namespace: jobs
+  namespace: {{namespace}}
 rules:
   - apiGroups:
       - coordination.k8s.io
@@ -130,7 +130,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: sk8s-binding
-  namespace: jobs
+  namespace: {{namespace}}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -138,7 +138,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: sk8s
-    namespace: jobs
+    namespace: {{namespace}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -151,4 +151,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: sk8s
-    namespace: jobs
+    namespace: {{namespace}}

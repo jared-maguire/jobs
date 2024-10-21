@@ -64,11 +64,9 @@ It's not on pypi yet, so...
 
 git clone git@github.com:jared-maguire/jobs.git
 cd jobs
-conda create -c conda-forge -n sk8s_test pip python=3.10  # make a python environment
+conda create -c conda-forge -n sk8s_test pip python=3.12  # make a python environment
 conda activate sk8s_test                                  # activate the python environment
 pip install -e .                                          # install this package in developer mode
-python -m sk8s config-local                               # Configure sk8s for a local cluster
-python -m sk8s containers -push                           # build the "jobs" docker image
 python -m sk8s config-cluster -apply                      # configure the k8s cluster (adds a service account)
 pytest                                                    # run the tests!
 ```
@@ -84,9 +82,19 @@ I've found (as of april 2023) that a totally default GKE autopilot cluster works
 Then:
 
 ```bash
-python -m sk8s config-gke -project PROJECT_NAME           # Configure sk8s for GKE
-python -m sk8s containers -push                           # build the "jobs" docker image
-python -m sk8s config-cluster -apply                      # configure the k8s cluster (adds a service account)
+python -m sk8s config-gke -project PROJECT_NAME -namespace NAMESPACE  # Configure sk8s for GKE
+python -m sk8s containers -push                                       # build the "jobs" docker image
+```
+
+### Amazon
+
+First, create a cluster and a container registry on AWS. Configure `kubectl` and `docker` to use them.
+
+Then:
+
+```bash
+python -m sk8s config-eks -account ACCOUNT_ID -region REGION -namespace NAMESPACE  # Configure sk8s for GKE
+python -m sk8s containers -push                                                    # build the "jobs" docker image
 ```
 
 ### Amazon
