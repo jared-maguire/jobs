@@ -19,6 +19,10 @@ if __name__ == '__main__':
     config = subparsers.add_parser('config-gke', help='configure sk8s for a GKE cluster')
     config.add_argument('-project', help='google cloud project name (required)', required=True)
 
+    config = subparsers.add_parser('config-eks', help='configure sk8s for a GKE cluster')
+    config.add_argument('-account', help='eks account id (required)', required=True)
+    config.add_argument('-region', help='eks region (required)', required=True)
+
     config = subparsers.add_parser('containers', help='build worker container')
     config.add_argument('-branch', default="master", help='the tag we should use for the default jobs image')
     config.add_argument('-extra_options', default=" ", help='extra options for docker build')
@@ -39,15 +43,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    if args.command == "config-cluster":
-        config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
-        if args.dryrun:
-            print(config)
-        if args.check:
-            print("Cluster configured:", sk8s.check_cluster_config())
-        elif args.apply:
-            subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
-
     if args.command == "config-local":
         import sk8s.clouds.local
         sk8s.clouds.local.config_cluster()
@@ -55,6 +50,10 @@ if __name__ == '__main__':
     if args.command == "config-gke":
         import sk8s.clouds.gke
         sk8s.clouds.gke.config_cluster(project=args.project)
+
+    if args.command == "config-eks":
+        import sk8s.clouds.eks
+        sk8s.clouds.eks.config_cluster(account=args.account, region=args.region)
 
     if args.command == "containers":
         ### Note: only works on local clusters right now
