@@ -77,7 +77,7 @@ def interactive_job(image=None, volumes=None, service_account_name=None):
         import time
         time.sleep(lifespan)
 
-    job = sk8s.run(hang, 3600, image=image, volumes={}, serviceAccountName=service_account_name)
+    job = sk8s.run(hang, 3600, image=image, volumes=volumes, serviceAccountName=service_account_name)
 
     pods = get_pods_from_job(job)
     phases = [pods["items"][i]["status"]["phase"]
