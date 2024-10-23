@@ -290,11 +290,31 @@ def map(func,
         timeout=None,
         delete=True,
         asynchro=False,
+        dryrun=False,
         verbose=False):
     thunks = [lambda arg=i: func(arg) for i in iterable]
+    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
+    if asynchro or dryrun:
+        return job_names
+    else:
+        return wait(job_names, timeout=timeout)
 
-    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy) for thunk in thunks]
-    if asynchro:
+
+def starmap(func,
+            iterable, 
+            requests=dict(),
+            limits=dict(),
+            image=None,
+            volumes={},
+            imagePullPolicy=None,
+            timeout=None,
+            delete=True,
+            asynchro=False,
+            dryrun=False,
+            verbose=False):
+    thunks = [lambda arg=i: func(*arg) for i in iterable]
+    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
+    if asynchro or dryrun:
         return job_names
     else:
         return wait(job_names, timeout=timeout)
