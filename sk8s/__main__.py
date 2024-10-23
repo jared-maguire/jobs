@@ -36,7 +36,7 @@ if __name__ == '__main__':
 
     config = subparsers.add_parser('shell', help='launch an interactive shell')
     config.add_argument('-image', default=None, help='name of the image to use')
-    config.add_argument('-volumes', default=None, nargs="+", help='names of any volumes to mount')
+    config.add_argument('-volumes', default=[], nargs="+", help='names of any volumes to mount')
     config.add_argument('-service_account_name', default=None, help='ServiceAccount to use')
 
     config = subparsers.add_parser('kubewatch', help='watch the cluster')
