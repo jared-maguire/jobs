@@ -15,6 +15,21 @@ RUN conda config --set solver libmamba
 
 RUN conda install python={{python_version|default('3.11', True)}}
 
+# Install google cloud sdk
+RUN apt-get update \
+    && apt-get install -y apt-transport-https ca-certificates gnupg curl \
+    && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo 'deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main' \
+    | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update \
+    && apt-get install -y google-cloud-cli kubectl
+
+# Install awscliv2
+RUN apt-get update && apt install -y unzip curl && curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" \
+      && unzip awscliv2.zip \
+      && ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
+
 #RUN conda config --add channels defaults 
 RUN conda config --add channels conda-forge
 
