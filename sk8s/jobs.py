@@ -250,7 +250,7 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
             else:
                 assert(False)
 
-        time.sleep(1)
+        time.sleep(polling_interval)
 
     # Now clean up whatever's left
     data = get_job_status_json(jobs)
