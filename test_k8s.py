@@ -51,6 +51,12 @@ def test_map():
 
 
 @pytest.mark.jobs
+def test_starmap():
+    results = sk8s.starmap(lambda i,j: i+j, ((0,0), (1,1), (2,2)))
+    assert(tuple(results) == (0,2,4))
+
+
+@pytest.mark.jobs
 def test_imports():
     def pi():
         import math
