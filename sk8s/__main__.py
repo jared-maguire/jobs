@@ -39,6 +39,9 @@ if __name__ == '__main__':
     config.add_argument('-volumes', default=[], nargs="+", help='names of any volumes to mount')
     config.add_argument('-service_account_name', default=None, help='ServiceAccount to use')
 
+    config = subparsers.add_parser('wait', help='wait for a job')
+    config.add_argument('-job', required=True, help='name of the job to wait for')
+
     config = subparsers.add_parser('kubewatch', help='watch the cluster')
 
     #test = subparsers.add_parser('test', help='test k8s')
@@ -72,6 +75,9 @@ if __name__ == '__main__':
         objects = [l.split()[0] for l in lines if (len(l.split()) > 2) and ("NAME" not in l)]
         objects_str = " ".join(objects)
         subprocess.run(f"kubectl delete {objects_str}", shell=True, check=True)
+
+    if args.command == "wait":
+        print(sk8s.wait(args.job))
 
     if args.command == "kubewatch":
         import time
