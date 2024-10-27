@@ -37,6 +37,7 @@ rules:
       - pods
       - pods/exec
       - pods/log
+      - pods/status
       - events
       - namespaces
       - replicationcontrollers

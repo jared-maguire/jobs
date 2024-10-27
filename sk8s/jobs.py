@@ -206,7 +206,12 @@ def get_job_statuses(job_names, namespace):
     Returns:
     - dict: A dictionary where each key is a job name and each value is its status.
     """
-    config.load_kube_config()
+   
+    if sk8s.in_pod():
+        config.incluster_config.load_incluster_config()    
+    else:
+        config.load_kube_config()
+    
     batch_v1 = client.BatchV1Api()
 
     # Fetch all jobs in the namespace
@@ -227,12 +232,14 @@ def get_job_statuses(job_names, namespace):
 
 
 def get_job_logs(job_name, namespace):
-    config.load_kube_config()
+    if sk8s.in_pod():
+        config.incluster_config.load_incluster_config()    
+    else:
+        config.load_kube_config()
+
     v1 = client.CoreV1Api()
     batch_v1 = client.BatchV1Api()
     
-    print(job_name, namespace)
-   
     try:
         # Get job to find its pods
         job = batch_v1.read_namespaced_job(name=job_name, namespace=namespace)
@@ -267,7 +274,12 @@ def get_jobs_logs(job_names, namespace):
     Returns:
     - dict: A dictionary where each key is a job name and each value is the aggregated logs for that job.
     """
-    config.load_kube_config()
+
+    if sk8s.in_pod():
+        config.incluster_config.load_incluster_config()
+    else:
+        config.load_kube_config()
+
     v1 = client.CoreV1Api()
     batch_v1 = client.BatchV1Api()
     
@@ -295,7 +307,6 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
         raise RuntimeError(f"Jobs {' '.join(failures)} failed.")
 
     logs = get_jobs_logs(jobs, ns)
-    print("logs:", logs)
 
     results = list(builtins.map(json.loads, logs))
 

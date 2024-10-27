@@ -43,6 +43,11 @@ def random_string(length):
     letters = string.ascii_lowercase
     return ''.join(random.choice(letters) for i in range(length))
 
+    
+def in_pod():
+    # Check if we're in a pod
+    return os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
+
 
 def get_k8s_config():
     cmd = "kubectl config view"
@@ -52,7 +57,10 @@ def get_k8s_config():
 
 def get_current_namespace():
     config = get_k8s_config()
-    return subprocess.run("kubectl config view --minify --output 'jsonpath={..namespace}'", shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8")
+    if not in_pod():
+        return subprocess.run("kubectl config view --minify --output 'jsonpath={..namespace}'", shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8")
+    else:
+        return subprocess.run("cat  /var/run/secrets/kubernetes.io/serviceaccount/namespace", shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8")
 
 
 def set_namespace(ns):
