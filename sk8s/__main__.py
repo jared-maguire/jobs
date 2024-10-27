@@ -4,6 +4,8 @@ import argparse
 import importlib
 import subprocess
 
+import sk8s.dashboard
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("sk8s")
@@ -43,6 +45,7 @@ if __name__ == '__main__':
     config.add_argument('-job', required=True, help='name of the job to wait for')
 
     config = subparsers.add_parser('kubewatch', help='watch the cluster')
+    config = subparsers.add_parser('dashboard', help='show cluster dashboard')
 
     #test = subparsers.add_parser('test', help='test k8s')
     #test.add_argument('-opt-one', action='store', help='option one')
@@ -97,3 +100,6 @@ if __name__ == '__main__':
 
     if args.command == "shell":
         job = sk8s.util.interactive_job(image=args.image, volumes=args.volumes, service_account_name=args.service_account_name)
+
+    if args.command == "dashboard":
+        sk8s.dashboard.show_dashboard()

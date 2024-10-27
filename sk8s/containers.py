@@ -30,7 +30,7 @@ def docker_template(tag, ancestor=None, conda=[], pip=[], channels=[], additiona
     return rendered
 
 
-def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[], pip=[], channels=[], push=None, dryrun=False, additional_config="", extra_options=""):
+def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[], pip=[], channels=[], push=None, dryrun=False, additional_config="", extra_options="", silent=False):
     config = sk8s.configs.load_config()
 
     if push is None:
@@ -50,7 +50,7 @@ def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[]
     if dryrun:
         return rendered
 
-    subprocess.run(f"docker build {extra_options} -t {tag} -f - .", input=rendered.encode("utf-8"), check=True, shell=True)
+    subprocess.run(f"docker build {extra_options} -t {tag} -f - .", input=rendered.encode("utf-8"), check=True, shell=True, capture_output=silent)
     if push: docker_push(tag)
 
     return tag

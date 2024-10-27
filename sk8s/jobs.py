@@ -2,7 +2,9 @@
 
 import os
 import sys
+import builtins
 from collections import Counter
+from kubernetes import client, config
 
 import dill as pickle
 pickle.settings['recurse'] = True
@@ -60,7 +62,8 @@ spec:
           sk8s.configs.save_config(config)
 
           try:
-              json.dump(func(), sys.stdout)
+              result = json.dumps(func())
+              sys.stdout.write(result)
           except Exception as e:
               raise e
 
@@ -93,6 +96,7 @@ spec:
 
         #- mountPath: "/mnt/{{volume}}"
 
+
 def run(func, *args,
         image=None,
         volumes={},
@@ -110,7 +114,7 @@ def run(func, *args,
         state=None,
         config=None,
         export_config=True,
-        debug=False):
+        _map_helper=False):
     # Should do it this way, but having problems. Reverting for now:
     # job_template = importlib.resources.read_text("sk8s", "job_template.yaml")
 
@@ -154,6 +158,8 @@ def run(func, *args,
                  backoffLimit=backoffLimit,
                  serviceAccountName=serviceAccountName)
 
+    if _map_helper:
+        return (job, j)
     if dryrun:
         return j
 
@@ -189,111 +195,172 @@ def logs(job_name, decode=True):
     return logs
 
 
+def get_job_statuses(job_names, namespace):
+    """
+    Retrieve the statuses of a list of Kubernetes jobs in a specified namespace.
+
+    Parameters:
+    - job_names (list of str): List of job names to retrieve statuses for.
+    - namespace (str): The namespace where the jobs are located.
+
+    Returns:
+    - dict: A dictionary where each key is a job name and each value is its status.
+    """
+    config.load_kube_config()
+    batch_v1 = client.BatchV1Api()
+
+    # Fetch all jobs in the namespace
+    jobs = batch_v1.list_namespaced_job(namespace=namespace).items
+
+    # Collect status for specified jobs
+    job_statuses = {}
+    for job in jobs:
+        if job.metadata.name in job_names:
+            # Get the job status condition (e.g., Complete, Failed, Active)
+            if job.status.conditions:
+                job_status = job.status.conditions[0].type  # e.g., "Complete", "Failed"
+            else:
+                job_status = "Unknown" if not job.status.active else "Active"
+            job_statuses[job.metadata.name] = job_status
+
+    return job_statuses
+
+
+def get_job_logs(job_name, namespace):
+    config.load_kube_config()
+    v1 = client.CoreV1Api()
+    batch_v1 = client.BatchV1Api()
+    
+    print(job_name, namespace)
+   
+    try:
+        # Get job to find its pods
+        job = batch_v1.read_namespaced_job(name=job_name, namespace=namespace)
+        # Use the job's selector to list pods associated with it
+        label_selector = ",".join([f"{k}={v}" for k, v in job.spec.selector.match_labels.items()])
+        pods = v1.list_namespaced_pod(namespace=namespace, label_selector=label_selector).items
+        
+            # Retrieve logs for a single pod that has completed successfully
+        logs = ""
+        for pod in pods:
+            try:
+                pod_status = v1.read_namespaced_pod_status(name=pod.metadata.name, namespace=namespace)
+                if pod_status.status.phase == "Succeeded":
+                    logs = v1.read_namespaced_pod_log(name=pod.metadata.name, namespace=namespace, _preload_content=False).data.decode("utf-8")
+                    break
+            except client.exceptions.ApiException as e:
+                raise e
+
+        return logs if logs else "null"
+    except client.exceptions.ApiException as e:
+        raise e
+
+
+def get_jobs_logs(job_names, namespace):
+    """
+    Retrieve logs for a list of Kubernetes jobs in a specified namespace.
+
+    Parameters:
+    - job_names (list of str): List of job names to retrieve logs for.
+    - namespace (str): The namespace where the jobs are located.
+
+    Returns:
+    - dict: A dictionary where each key is a job name and each value is the aggregated logs for that job.
+    """
+    config.load_kube_config()
+    v1 = client.CoreV1Api()
+    batch_v1 = client.BatchV1Api()
+    
+    namespace = sk8s.get_current_namespace()
+
+    with multiprocessing.Pool() as pool:
+        job_logs = pool.starmap(get_job_logs, [(job, namespace) for job in job_names])
+    
+    return job_logs
+
+
 def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
-    def get_job_status_json(jobs):
-        stdout = subprocess.run(f"kubectl get jobs {' '.join(jobs)} -o json --ignore-not-found", 
-                            check=True, shell=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8").stdout
-        try:
-            data = json.loads(stdout)
-            if data["kind"] == "Job":
-                return dict(kind="List", items=[data])
-            else: 
-                return data
-        except json.JSONDecodeError:
-            return dict(kind="List", items=[])
-
-    def check_job_status_json(data):
-        assert(data["kind"] == "Job")
-        if ("failed" in data["status"]) and (data["status"]["failed"] >= data["spec"]["backoffLimit"]):
-            return "failed"
-        if "succeeded" not in data["status"]:
-            return "running"
-        if data["status"]["succeeded"] == 1:
-            return "success"
-
-    def cleanup_job(job_name, delete=True, decode=True):
-        log_text = sk8s.logs(job_name, decode=decode)
-        if delete:
-            sk8s.util.run_cmd(f"kubectl delete job {job_name}")
-        if decode:
-            return list(log_text.values())[0]
-        else:
-            return log_text
+    ns = sk8s.get_current_namespace()
 
     if jobs.__class__ == str:
         jobs = [jobs]
 
-    data = get_job_status_json(jobs)
-
-    results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
-
-    actual_results = dict()  # nice variable name doofus 😜
-
-    failures = set()
     while True:
-        data = get_job_status_json(jobs)
-        results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
-        if "running" not in results.values(): break
+        statuses = get_job_statuses(jobs, ns)
+        if "Active" not in statuses.values(): break
+        time.sleep(polling_interval)    
 
-        for j, s in results.items():
-            if j in actual_results.keys(): continue
-            if s == "success":
-                val = cleanup_job(j, delete=delete)
-                actual_results[j] = val
-            elif s == "failed":
-                val = cleanup_job(j, delete=False, decode=False)
-                actual_results[j] = val
-                failures.add(j)
-            elif s == "running":
-                continue
-            else:
-                assert(False)
-
-        time.sleep(polling_interval)
-
-    # Now clean up whatever's left
-    data = get_job_status_json(jobs)
-    results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
-
-    for j, s in results.items():
-        if j in actual_results.keys(): continue
-        if s == "success":
-            val = cleanup_job(j, delete=delete)
-            actual_results[j] = val
-        elif s == "failed":
-            val = cleanup_job(j, delete=False, decode=False)
-            actual_results[j] = val
-            failures.add(j)
-        else:
-            assert(False)
-
-    data = get_job_status_json(jobs)
-    results = {d["metadata"]["name"]: check_job_status_json(d) for d in data["items"]}
-
-    if len(failures) != 0:
+    if "Failed" in statuses.values():
+        failures = [job for job, status in statuses.items() if status == "Failed"]
         raise RuntimeError(f"Jobs {' '.join(failures)} failed.")
 
+    logs = get_jobs_logs(jobs, ns)
+    print("logs:", logs)
+
+    results = list(builtins.map(json.loads, logs))
+
+    if delete == True:
+        subprocess.run(f"kubectl delete job {' '.join(jobs)}", shell=True, check=True, capture_output=True)
+
     if len(jobs) != 1:
-        return [actual_results[job] for job in jobs]
+        return results
     else:
-        return actual_results[jobs[0]]
+        return results[0]
 
 
 def map(func,
-        iterable, 
-        requests=dict(),
-        limits=dict(),
-        image=None,
-        volumes={},
-        imagePullPolicy=None,
-        timeout=None,
-        delete=True,
-        asynchro=False,
-        dryrun=False,
-        verbose=False):
+            iterable, 
+            requests=dict(),
+            limits=dict(),
+            image=None,
+            volumes={},
+            imagePullPolicy=None,
+            timeout=None,
+            delete=True,
+            asynchro=False,
+            dryrun=False,
+            verbose=False,
+            chunk_size=100):
     thunks = [lambda arg=i: func(arg) for i in iterable]
-    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
+
+    if dryrun:
+        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
+        return job_names
+    
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+
+
+    def chunk_job_info(job_info, chunk_size):
+        for i in range(0, len(job_info), chunk_size):
+            yield job_info[i:i + chunk_size]
+            
+    def submit_jobs_from_info(job_infos):
+        job_names = [ji[0] for ji in job_infos]
+        job_specs = [ji[1] for ji in job_infos]
+        combined_job_spec = "\n---\n".join(job_specs)
+        
+        encoded_job_spec = combined_job_spec.encode("utf-8")
+        if encoded_job_spec.__sizeof__() > 1000000:
+            raise ValueError("Job spec too large. Please reduce the chunk size.")
+
+        try:
+            proc = subprocess.run("kubectl apply -f -",
+                            shell=True,
+                            input=combined_job_spec.encode("utf-8"),
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=True)
+        except subprocess.CalledProcessError as e:
+            print("Error in submitting jobs:", e, flush=True)
+            print("Command:" + e.cmd, "-----stdout-----", e.stdout, "-----stderr-----", e.stderr, flush=True, sep="\n")
+            raise e
+
+        return job_names    
+  
+    # Submit the chunks one by one
+    chunk_names = builtins.map(submit_jobs_from_info, chunk_job_info(job_info, chunk_size))
+    job_names = [name for chunk in chunk_names for name in chunk] 
+    
     if asynchro or dryrun:
         return job_names
     else:
@@ -311,9 +378,48 @@ def starmap(func,
             delete=True,
             asynchro=False,
             dryrun=False,
-            verbose=False):
+            verbose=False,
+            chunk_size=100):
     thunks = [lambda arg=i: func(*arg) for i in iterable]
-    job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
+
+    if dryrun:
+        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
+        return job_names
+    
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+
+
+    def chunk_job_info(job_info, chunk_size):
+        for i in range(0, len(job_info), chunk_size):
+            yield job_info[i:i + chunk_size]
+            
+    def submit_jobs_from_info(job_infos):
+        job_names = [ji[0] for ji in job_infos]
+        job_specs = [ji[1] for ji in job_infos]
+        combined_job_spec = "\n---\n".join(job_specs)
+        
+        encoded_job_spec = combined_job_spec.encode("utf-8")
+        if encoded_job_spec.__sizeof__() > 1000000:
+            raise ValueError("Job spec too large. Please reduce the chunk size.")
+
+        try:
+            proc = subprocess.run("kubectl apply -f -",
+                            shell=True,
+                            input=combined_job_spec.encode("utf-8"),
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=True)
+        except subprocess.CalledProcessError as e:
+            print("Error in submitting jobs:", e, flush=True)
+            print("Command:" + e.cmd, "-----stdout-----", e.stdout, "-----stderr-----", e.stderr, flush=True, sep="\n")
+            raise e
+
+        return job_names    
+  
+    # Submit the chunks one by one
+    chunk_names = builtins.map(submit_jobs_from_info, chunk_job_info(job_info, chunk_size))
+    job_names = [name for chunk in chunk_names for name in chunk] 
+    
     if asynchro or dryrun:
         return job_names
     else:
