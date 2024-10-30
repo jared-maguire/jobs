@@ -81,16 +81,17 @@ def get_pod_names_from_job(job):
 def interactive_job(image=None, volumes=None, service_account_name=None):
     # this bit is fun...
 
-    def hang(lifespan):
+    def hang():
         import time
-        time.sleep(lifespan)
+        while True:
+            time.sleep(10)
 
-    job = sk8s.run(hang, 3600, image=image, volumes=volumes, serviceAccountName=service_account_name)
+    job = sk8s.run(hang, image=image, volumes=volumes, serviceAccountName=service_account_name)
 
     pods = get_pods_from_job(job)
     phases = [pods["items"][i]["status"]["phase"]
               for i in range(len(pods["items"]))]
-    
+
     print(f"Wating for {job} to get started...")
     while (len(phases) == 0) or (phases[0] != "Running"):
         pods = get_pods_from_job(job)
