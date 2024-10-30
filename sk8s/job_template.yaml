@@ -5,7 +5,7 @@ metadata:
 spec:
   template:
     spec:
-      serviceAccountName: internal-kubectl
+      serviceAccountName: {{serviceAccountName}}
       containers:
       - name: worker
         image: {{image}}

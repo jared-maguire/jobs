@@ -1,32 +1,155 @@
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: internal-kubectl
+  name: sk8s
+  namespace: {{namespace}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: modify-pods
+  name: sk8s-role
+  namespace: {{namespace}}
 rules:
-  - apiGroups: ["", "batch"]
+  - apiGroups:
+      - coordination.k8s.io
     resources:
-      - pods
-      - jobs
-      - pods/log
+      - leases
+    verbs:
+      - create
+      - get
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
     verbs:
       - get
-      - list
-      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sk8s-cluster-role
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/exec
+      - pods/log
+      - pods/status
+      - events
+      - namespaces
+      - replicationcontrollers
+      - services
+    verbs:
       - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - watch
+      - list
+
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumeclaims
+      - persistentvolumeclaims/finalizers
+    verbs:
+      - create
+      - update
+      - delete
+      - get
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - get
+      - delete
+
+  - apiGroups:
+      - ""
+    resourceNames:
+      - sk8s-workflows-agent-ca-certificates
+    resources:
+      - secrets
+    verbs:
+      - get
+
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - get
+      - watch
+      - list
+      - create
+      - delete
+
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - services
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs:
+      - get
+      - watch
+      - list
+      - create
+      - delete
+ 
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - get
+      - watch
+      - list
+      - create
+      - delete
+      
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: modify-pods-to-sa
+  name: sk8s-binding
+  namespace: {{namespace}}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sk8s-role
 subjects:
   - kind: ServiceAccount
-    name: internal-kubectl
+    name: sk8s
+    namespace: {{namespace}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sk8s-binding
 roleRef:
-  kind: Role
-  name: modify-pods
   apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sk8s-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: sk8s
+    namespace: {{namespace}}

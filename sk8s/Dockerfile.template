@@ -4,7 +4,9 @@ FROM {{ancestor}}
 WORKDIR /app
 
 {% if channels is defined and channels|length > 0 %}
-RUN conda config --add channels {% for channel in channels %} {{channel}} {% endfor %}
+{% for channel in channels %}
+RUN conda config --add channels {{channel}}
+{% endfor %}
 {% endif %}
 
 {% if conda is defined and conda|length > 0 %}

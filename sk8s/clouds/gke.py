@@ -1,61 +1,63 @@
 ### GKE-specific configuration code.
 
-import jinja2
 import subprocess
 import sk8s.configs
+import importlib
+import jinja2
 
 
-
-# Enable ReadWriteMany volumes via Google FileStore:
-
-default_gke_readwritemany_storage_class_template = """apiVersion: storage.k8s.io/v1
+filestore_storageclass="""apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: {{tier}}-readwritemany
+  name: standard-rwx
 provisioner: filestore.csi.storage.gke.io
 volumeBindingMode: Immediate
 allowVolumeExpansion: true
 parameters:
-  tier: {{tier}}
-  network: {{ network|default("default", true) }}"""
+  tier: standard
+  network: default"""
 
 
-def config_readwritemany_storage(network="default", dryrun=False):
-    template = jinja2.Template(default_gke_readwritemany_storage_class_template)
-
-    yamls = []
-    for tier in ["standard", "premium"]:
-        storage_class_yaml = template.render(network=network, tier=tier)
-        if dryrun:
-            print(storage_class_yaml + "\n")
-        else:
-            subprocess.run("kubectl apply -f -",
-                           shell=True,
-                           input=storage_class_yaml.encode("utf-8"),
-                           check=True)
+# If needed, add a storage class to talk to FileStore. (autopilot clusters come with this by default)
+def add_rwx_storage_class():
+    subprocess.run("kubectl apply -f -",
+                   shell=True,
+                   input=filestore_storageclass.encode("utf-8"),
+                   stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL,
+                   check=True)
 
 
+# Enable ReadWriteMany volumes via Google FileStore:
 def config_storageclass_defaults():
-    config = k8s.configs.load_config()
+    config = sk8s.configs.load_config()
     config["default_readwritemany_storageclass"] = "standard-readwritemany"
-    k8s.configs.save_config(config)
+    sk8s.configs.save_config(config)
 
 
 # Overall GKE cluster config:
 
-def config_cluster(project, dryrun=False):
-    rwm_result = config_readwritemany_storage(dryrun=dryrun)
+def config_cluster(project, namespace):
+    # Create service account with permissions to apply changes to the cluster 
+    config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
+    config = jinja2.Template(config).render(namespace=namespace)
+    subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
+
     config_storageclass_defaults()
 
     # TODO: get current google project
 
     google_config = dict(
+                      cluster_type="gke",
                       docker_image_prefix=f"gcr.io/{project}/",
                       docker_default_pull_policy="Always",
                       docker_build_default_push_policy=True,
+                      ecr_create_repo_on_push=False,
                       default_storageclass="standard",
+                      service_account_name="sk8s",
                      )
-    config = k8s.configs.load_config()
+    config = sk8s.configs.load_config()
     config.update(google_config)
+    sk8s.configs.save_config(config)
 
     return config

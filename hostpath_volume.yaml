@@ -1,0 +1,69 @@
+#
+# PersistentVolume
+#
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: reference-volume
+  labels:
+    type: local
+spec:
+  storageClassName: hostpath
+  capacity:
+    storage: 30Gi
+  accessModes:
+    - ReadWriteMany
+  hostPath:
+    #path: /mnt/c/Users/jared/Documents/ref/
+    path: /run/desktop/mnt/host/c/Users/jared/Documents/ref/
+  persistentVolumeReclaimPolicy: Retain
+---
+#
+# PersistentVolumeClaim
+#
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: reference-volume
+spec:
+  storageClassName: hostpath
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 256Mi
+---
+## and GCS creds
+#
+# PersistentVolume
+#
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: gcs-creds
+  labels:
+    type: local
+spec:
+  storageClassName: hostpath
+  capacity:
+    storage: 30Gi
+  accessModes:
+    - ReadWriteMany
+  hostPath:
+    path: /run/desktop/mnt/host/c/Users/jared/AppData/Roaming/gcloud/
+  persistentVolumeReclaimPolicy: Retain
+---
+#
+# PersistentVolumeClaim
+#
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gcs-creds
+spec:
+  storageClassName: hostpath
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Mi

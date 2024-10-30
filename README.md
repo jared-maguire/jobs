@@ -53,6 +53,8 @@ Out[2]: 3
 
 # Installation
 
+## Local Cluster
+
 First, have a k8s cluster configured. Docker Desktop can give you a single node k8s cluster with a few clicks. The examples here are all trivially small compute load, and should run locally just fine. The instructions below assume a local k8s cluster via Docker Desktop.
 
 It's not on pypi yet, so...
@@ -62,12 +64,39 @@ It's not on pypi yet, so...
 
 git clone git@github.com:jared-maguire/jobs.git
 cd jobs
-conda create -c conda-forge -n sk8s_test pip python=3.10  # make a python environment
+conda create -c conda-forge -n sk8s_test pip python=3.12  # make a python environment
 conda activate sk8s_test                                  # activate the python environment
 pip install -e .                                          # install this package in developer mode
-python -m sk8s containers -tag docs2                      # build the "jobs" docker image
-python -m sk8s config                                     # configure the k8s cluster (adds a service account)
+python -m sk8s config-cluster -apply                      # configure the k8s cluster (adds a service account)
 pytest                                                    # run the tests!
 ```
 
 This takes a little while. It's setting up a lot of things.
+
+## Google
+
+First, create a cluster and a container registry on Google Cloud. Configure `kubectl` and `docker` to use them.
+
+I've found (as of april 2023) that a totally default GKE autopilot cluster works if you enable 'Filestore CSI driver' in the cluster config. You can do this via the google web ui.
+
+Then:
+
+```bash
+python -m sk8s config-gke -project PROJECT_NAME -namespace NAMESPACE  # Configure sk8s for GKE
+python -m sk8s containers -push                                       # build the "jobs" docker image
+```
+
+### Amazon
+
+First, create a cluster and a container registry on AWS. Configure `kubectl` and `docker` to use them.
+
+Then:
+
+```bash
+python -m sk8s config-eks -account ACCOUNT_ID -region REGION -namespace NAMESPACE  # Configure sk8s for GKE
+python -m sk8s containers -push                                                    # build the "jobs" docker image
+```
+
+### Amazon
+
+Not implemented yet!

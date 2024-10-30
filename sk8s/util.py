@@ -15,13 +15,17 @@ import importlib
 import sk8s
 
 
-def run_cmd(cmd):
-    result = subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout
+def run_cmd(cmd, retries=1):
+    n = 0
+    while n < retries:
+        result = subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout
+        n += 1
+        if n < retries: time.sleep(1)
     return result
 
 
 def serialize_func(func):
-    code = base64.b64encode(pickle.dumps(func, byref=True, recurse=True)).decode("utf-8")
+    code = base64.b64encode(pickle.dumps(func, byref=True, recurse=False)).decode("utf-8")
     return code
 
 
@@ -39,6 +43,11 @@ def random_string(length):
     letters = string.ascii_lowercase
     return ''.join(random.choice(letters) for i in range(length))
 
+    
+def in_pod():
+    # Check if we're in a pod
+    return os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
+
 
 def get_k8s_config():
     cmd = "kubectl config view"
@@ -48,10 +57,10 @@ def get_k8s_config():
 
 def get_current_namespace():
     config = get_k8s_config()
-    if "namespace" in config["contexts"][0]["context"]:   # I might really regret the hardcoded '[0]' here.
-        return config["contexts"][0]["context"]["namespace"]   # I might really regret the hardcoded '[0]' here.
+    if not in_pod():
+        return subprocess.run("kubectl config view --minify --output 'jsonpath={..namespace}'", shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8")
     else:
-        return "default"
+        return subprocess.run("cat  /var/run/secrets/kubernetes.io/serviceaccount/namespace", shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8")
 
 
 def set_namespace(ns):
@@ -69,32 +78,34 @@ def get_pod_names_from_job(job):
     pod_names = [p["metadata"]["name"] for p in pods["items"]]
     return pod_names
 
-def interactive_job(lifespan):
+def interactive_job(image=None, volumes=None, service_account_name=None):
     # this bit is fun...
 
-    def hang(lifespan=lifespan):
+    def hang():
         import time
-        time.sleep(lifespan)
+        while True:
+            time.sleep(10)
 
-    job = sk8s.run(hang)
+    job = sk8s.run(hang, image=image, volumes=volumes, serviceAccountName=service_account_name)
 
     pods = get_pods_from_job(job)
     phases = [pods["items"][i]["status"]["phase"]
               for i in range(len(pods["items"]))]
-    
 
     print(f"Wating for {job} to get started...")
-    while (phases[0] != "Running"):
+    while (len(phases) == 0) or (phases[0] != "Running"):
         pods = get_pods_from_job(job)
         phases = [pods["items"][i]["status"]["phase"]
                   for i in range(len(pods["items"]))]
         time.sleep(1)
-        print(phases)
+        print(",".join(phases), "                 ", end="\r")
 
     pod_names = get_pod_names_from_job(job)
     pod_name = pod_names[0]
 
-    return os.system(f"kubectl exec --stdin --tty {pod_name} -- /bin/bash")
+    print(pod_name)
+
+    return os.system(f"kubectl exec --stdin --tty {pod_name} -- bash")
 
 
 def wipe_namespace(namespace=None):
