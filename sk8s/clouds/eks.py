@@ -24,9 +24,12 @@ def config_cluster(account, region, namespace):
     # Add the EFS storage class
     config_storageclass_defaults()
 
+    # Get the current username
+    username = subprocess.run("whoami", shell=True, capture_output=True, check=True, text=True).stdout.strip()
+
     eks_config = dict(
                       cluster_type="eks",
-                      docker_image_prefix=f"{account}.dkr.ecr.{region}.amazonaws.com/",
+                      docker_image_prefix=f"{account}.dkr.ecr.{region}.amazonaws.com/{username}_",
                       docker_default_pull_policy="Always",
                       docker_build_default_push_policy=True,
                       ecr_create_repo_on_push=True,
