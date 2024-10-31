@@ -28,7 +28,7 @@ if __name__ == '__main__':
     config.add_argument('-namespace', help='k8s namespace to use', required=True)
 
     config = subparsers.add_parser('containers', help='build worker container')
-    config.add_argument('-branch', default="master", help='the tag we should use for the default jobs image')
+    config.add_argument('-branch', default="main", help='the tag we should use for the default jobs image')
     config.add_argument('-extra_options', default=" ", help='extra options for docker build')
     config.add_argument('-push', default=False, action='store_true', help="also push the image when it's built")
 
