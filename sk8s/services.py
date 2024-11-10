@@ -278,9 +278,32 @@ class KeyValueStore:
 
 
 def kvs_service():
-
   def service_func():
     kvs = KeyValueStore()
     kvs.run()
 
   return service(service_func, ports=[5000])
+
+
+class KVSClient:
+    def __init__(self, service):
+      self.service = service  
+      self.fwd = forward(service, 5000, 5000)
+      
+    def put(self, key, value):
+      return KeyValueStore.put(self.fwd.url, key, value)
+    
+    def get(self, key):
+      return KeyValueStore.get(self.fwd.url, key)["value"]
+
+    def __getitem__(self, key):
+      return self.get(key)
+    
+    def __setitem__(self, key, value):
+      return self.put(key, value)
+    
+    def __delitem__(self, key):
+      return self.put(key, None)
+
+    def get_all(self):
+      return KeyValueStore.get_all(self.fwd.url) 

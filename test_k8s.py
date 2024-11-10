@@ -2,6 +2,7 @@
 import pytest
 import sk8s
 import sk8s.services
+import time
 
 
 ## Cluster
@@ -427,3 +428,18 @@ def test_kvs():
     assert(word["key"] == "word")
     assert(word["value"] == "bird")
 """
+
+## Worker Pools
+
+@pytest.mark.pools
+def test_taskmanager():
+    tm = sk8s.TaskManager()
+
+    tid = tm.submit_task(sk8s.util.serialize_func(lambda: 'OK'))
+
+    while tm.get_task_status(tid) != 'COMPLETE':
+        time.sleep(1)
+        
+    assert(tm.get_task_result(tid) == "OK")
+
+    tm.close()
