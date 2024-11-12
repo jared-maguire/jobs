@@ -128,6 +128,9 @@ class Pool:
 
         self.forwards = [sk8s.services.forward(s, 5000) for s in self.services]
 
+        # Wait for everything to be ready (TODO: make this more robust)
+        time.sleep(5)
+
         self.tid_worker_map = dict()
 
         self.current_worker = 0

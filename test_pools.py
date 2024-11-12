@@ -60,6 +60,9 @@ def test_kvs_local():
 
     kvs_client.put('key', 'value')
     value = kvs_client.get('key')
+
+    sk8s.services.shutdown_service(kvs_service)
+    
     assert(value == 'value')
 
 
@@ -68,7 +71,9 @@ def test_kvs_remote():
         kvs_service = sk8s.services.kvs_service()
         kvs_client = sk8s.services.KVSClient(kvs_service)
         kvs_client.put('key', 'value')
-        return kvs_client.get('key')
+        result = kvs_client.get('key')
+        sk8s.services.shutdown_service(kvs_service)
+        return result
 
     job = sk8s.run(f)
     result = sk8s.wait(job)

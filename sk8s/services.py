@@ -183,7 +183,7 @@ def shutdown_service(service):
     else:
       name = service
     subprocess.run(f"kubectl delete --ignore-not-found=true deployment/{name} service/{name}",
-                   shell=True, check=True)
+                   shell=True, check=True, capture_output=True)
 
 
 def forward(service, remote_port, local_port=""):

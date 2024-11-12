@@ -362,10 +362,10 @@ def test_service():
 
     # Launch the Service
     service_name = sk8s.services.service(echo_service, ports=[5000])
-    #import time; time.sleep(10);
+    import time; time.sleep(5);  # Annoying race condition here
 
     # Set up a local forward to get the url
-    service_forward = sk8s.services.forward(service_name, 5000, 5000)
+    service_forward = sk8s.services.forward(service_name, 5000)
     service_url = service_forward.url
 
     #print("fwd_stdout:", service_forward["proc"].stdout.read(), flush=True)
@@ -398,7 +398,7 @@ def test_service():
     sk8s.services.shutdown_service(service_name)
 
     # And finally, check that the result is correct
-    resp = json.loads(response.content)
+    resp = response.json()
     assert((resp["message"] == "awesome") and
            (resp["response"] == "awesome awesome"))
 
