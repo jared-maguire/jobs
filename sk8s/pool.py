@@ -166,10 +166,14 @@ class Pool:
         return tids
 
     def get_status(self, tid):
-        return self.kvs[tid]['status']
+        record = self.kvs[tid]
+        if (record is not None) and ('status' in record):
+            return record['status']
 
     def get_result(self, tid):
-        return self.kvs[tid]['result']
+        record = self.kvs[tid]
+        if (record is not None) and ('result' in record):
+            return record['result']
         
     def wait(self, tids, timeout=None):
         if tids.__class__ == str:

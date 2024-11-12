@@ -209,7 +209,7 @@ def forward(service, remote_port, local_port=""):
 
 from flask import Flask, request, jsonify
 import requests
-from threading import Thread
+from threading import Thread, Lock
 import time
 import json
 
@@ -218,10 +218,12 @@ class KeyValueStore:
         self.app = Flask(__name__)
         self.host = host
         self.store = {}
+        self.lock = Lock()
         self.app.add_url_rule('/store', view_func=self.handle_request, methods=['POST', 'GET'])
         self.app.add_url_rule('/store/all', view_func=self.handle_get_all, methods=['GET'])
 
     def handle_request(self):
+      with self.lock:
         if request.method == 'POST':
             data = request.get_json()
             key = data['key']
@@ -309,7 +311,11 @@ class KVSClient:
       return KeyValueStore.put(self.fwd.url, key, value)
     
     def get(self, key):
-      return KeyValueStore.get(self.fwd.url, key)["value"]
+      record = KeyValueStore.get(self.fwd.url, key)
+      if (record is not None) and ("value" in record):
+        return record["value"]
+      else:
+        return None
 
     def delete(self, key):
       return KeyValueStore.delete(self.fwd.url, key)
