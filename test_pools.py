@@ -19,6 +19,7 @@ def test_tm_with_kvs():
     tid = tm.submit_task(sk8s.util.serialize_func(lambda: 'OK'))
     while tm.get_task_status(tid) != 'COMPLETE':
         time.sleep(1)
+    sk8s.services.shutdown_service(kvs_service)
     assert(tm.get_task_result(tid) == 'OK')
     tm.close()
 
