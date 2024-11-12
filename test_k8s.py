@@ -390,8 +390,9 @@ def test_service():
     print("Response:", response.content)
 
     # Shut down the port forward
-    service_forward.proc.terminate()
-    service_forward.proc.wait()
+    if service_forward.proc is not None:
+        service_forward.proc.terminate()
+        service_forward.proc.wait()
 
     # And shut down the service
     sk8s.services.shutdown_service(service_name)

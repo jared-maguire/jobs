@@ -69,10 +69,6 @@ if __name__ == '__main__':
         sk8s.docker_build_jobs_image(branch=args.branch, extra_options=args.extra_options)
 
     if args.command == "clean_namespace":
-
-        #subprocess.run("kubectl get all | awk '{print $1}' | grep -v NAME | xargs kubectl delete",
-        #               shell=True, check=True)
-
         lines = subprocess.run("kubectl get all",
                                 shell=True, check=True, stdout=subprocess.PIPE).stdout.decode("utf-8").split("\n")
         objects = [l.split()[0] for l in lines if (len(l.split()) > 2) and ("NAME" not in l)]

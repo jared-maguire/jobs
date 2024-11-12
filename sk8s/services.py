@@ -81,6 +81,7 @@ spec:
   {%- for port in ports %}
   - port: {{port}}
     targetPort: {{port}}
+    name: port{{port}}
   {%- endfor -%}
   {%- endif %}
   selector:
@@ -91,8 +92,8 @@ spec:
 
 def service(func, *args,
             name=None,
-            ports=[21, 22, 80, 5000],
-            timeout=10.0,
+            ports=[5000],
+            timeout=30.0,
             namespace=None,
             dryrun=False,
             template=default_service_template,
@@ -139,7 +140,8 @@ def service(func, *args,
     subprocess.run(f"kubectl apply -f - --namespace {namespace}",
                    shell=True,
                    input=service_yaml.encode("utf-8"),
-                   check=True)
+                   check=True,
+                   capture_output=True)
     
     # wait for it to come up
     import json, time
@@ -150,12 +152,11 @@ def service(func, *args,
         txt = subprocess.run(f"kubectl get deployment {name} -o json",
                              check=True, shell=True, stdout=subprocess.PIPE,
                              encoding="utf-8").stdout
-
         d = json.loads(txt)
 
         if "readyReplicas" in d["status"]:
           ready_replicas = d["status"]["readyReplicas"]
-          print(f"waiting... ready_replicas={ready_replicas}", flush=True)
+          #print(f"waiting... ready_replicas={ready_replicas}", flush=True)
           if ("readyReplicas" in d["status"]) and (d["status"]["readyReplicas"] > 0):
             break
 
@@ -171,7 +172,7 @@ def service(func, *args,
           raise Exception(f"sk8s.service(): waiting for service timed out.") from cpe_exception
         continue
 
-    print(f"proceeding... ready_replicas={ready_replicas}", flush=True)
+    #print(f"proceeding... ready_replicas={ready_replicas}", flush=True)
 
     return name
 
@@ -181,19 +182,25 @@ def shutdown_service(service):
       name = service["name"]
     else:
       name = service
-    subprocess.run(f"kubectl delete service {name} && kubectl delete deployment {name}",
+    subprocess.run(f"kubectl delete --ignore-not-found=true deployment/{name} service/{name}",
                    shell=True, check=True)
 
 
-def forward(service, remote_port, local_port):
-    if service.__class__ == dict:
-      name = service["name"]
+def forward(service, remote_port, local_port=""):
+    if sk8s.util.in_pod():
+        d = dict(proc=None, url=f"http://{service}.{sk8s.util.get_current_namespace()}.svc.cluster.local:{remote_port}")
+        return namedtuple('PortForward', d.keys())(**d)
     else:
-      name = service
-    cmd = f"kubectl port-forward service/{name} {remote_port}:{local_port}"
-    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    d = dict(proc=proc, url=f"http://localhost:{local_port}")
-    return namedtuple('PortForward', d.keys())(**d)
+        if service.__class__ == dict:
+            name = service["name"]
+        else:
+            name = service
+        cmd = f"kubectl port-forward service/{name} {local_port}:{remote_port}"
+        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if local_port == "":
+            local_port = int(proc.stdout.readlines(1)[0].split()[2].decode("utf-8").split(":")[1])
+        d = dict(proc=proc, url=f"http://localhost:{local_port}")
+        return namedtuple('PortForward', d.keys())(**d)
 
 
 #####################################################################
@@ -288,13 +295,24 @@ def kvs_service():
 class KVSClient:
     def __init__(self, service):
       self.service = service  
-      self.fwd = forward(service, 5000, 5000)
-      
+      self.fwd = forward(service, 5000)
+
+    def close(self):
+      if self.fwd.proc is not None:
+        self.fwd.proc.terminate()
+        self.fwd.proc.wait()
+    
+    def __del__(self):
+      self.close()
+
     def put(self, key, value):
       return KeyValueStore.put(self.fwd.url, key, value)
     
     def get(self, key):
       return KeyValueStore.get(self.fwd.url, key)["value"]
+
+    def delete(self, key):
+      return KeyValueStore.delete(self.fwd.url, key)
 
     def __getitem__(self, key):
       return self.get(key)
@@ -303,7 +321,16 @@ class KVSClient:
       return self.put(key, value)
     
     def __delitem__(self, key):
-      return self.put(key, None)
+      return self.delete(key, None)
+    
+    def keys(self):
+      return self.get_all().keys()
+    
+    def values(self):
+      return self.get_all().values()
+    
+    def items(self):
+      return self.get_all().items()
 
     def get_all(self):
       return KeyValueStore.get_all(self.fwd.url) 

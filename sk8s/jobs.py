@@ -308,6 +308,16 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
 
     logs = get_jobs_logs(jobs, ns)
 
+    results = []
+    try:
+        for log in logs:
+            results.append(json.loads(log))
+    except json.JSONDecodeError as e:
+        print("job failed to decode:", log, sep="----------\n", flush=True)
+        print("--------", flush=True)
+        print(e)
+        raise e
+
     results = list(builtins.map(json.loads, logs))
 
     if delete == True:
