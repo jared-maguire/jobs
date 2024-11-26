@@ -12,6 +12,7 @@ WORKDIR /app
 
 RUN conda install -n base conda-libmamba-solver
 RUN conda config --set solver libmamba
+RUN conda config --set channel_priority strict
 
 RUN conda install python={{python_version|default('3.11', True)}}
 

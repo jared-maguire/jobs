@@ -340,10 +340,10 @@ def map(func,
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
 
     def chunk_job_info(job_info, chunk_size):
@@ -400,10 +400,10 @@ def starmap(func,
     thunks = [lambda arg=i: func(*arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
 
     def chunk_job_info(job_info, chunk_size):
@@ -429,6 +429,7 @@ def starmap(func,
         except subprocess.CalledProcessError as e:
             print("Error in submitting jobs:", e, flush=True)
             print("Command:" + e.cmd, "-----stdout-----", e.stdout, "-----stderr-----", e.stderr, flush=True, sep="\n")
+            print("---- job spec -----", combined_job_spec, "---- end job spec ----", flush=True, sep="\n")
             raise e
 
         return job_names    
