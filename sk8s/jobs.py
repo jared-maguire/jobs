@@ -5,6 +5,7 @@ import sys
 import builtins
 from collections import Counter
 from kubernetes import client, config
+import pandas as pd
 
 import dill as pickle
 pickle.settings['recurse'] = True
@@ -15,6 +16,9 @@ import json
 import jinja2
 import subprocess
 import multiprocessing
+
+from concurrent.futures import ThreadPoolExecutor
+import functools
 
 import sk8s
 
@@ -176,119 +180,95 @@ def run(func, *args,
         return wait(job, timeout=timeout)
 
 
-def logs(job_name, decode=True):
-    # Collect the names of the pods:
-    get_pods = f"kubectl get pods --selector=job-name={job_name} --output=json"
-    pods = json.loads(sk8s.util.run_cmd(get_pods))
-    pod_names = [p["metadata"]["name"] for p in pods["items"]]
+def get_job_statuses(namespace=None):
 
-    logs = {}
-    for pod_name in pod_names:
-        if decode:
-            try:
-                pod_logs_text = sk8s.util.run_cmd(f"kubectl logs {pod_name}", retries=2)
-                logs[pod_name] = json.loads(pod_logs_text)
-            except json.JSONDecodeError as e:
-                print("job failed with error:", pod_logs_text, sep="\n", flush=True)
-        else:
-            logs[pod_name] = sk8s.util.run_cmd(f"kubectl logs {pod_name}").decode("utf-8")
-    return logs
-
-
-def get_job_statuses(job_names, namespace):
-    """
-    Retrieve the statuses of a list of Kubernetes jobs in a specified namespace.
-
-    Parameters:
-    - job_names (list of str): List of job names to retrieve statuses for.
-    - namespace (str): The namespace where the jobs are located.
-
-    Returns:
-    - dict: A dictionary where each key is a job name and each value is its status.
-    """
-   
-    if sk8s.in_pod():
-        config.incluster_config.load_incluster_config()    
-    else:
-        config.load_kube_config()
-    
-    batch_v1 = client.BatchV1Api()
-
-    # Fetch all jobs in the namespace
-    jobs = batch_v1.list_namespaced_job(namespace=namespace).items
-
-    # Collect status for specified jobs
-    job_statuses = {}
-    for job in jobs:
-        if job.metadata.name in job_names:
-            # Get the job status condition (e.g., Complete, Failed, Active)
-            if job.status.conditions:
-                job_status = job.status.conditions[0].type  # e.g., "Complete", "Failed"
-            else:
-                job_status = "Unknown" if not job.status.active else "Active"
-            job_statuses[job.metadata.name] = job_status
-
-    return job_statuses
-
-
-def get_job_logs(job_name, namespace):
-    if sk8s.in_pod():
-        config.incluster_config.load_incluster_config()    
+    if sk8s.util.in_pod():
+        config.load_incluster_config()
     else:
         config.load_kube_config()
 
-    v1 = client.CoreV1Api()
     batch_v1 = client.BatchV1Api()
+
+    all_jobs = batch_v1.list_job_for_all_namespaces()
+
+    results = []
+    for job in all_jobs.items:
+        name = job.metadata.name
+        succeeded = job.status.succeeded or 0
+        failed = job.status.failed or 0
+        active = job.status.active or 0
+        _namespace = job.metadata.namespace
+        results.append(dict(job=name, namespace=_namespace, succeeded=succeeded, failed=failed, active=active))
+    if namespace is None:
+        return pd.DataFrame(results)
+    else:
+        return pd.DataFrame([r for r in results if r['namespace'] == namespace])
     
+
+def get_completed_pod_from_jobs(jobs, namespace=None):
+
+    if sk8s.util.in_pod():
+        config.load_incluster_config()
+    else:
+        config.load_kube_config()
+
+    core_v1 = client.CoreV1Api()
+    
+    if namespace is None:
+        namespace = sk8s.util.get_current_namespace()
+
+    pods = core_v1.list_namespaced_pod(namespace=namespace)
+
+    job_set = set(jobs)
+
+    results = dict()
+    for pod in pods.items:
+        job = pod.metadata.owner_references[0].name
+        if job not in job_set:
+            continue
+        assert(pod.status.phase == 'Succeeded')
+        results[job] = pod.metadata.name
+
+    return results
+
+
+def fetch_pod_results(pod_name, namespace=None):
+    if namespace is None:
+        namespace = sk8s.util.get_current_namespace()
+
     try:
-        # Get job to find its pods
-        job = batch_v1.read_namespaced_job(name=job_name, namespace=namespace)
-        # Use the job's selector to list pods associated with it
-        label_selector = ",".join([f"{k}={v}" for k, v in job.spec.selector.match_labels.items()])
-        pods = v1.list_namespaced_pod(namespace=namespace, label_selector=label_selector).items
-        
-            # Retrieve logs for a single pod that has completed successfully
-        logs = ""
-        for pod in pods:
-            try:
-                pod_status = v1.read_namespaced_pod_status(name=pod.metadata.name, namespace=namespace)
-                if pod_status.status.phase == "Succeeded":
-                    logs = v1.read_namespaced_pod_log(name=pod.metadata.name, namespace=namespace, _preload_content=False).data.decode("utf-8")
-                    break
-            except client.exceptions.ApiException as e:
-                raise e
-
-        return logs if logs else "null"
-    except client.exceptions.ApiException as e:
-        raise e
+        v1 = client.CoreV1Api()
+        return json.loads(v1.read_namespaced_pod_log(name=pod_name, namespace=namespace, _preload_content=False).data.decode("utf-8"))
+    except Exception as e:
+        print(f"Failed to fetch logs for pod {pod_name}: {e}")
+        raise
 
 
-def get_jobs_logs(job_names, namespace):
-    """
-    Retrieve logs for a list of Kubernetes jobs in a specified namespace.
-
-    Parameters:
-    - job_names (list of str): List of job names to retrieve logs for.
-    - namespace (str): The namespace where the jobs are located.
-
-    Returns:
-    - dict: A dictionary where each key is a job name and each value is the aggregated logs for that job.
-    """
-
-    if sk8s.in_pod():
-        config.incluster_config.load_incluster_config()
-    else:
+def get_jobs_results(jobs, namespace=None):
+    if sk8s.util.in_pod():
+        config.load_incluster_config()
+    else: 
         config.load_kube_config()
+        
+    core_v1 = client.CoreV1Api()
 
-    v1 = client.CoreV1Api()
-    batch_v1 = client.BatchV1Api()
-    
-    namespace = sk8s.get_current_namespace()
+    if namespace is None:
+        namespace = sk8s.util.get_current_namespace()
 
-    with multiprocessing.Pool() as pool:
-        job_logs = pool.starmap(get_job_logs, [(job, namespace) for job in job_names])
-    
-    return job_logs
+    pods = get_completed_pod_from_jobs(jobs, namespace)
+
+    with ThreadPoolExecutor(max_workers=100) as executor:
+        logs = executor.map(functools.partial(fetch_pod_results, namespace=namespace), pods.values())
+
+    results = dict()
+    for job, log in zip(pods.keys(), logs):
+        results[job] = log
+
+    final = []
+    for job in jobs:
+        final.append(results[job])
+
+    return final
 
 
 def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
@@ -298,20 +278,28 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
         jobs = [jobs]
 
     while True:
-        statuses = get_job_statuses(jobs, ns)
-        if "Active" not in statuses.values(): break
-        time.sleep(polling_interval)    
+        status = get_job_statuses(ns)
+        status = status.loc[status['job'].isin(jobs)]
+        
+        if status['active'].sum() > 0:
+            time.sleep(polling_interval)
+            continue
+        else:
+            break
 
-    if "Failed" in statuses.values():
-        failures = [job for job, status in statuses.items() if status == "Failed"]
+    if status.failed.sum() > 0:
+        failures = status.loc[status['failed'] > 0, 'job'].tolist()
         raise RuntimeError(f"Jobs {' '.join(failures)} failed.")
 
-    logs = get_jobs_logs(jobs, ns)
-
-    results = list(builtins.map(json.loads, logs))
+    results = get_jobs_results(jobs, ns)
 
     if delete == True:
-        subprocess.run(f"kubectl delete job {' '.join(jobs)}", shell=True, check=True, capture_output=True)
+        with ThreadPoolExecutor(max_workers=1000) as executor:
+            # chunk jobs into groups of ten
+            job_chunks = [jobs[i:i + 10] for i in range(0, len(jobs), 10)]
+            cmds = [f"kubectl delete job {' '.join(chunk)}" for chunk in job_chunks]
+            executor.map(functools.partial(subprocess.run, shell=True, check=True, capture_output=True), 
+                         cmds)
 
     if len(jobs) != 1:
         return results
@@ -368,8 +356,9 @@ def map(func,
 
         return job_names    
   
-    # Submit the chunks one by one
-    chunk_names = builtins.map(submit_jobs_from_info, chunk_job_info(job_info, chunk_size))
+    with ThreadPoolExecutor(max_workers=1000) as executor:
+        chunk_names = executor.map(submit_jobs_from_info, list(chunk_job_info(job_info, chunk_size)))
+
     job_names = [name for chunk in chunk_names for name in chunk] 
     
     if asynchro or dryrun:
@@ -428,7 +417,9 @@ def starmap(func,
         return job_names    
   
     # Submit the chunks one by one
-    chunk_names = builtins.map(submit_jobs_from_info, chunk_job_info(job_info, chunk_size))
+    with ThreadPoolExecutor(max_workers=1000) as executor:
+        chunk_names = executor.map(submit_jobs_from_info, list(chunk_job_info(job_info, chunk_size)))   
+
     job_names = [name for chunk in chunk_names for name in chunk] 
     
     if asynchro or dryrun:
