@@ -308,18 +308,18 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
 
 
 def map(func,
-            iterable, 
-            requests=dict(),
-            limits=dict(),
-            image=None,
-            volumes={},
-            imagePullPolicy=None,
-            timeout=None,
-            delete=True,
-            asynchro=False,
-            dryrun=False,
-            verbose=False,
-            chunk_size=100):
+        iterable, 
+        requests=dict(),
+        limits=dict(),
+        image=None,
+        volumes={},
+        imagePullPolicy=None,
+        timeout=None,
+        delete=True,
+        asynchro=False,
+        dryrun=False,
+        verbose=False,
+        chunk_size=100):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
     if dryrun:
