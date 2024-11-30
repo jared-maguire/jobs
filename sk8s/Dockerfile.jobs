@@ -43,14 +43,22 @@ RUN conda update -n base conda
 #RUN pip install dill flask jupyter requests numpy scipy pandas pyyaml pymongo
 
 RUN conda install -y pip tqdm 
-RUN pip install dill flask requests pyyaml pymongo
+RUN pip install dill flask requests pyyaml pymongo pandas
 
 # Installing in dev mode here is a hack to work around
 # the fact that MANIFEST.in doesn't seem to be working in linux :-/
 # also, WARNING: relative paths are a bit surprising in this docker setup.
+
+{% if dev_mode %}
+COPY ./sk8s/ /app/module/sk8s/sk8s
+COPY ./setup.py /app/module/sk8s/setup.py
+COPY  ./MANIFEST.in /app/module/sk8s/MANIFEST.in
+COPY ./test_k8s.py /app/module/sk8s/test_k8s.py
+RUN cd /app/module/sk8s && pip install -e .   
+{% else %}
 RUN pip install git+https://github.com/jared-maguire/jobs.git@{{branch|default('main', True)}}
-#COPY . /app/module/sk8s     
-#RUN cd /app/module/sk8s && pip install -e .   
+RUN curl https://raw.githubusercontent.com/jared-maguire/jobs/refs/heads/{{branch|default('main', True)}}/test_k8s.py -o /app/test_k8s.py
+{% endif %}
 
 #ENV PYTHONPATH "${PYTHONPATH}:/app"
 CMD ["bash"]
