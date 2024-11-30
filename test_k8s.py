@@ -193,7 +193,7 @@ def test_resource_limits():
         os.urandom(size * int(1e6))
         return True
 
-    assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, asynchro=False, timeout=500))
+    assert(sk8s.run(allocate_memory, 3, requests={"memory": "1000Mi", "cpu": 1}, limits={"memory":"1000Mi"}, asynchro=False, timeout=500))
 
     try:
         job = sk8s.run(allocate_memory, 1000, requests={"memory": "6Mi", "cpu": 1}, limits={"memory":"6Mi"})
