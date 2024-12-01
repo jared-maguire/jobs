@@ -57,6 +57,24 @@ def test_starmap():
 
 
 @pytest.mark.jobs
+def test_chunked_map():
+    results = sk8s.chunked_map(lambda i: i*2, range(10), size=3)
+    assert(tuple(results) == tuple([i*2 for i in range(10)]))
+
+    results = sk8s.chunked_map(lambda i: i*2, range(10), size=20)
+    assert(tuple(results) == tuple([i*2 for i in range(10)]))
+
+
+@pytest.mark.jobs
+def test_chunked_starmap():
+    results = sk8s.chunked_starmap(lambda i,j: i+j, [(a,a) for a in range(10)], size=3)
+    assert(tuple(results) == tuple([a+a for a in range(10)]))
+
+    results = sk8s.chunked_starmap(lambda i,j: i+j, [(a,a) for a in range(10)], size=20)
+    assert(tuple(results) == tuple([a+a for a in range(10)]))
+
+
+@pytest.mark.jobs
 def test_imports():
     def pi():
         import math

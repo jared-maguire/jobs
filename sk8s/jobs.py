@@ -326,8 +326,7 @@ def map(func,
         job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun, _map_helper=True) for thunk in thunks]
-
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
@@ -364,7 +363,7 @@ def map(func,
     if asynchro or dryrun:
         return job_names
     else:
-        return wait(job_names, timeout=timeout)
+        return wait(job_names, timeout=timeout, delete=delete)
 
 
 def starmap(func,
@@ -386,8 +385,7 @@ def starmap(func,
         job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun, _map_helper=True) for thunk in thunks]
-
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
@@ -425,4 +423,67 @@ def starmap(func,
     if asynchro or dryrun:
         return job_names
     else:
-        return wait(job_names, timeout=timeout)
+        return wait(job_names, timeout=timeout, delete=delete)
+
+
+################
+# Chunked versions of map and starmap -- for very large sets of jobs
+
+def chunked_map(func, iterable, size=100, asynchro=False, **kwargs):
+    thunks = [lambda arg=arg: func(arg) for arg in iterable]
+
+    def thunker(thunks):
+        results = [thunk() for thunk in thunks]
+        return results
+
+    thunk_chunks = [thunks[i:i + size] for i in range(0, len(thunks), size)]
+
+    #chunked_results = [thunker(chunk) for chunk in thunk_chunks]
+ 
+    def flatten(l):
+        return [item for sublist in l for item in sublist]
+
+    if asynchro:
+        chunked_jobs = sk8s.map(thunker, thunk_chunks, asynchro=True, **kwargs)
+        return chunked_jobs
+    else:
+        chunked_jobs = sk8s.map(thunker, thunk_chunks, asynchro=True, **kwargs)
+        results = sk8s.chunked_wait(chunked_jobs)
+        return results
+    
+
+def chunked_starmap(func, iterable, size=100, asynchro=False, **kwargs):
+    thunks = [lambda arg=arg: func(*arg) for arg in iterable]
+
+    def thunker(thunks):
+        results = [thunk() for thunk in thunks]
+        return results
+
+    thunk_chunks = [thunks[i:i + size] for i in range(0, len(thunks), size)]
+
+    #chunked_results = [thunker(chunk) for chunk in thunk_chunks]
+ 
+    def flatten(l):
+        return [item for sublist in l for item in sublist]
+
+    if asynchro:
+        chunked_jobs = sk8s.map(thunker, thunk_chunks, asynchro=True, **kwargs)
+        return chunked_jobs
+    else:
+        chunked_jobs = sk8s.map(thunker, thunk_chunks, asynchro=True, **kwargs)
+        results = sk8s.chunked_wait(chunked_jobs)
+        return results
+
+
+def chunked_wait(chunked_jobs, **kwargs):
+    resultses = sk8s.wait(chunked_jobs, **kwargs)
+
+    assert(resultses.__class__ == list or resultses.__class__ == tuple)
+
+    if resultses[0].__class__ != list:
+        resultses = [resultses]    
+
+    def flatten(l):
+        return [item for sublist in l for item in sublist]
+    
+    return flatten(resultses)
