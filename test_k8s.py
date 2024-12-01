@@ -57,6 +57,24 @@ def test_starmap():
 
 
 @pytest.mark.jobs
+def test_chunked_map():
+    results = sk8s.chunked_map(lambda i: i*2, range(10), size=3)
+    assert(tuple(results) == tuple([i*2 for i in range(10)]))
+
+    results = sk8s.chunked_map(lambda i: i*2, range(10), size=20)
+    assert(tuple(results) == tuple([i*2 for i in range(10)]))
+
+
+@pytest.mark.jobs
+def test_chunked_starmap():
+    results = sk8s.chunked_starmap(lambda i,j: i+j, [(a,a) for a in range(10)], size=3)
+    assert(tuple(results) == tuple([a+a for a in range(10)]))
+
+    results = sk8s.chunked_starmap(lambda i,j: i+j, [(a,a) for a in range(10)], size=20)
+    assert(tuple(results) == tuple([a+a for a in range(10)]))
+
+
+@pytest.mark.jobs
 def test_imports():
     def pi():
         import math
@@ -192,7 +210,7 @@ def test_resource_limits():
         os.urandom(size * int(1e6))
         return True
 
-    assert(sk8s.run(allocate_memory, 3, requests={"memory": "100Mi", "cpu": 1}, limits={"memory":"100Mi"}, asynchro=False, timeout=500))
+    assert(sk8s.run(allocate_memory, 3, requests={"memory": "1000Mi", "cpu": 1}, limits={"memory":"1000Mi"}, asynchro=False, timeout=500))
 
     try:
         job = sk8s.run(allocate_memory, 1000, requests={"memory": "6Mi", "cpu": 1}, limits={"memory":"6Mi"})

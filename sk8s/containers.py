@@ -61,7 +61,7 @@ def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[]
     return tag
 
 
-def docker_build_jobs_image(tag=None, push=None, dryrun=False, branch=None, extra_options=""):
+def docker_build_jobs_image(tag=None, push=None, dryrun=False, branch=None, dev_mode=False, extra_options=""):
     config = sk8s.configs.load_config()
 
     if tag is None:
@@ -75,7 +75,7 @@ def docker_build_jobs_image(tag=None, push=None, dryrun=False, branch=None, extr
     # Get the version of python that we are using
     python_version = sys.version.split()[0]
 
-    rendered = template.render(tag=tag, branch=branch, python_version=python_version)
+    rendered = template.render(tag=tag, branch=branch, dev_mode=dev_mode, python_version=python_version)
     if dryrun:
         return rendered
     #cwd = os.getcwd()
