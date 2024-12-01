@@ -331,7 +331,7 @@ def map(func,
         job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
@@ -391,7 +391,7 @@ def starmap(func,
         job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
