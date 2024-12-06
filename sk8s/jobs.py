@@ -50,6 +50,8 @@ spec:
       - name: worker
         image: {{image}}
         imagePullPolicy: {{imagePullPolicy}}
+        securityContext:
+            privileged: {% if privileged %}true{% else %}false{% endif %}
         command:
         - python
         - -c
@@ -112,6 +114,7 @@ def run(func, *args,
         imagePullPolicy=None,
         backoffLimit=0,
         serviceAccountName=None,
+        privileged=False,
         name="job-{s}",
         test=False,
         dryrun=False,
@@ -159,6 +162,7 @@ def run(func, *args,
                  volumes=volumes,
                  config=config if export_config else sk8s.configs.default_config,
                  imagePullPolicy=imagePullPolicy,
+                 privileged=privileged,
                  backoffLimit=backoffLimit,
                  serviceAccountName=serviceAccountName)
 
@@ -314,6 +318,7 @@ def map(func,
         image=None,
         volumes={},
         imagePullPolicy=None,
+        privileged=False,
         timeout=None,
         delete=True,
         asynchro=False,
@@ -323,10 +328,10 @@ def map(func,
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
@@ -373,6 +378,7 @@ def starmap(func,
             image=None,
             volumes={},
             imagePullPolicy=None,
+            privileged=False,
             timeout=None,
             delete=True,
             asynchro=False,
@@ -382,10 +388,10 @@ def starmap(func,
     thunks = [lambda arg=i: func(*arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
@@ -410,6 +416,7 @@ def starmap(func,
         except subprocess.CalledProcessError as e:
             print("Error in submitting jobs:", e, flush=True)
             print("Command:" + e.cmd, "-----stdout-----", e.stdout, "-----stderr-----", e.stderr, flush=True, sep="\n")
+            print("---- job spec -----", combined_job_spec, "---- end job spec ----", flush=True, sep="\n")
             raise e
 
         return job_names    

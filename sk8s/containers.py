@@ -29,6 +29,11 @@ def docker_template(tag, ancestor=None, conda=[], pip=[], channels=[], additiona
     rendered = template.render(conda=conda, pip=pip, channels=channels, additional_config=additional_config, ancestor=ancestor)
     return rendered
 
+    
+def docker_name(image_name):
+    config = sk8s.configs.load_config()
+    return config["docker_image_prefix"] + image_name
+
 
 def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[], pip=[], channels=[], push=None, dryrun=False, additional_config="", extra_options="", silent=False):
     config = sk8s.configs.load_config()

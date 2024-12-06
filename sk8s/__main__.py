@@ -40,6 +40,7 @@ if __name__ == '__main__':
     config = subparsers.add_parser('shell', help='launch an interactive shell')
     config.add_argument('-image', default=None, help='name of the image to use')
     config.add_argument('-volumes', default=[], nargs="+", help='names of any volumes to mount')
+    config.add_argument('-privileged', default=False, action='store_true', help='use a privileged container')
     config.add_argument('-service_account_name', default=None, help='ServiceAccount to use')
 
     config = subparsers.add_parser('wait', help='wait for a job')
@@ -100,7 +101,7 @@ if __name__ == '__main__':
             time.sleep(1)
 
     if args.command == "shell":
-        job = sk8s.util.interactive_job(image=args.image, volumes=args.volumes, service_account_name=args.service_account_name)
+        job = sk8s.util.interactive_job(image=args.image, volumes=args.volumes, privileged=args.privileged, service_account_name=args.service_account_name)
 
     if args.command == "dashboard":
         sk8s.dashboard.show_dashboard()
