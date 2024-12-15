@@ -55,7 +55,16 @@ def docker_build(image_name=None, prefix=None, tag=None, ancestor=None, conda=[]
     if dryrun:
         return rendered
 
-    subprocess.run(f"docker build {extra_options} -t {tag} -f - .", input=rendered.encode("utf-8"), check=True, shell=True, capture_output=silent)
+    try:
+        subprocess.run(f"docker build {extra_options} -t {tag} -f - .", input=rendered.encode("utf-8"), check=True, shell=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        print("Error building docker image")
+        print("Commnad: ", e.cmd)
+        print("Stdout: ", e.stdout.decode("utf-8"))
+        print("Stderr: ", e.stderr.decode("utf-8"))
+        raise
+
+
     if push: docker_push(tag)
 
     return tag
