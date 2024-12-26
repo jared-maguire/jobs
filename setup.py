@@ -18,6 +18,7 @@ setup(
                       'pymongo',
                       'flask',
                       'kubernetes',
+                      'pandas',
                       ],
     package_dir={'sk8s': 'sk8s'},
     package_data={'sk8s': ['sk8s/*.yaml',
