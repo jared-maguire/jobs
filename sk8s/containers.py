@@ -21,7 +21,7 @@ def docker_push(tag):
 
 
 def docker_template(tag, ancestor=None, conda=[], pip=[], channels=[], additional_config="", push=True):
-    #cwd = re.sub("^/C", "/c", re.sub("^", "/", re.sub(":", "", re.sub(r"\\", "/", os.getcwd()))))
+    #cwd = re.sub(r"^/C", "/c", re.sub(r"^", "/", re.sub(r":", "", re.sub(r"\\", "/", os.getcwd()))))
     if ancestor is None:
         config = sk8s.configs.load_config()
         ancestor = config["docker_image_prefix"] + "jobs:latest"

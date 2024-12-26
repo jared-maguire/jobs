@@ -113,8 +113,8 @@ def wipe_namespace(namespace=None):
 
     resources = []
     for line in run_cmd(f"kubectl get all {namespace_arg}").decode("utf-8").split("\n"):
-        if re.match("^\s*$", line): continue
-        if re.match("^NAME", line): continue
+        if re.match(r"^\s*$", line): continue
+        if re.match(r"^NAME", line): continue
         resources.append(line.strip().split()[0])
 
     resources_string = " ".join(resources)
