@@ -38,6 +38,9 @@ metadata:
   name: {{name}}
 spec:
   template:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: {% if safe_to_evict %}true{% else %}false{% endif %}
     spec:
       volumes:
       {% for volume in volumes.keys() %}
@@ -96,8 +99,9 @@ spec:
         {%- endfor %}
         {%- endif %}
 
-      restartPolicy: Never
+      restartPolicy: {{restartPolicy}}
   backoffLimit: {{backoffLimit}}
+  ttlSecondsAfterFinished: {{ttlSecondsAfterFinished}}
 """
 
         #- mountPath: "/mnt/{{volume}}"
@@ -113,6 +117,9 @@ def run(func, *args,
         job_template=default_job_template,
         imagePullPolicy=None,
         backoffLimit=0,
+        restartPolicy="Never",
+        ttlSecondsAfterFinished="null",
+        safe_to_evict=False,
         serviceAccountName=None,
         privileged=False,
         name="job-{s}",
@@ -164,6 +171,9 @@ def run(func, *args,
                  imagePullPolicy=imagePullPolicy,
                  privileged=privileged,
                  backoffLimit=backoffLimit,
+                 ttlSecondsAfterFinished=ttlSecondsAfterFinished,
+                 safe_to_evict=safe_to_evict,
+                 restartPolicy=restartPolicy,
                  serviceAccountName=serviceAccountName)
 
     if _map_helper:

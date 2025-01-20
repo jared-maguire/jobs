@@ -15,11 +15,28 @@ def config_storageclass_defaults():
 
 # Overall EKS cluster config:
 
-def config_cluster(account, region, namespace):
+def config_cluster(account, region, namespace, **kwargs):
     # Create service account with permissions to apply changes to the cluster 
     config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
     config = jinja2.Template(config).render(namespace=namespace)
     subprocess.run("kubectl apply -f -", input=config.encode("utf-8"), check=True, shell=True) 
+
+    if "role_arn" in kwargs:
+        role = kwargs["role_arn"]
+        subprocess.run(f"kubectl annotate serviceaccount -n {namespace} sk8s eks.amazonaws.com/role-arn={role_arn}", check=True, shell=True)
+        print("Don't forget to edit your trust relationships. Add the following to the trust relationship policy document, taking care to replace specific values with correct values:")
+        print("""{
+            "Effect": "Allow",
+            "Principal": {
+                "Federated": "arn:aws:iam::901094524821:oidc-provider/oidc.eks.us-west-2.amazonaws.com/id/F74BA5AC07DC83EF21804A791E3C4BDE"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+                "StringEquals": {
+                    "oidc.eks.us-west-2.amazonaws.com/id/F74BA5AC07DC83EF21804A791E3C4BDE:sub": "system:serviceaccount:jared:sk8s"
+                }
+            }
+        }""")
 
     # Add the EFS storage class
     config_storageclass_defaults()

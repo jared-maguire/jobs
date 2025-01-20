@@ -190,7 +190,7 @@ def test_rwx_volumes():
 
 @pytest.mark.containers
 def test_containers():
-    image = sk8s.docker_build("pysam", conda=["pysam"], channels=["bioconda"])
+    image = sk8s.docker_build("pysam", conda=["pysam"], channels=["bioconda", "conda-forge"])
 
     def test_pysam():
         import pysam  # type: ignore
@@ -378,7 +378,7 @@ def test_service():
         app.run(host="0.0.0.0")
 
     # Launch the Service
-    service_name = sk8s.services.service(echo_service, ports=[5000])
+    service_name = sk8s.services.service(echo_service, ports=[5000], timeout=60)
     #import time; time.sleep(10);
 
     # Set up a local forward to get the url
