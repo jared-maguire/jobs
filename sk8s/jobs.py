@@ -61,6 +61,7 @@ spec:
           import json
           import sys
           import sk8s
+          import os
 
           func = sk8s.deserialize_func("{{code}}")
 
@@ -69,6 +70,15 @@ spec:
 
           try:
               result = json.dumps(func())
+
+              if (("result_obs_prefix" in config) 
+                  and (config["result_obs_prefix"] is not None)
+                  and (config["result_obs_prefix"].startswith("s3://"))):
+                  prefix = config["result_obs_prefix"]
+                  with open(f"results.json", "w") as f:
+                        f.write(result)
+                  os.system(f"aws s3 cp results.json {prefix}{{name}}.json")
+
               sys.stdout.write(result)
           except Exception as e:
               raise e
@@ -248,24 +258,42 @@ def fetch_pod_results(pod_name, namespace=None):
         raise
 
 
-def get_jobs_results(jobs, namespace=None):
+def fetch_job_results_obs(job, namespace=None):
+    if namespace is None:
+        namespace = sk8s.util.get_current_namespace()
+    try:
+        obs_prefix = sk8s.configs.load_config()["result_obs_prefix"]
+        obs_file = f"{obs_prefix}{job}.json"
+        return json.loads(subprocess.run(f"gsutil cat {obs_file}", shell=True, check=True, capture_output=True).stdout.decode("utf-8"))
+    except Exception as e:
+        print(f"Failed to fetch logs for job {job}: {e}")
+        raise
+
+
+def get_jobs_results(jobs, namespace=None, sk8s_config=None):
     if sk8s.util.in_pod():
         config.load_incluster_config()
     else: 
         config.load_kube_config()
+
+    if sk8s_config is None:
+        sk8s_config = sk8s.configs.load_config()
         
     core_v1 = client.CoreV1Api()
 
     if namespace is None:
         namespace = sk8s.util.get_current_namespace()
 
-    pods = get_completed_pod_from_jobs(jobs, namespace)
-
     with ThreadPoolExecutor(max_workers=100) as executor:
-        logs = executor.map(functools.partial(fetch_pod_results, namespace=namespace), pods.values())
+        if ("result_obs_prefix" in sk8s_config) and (sk8s_config["result_obs_prefix"] is not None):
+            logs = executor.map(functools.partial(fetch_job_results_obs, namespace=namespace), jobs)
+        else:
+            # Do it the old way, via logs
+            pods = get_completed_pod_from_jobs(jobs, namespace)
+            logs = executor.map(functools.partial(fetch_pod_results, namespace=namespace), pods.values())
 
     results = dict()
-    for job, log in zip(pods.keys(), logs):
+    for job, log in zip(jobs, logs):
         results[job] = log
 
     final = []
@@ -275,7 +303,7 @@ def get_jobs_results(jobs, namespace=None):
     return final
 
 
-def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
+def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0, sk8s_config=None):
     ns = sk8s.get_current_namespace()
 
     if jobs.__class__ == str:
@@ -295,7 +323,7 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
         failures = status.loc[status['failed'] > 0, 'job'].tolist()
         raise RuntimeError(f"Jobs {' '.join(failures)} failed.")
 
-    results = get_jobs_results(jobs, ns)
+    results = get_jobs_results(jobs, ns, sk8s_config=sk8s_config)
 
     if delete == True:
         with ThreadPoolExecutor(max_workers=1000) as executor:

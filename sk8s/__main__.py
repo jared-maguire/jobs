@@ -26,6 +26,7 @@ if __name__ == '__main__':
     config.add_argument('-account', help='eks account id (required)', required=True)
     config.add_argument('-region', help='eks region (required)', required=True)
     config.add_argument('-namespace', help='k8s namespace to use', required=True)
+    config.add_argument('-result_prefix', help='s3 prefix to store job results', required=True)
 
     config = subparsers.add_parser('containers', help='build worker container')
     config.add_argument('-branch', default="main", help='the tag we should use for the default jobs image')
@@ -64,7 +65,7 @@ if __name__ == '__main__':
 
     if args.command == "config-eks":
         import sk8s.clouds.eks
-        sk8s.clouds.eks.config_cluster(account=args.account, region=args.region, namespace=args.namespace)
+        sk8s.clouds.eks.config_cluster(account=args.account, region=args.region, namespace=args.namespace, result_prefix=args.result_prefix)
 
     if args.command == "containers":
         ### Note: only works on local clusters right now

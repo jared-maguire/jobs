@@ -9,7 +9,6 @@ import sk8s.util
 def get_homedir():
     return os.environ.get("HOME", os.environ.get("USERPROFILE", None))
 
-
 default_fname = get_homedir() + f"/.sk8s/config.json"
 
 # These defaults are good for a local cluster

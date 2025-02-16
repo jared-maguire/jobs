@@ -15,7 +15,7 @@ def config_storageclass_defaults():
 
 # Overall EKS cluster config:
 
-def config_cluster(account, region, namespace):
+def config_cluster(account, region, namespace, results_prefix):
     # Create service account with permissions to apply changes to the cluster 
     config = importlib.resources.read_text("sk8s", "cluster_config.yaml")
     config = jinja2.Template(config).render(namespace=namespace)
@@ -33,8 +33,9 @@ def config_cluster(account, region, namespace):
                       docker_default_pull_policy="Always",
                       docker_build_default_push_policy=True,
                       ecr_create_repo_on_push=True,
-                      default_storageclass="standard",
+                      default_storageclass="efs",
                       service_account_name="sk8s",
+                      result_obs_prefix=results_prefix,
                      )
     sk8s_config = sk8s.configs.load_config()
     sk8s_config.update(eks_config)
