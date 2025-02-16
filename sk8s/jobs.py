@@ -40,7 +40,7 @@ spec:
   template:
     metadata:
       annotations:
-        cluster-autoscaler.kubernetes.io/safe-to-evict: {% if safe_to_evict %}true{% else %}false{% endif %}
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "{% if safe_to_evict %}true{% else %}false{% endif %}"
     spec:
       volumes:
       {% for volume in volumes.keys() %}

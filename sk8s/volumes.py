@@ -35,9 +35,11 @@ def create_volume(size, name=None, accessModes=["ReadWriteMany"], template=defau
     template_args["size"] = size
     template_args["name"] = name
 
+    config = configs.load_config()
     if "ReadWriteMany" in template_args["accessModes"]:
-        config = configs.load_config()
         template_args["storageClassName"] = config["default_readwritemany_storageclass"]
+    else:
+        template_args["storageClassName"] = config["default_storageclass"]
 
     volume_yaml = template.render(**template_args)
 

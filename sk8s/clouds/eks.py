@@ -10,6 +10,7 @@ import jinja2
 def config_storageclass_defaults():
     config = sk8s.configs.load_config()
     config["default_readwritemany_storageclass"] = "efs"
+    config["default_storageclass"] = "efs"
     sk8s.configs.save_config(config)
 
 
