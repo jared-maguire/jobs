@@ -62,6 +62,7 @@ spec:
           import sys
           import sk8s
           import os
+          import traceback
 
           func = sk8s.deserialize_func("{{code}}")
 
@@ -81,6 +82,29 @@ spec:
 
               sys.stdout.write(result)
           except Exception as e:
+              # if results are going to object storage, send exceptions too:
+              if (("result_obs_prefix" in config) 
+                  and (config["result_obs_prefix"] is not None)
+                  and (config["result_obs_prefix"].startswith("s3://"))):
+                  prefix = config["result_obs_prefix"]
+
+                  # Get exception type, value, and traceback
+                  exc_type, exc_value, exc_traceback = sys.exc_info()
+
+                  # Format the traceback into a list of strings
+                  traceback_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
+
+                  # Join the traceback lines into a single string
+                  traceback_string = ''.join(traceback_lines)
+
+                  # Alternatively, get the exception message directly as a string
+                  exception_string = str(e)
+
+                  with open(f"results.json", "w") as f:
+                      f.write(f"Exception message: {exception_string} Full traceback: {traceback_string}")
+
+                  os.system(f"aws s3 cp results.json {prefix}{{name}}.json")
+
               raise e
 
         {%- if (requests is defined and requests|length > 0) or (limits is defined and limits|length > 0) %}
@@ -264,7 +288,10 @@ def fetch_job_results_obs(job, namespace=None):
     try:
         obs_prefix = sk8s.configs.load_config()["result_obs_prefix"]
         obs_file = f"{obs_prefix}{job}.json"
-        return json.loads(subprocess.run(f"gsutil cat {obs_file}", shell=True, check=True, capture_output=True).stdout.decode("utf-8"))
+        if obs_file.startswith("s3://"):
+            return json.loads(subprocess.run(f"aws s3 cp {obs_file} -", shell=True, check=True, capture_output=True).stdout.decode("utf-8"))
+        else:
+            raise NotImplementedError("Only S3 is supported for results collection for now.")
     except Exception as e:
         print(f"Failed to fetch logs for job {job}: {e}")
         raise
@@ -319,8 +346,8 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0, s
         else:
             break
 
-    if status.failed.sum() > 0:
-        failures = status.loc[status['failed'] > 0, 'job'].tolist()
+    if status.succeeded.sum() != len(jobs):
+        failures = status.loc[(status['succeeded'] == 0) & (status['failed'] > 0), 'job'].tolist()
         raise RuntimeError(f"Jobs {' '.join(failures)} failed.")
 
     results = get_jobs_results(jobs, ns, sk8s_config=sk8s_config)
@@ -344,6 +371,7 @@ def map(func,
         requests=dict(),
         limits=dict(),
         image=None,
+        backoffLimit=0,
         volumes={},
         imagePullPolicy=None,
         privileged=False,
@@ -356,10 +384,10 @@ def map(func,
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, requests=requests, limits=limits, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
@@ -405,6 +433,7 @@ def starmap(func,
             limits=dict(),
             image=None,
             volumes={},
+            backoffLimit=0,
             imagePullPolicy=None,
             privileged=False,
             timeout=None,
@@ -416,10 +445,10 @@ def starmap(func,
     thunks = [lambda arg=i: func(*arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, requests=requests, limits=limits, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, requests=requests, limits=limits, backoffLimit=backoffLimit, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
