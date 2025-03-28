@@ -49,7 +49,6 @@ RUN pip install dill flask requests pyyaml pymongo pandas
 # Installing in dev mode here is a hack to work around
 # the fact that MANIFEST.in doesn't seem to be working in linux :-/
 # also, WARNING: relative paths are a bit surprising in this docker setup.
-
 {% if dev_mode %}
 COPY ./sk8s/ /app/module/sk8s/sk8s
 COPY ./setup.py /app/module/sk8s/setup.py

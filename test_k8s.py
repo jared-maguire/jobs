@@ -2,6 +2,7 @@
 import pytest
 import sk8s
 import sk8s.services
+import time
 
 
 ## Cluster
@@ -379,10 +380,10 @@ def test_service():
 
     # Launch the Service
     service_name = sk8s.services.service(echo_service, ports=[5000])
-    #import time; time.sleep(10);
+    import time; time.sleep(5);  # Annoying race condition here
 
     # Set up a local forward to get the url
-    service_forward = sk8s.services.forward(service_name, 5000, 5000)
+    service_forward = sk8s.services.forward(service_name, 5000)
     service_url = service_forward.url
 
     #print("fwd_stdout:", service_forward["proc"].stdout.read(), flush=True)
@@ -407,14 +408,15 @@ def test_service():
     print("Response:", response.content)
 
     # Shut down the port forward
-    service_forward.proc.terminate()
-    service_forward.proc.wait()
+    if service_forward.proc is not None:
+        service_forward.proc.terminate()
+        service_forward.proc.wait()
 
     # And shut down the service
     sk8s.services.shutdown_service(service_name)
 
     # And finally, check that the result is correct
-    resp = json.loads(response.content)
+    resp = response.json()
     assert((resp["message"] == "awesome") and
            (resp["response"] == "awesome awesome"))
 
@@ -445,3 +447,18 @@ def test_kvs():
     assert(word["key"] == "word")
     assert(word["value"] == "bird")
 """
+
+## Worker Pools
+
+@pytest.mark.pools
+def test_taskmanager():
+    tm = sk8s.TaskManager()
+
+    tid = tm.submit_task(sk8s.util.serialize_func(lambda: 'OK'))
+
+    while tm.get_task_status(tid) != 'COMPLETE':
+        time.sleep(1)
+        
+    assert(tm.get_task_result(tid) == "OK")
+
+    tm.close()
