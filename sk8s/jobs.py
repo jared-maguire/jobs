@@ -348,7 +348,12 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0, s
 
     if status.succeeded.sum() != len(jobs):
         failures = status.loc[(status['succeeded'] == 0) & (status['failed'] > 0), 'job'].tolist()
-        raise RuntimeError(f"Jobs {' '.join(failures)} failed.")
+        n_succeeded = status.succeeded.sum()
+        n_failed = status.failed.sum()
+        n_active = status.active.sum()
+        n1 = len(jobs)
+        n2 = len(status)
+        raise RuntimeError(f"Jobs {n_succeeded} {n_failed} {n_active} {n1} {n2} {' '.join(failures)} failed.")
 
     results = get_jobs_results(jobs, ns, sk8s_config=sk8s_config)
 
@@ -378,16 +383,17 @@ def map(func,
         timeout=None,
         delete=True,
         asynchro=False,
+        name="job-{s}",
         dryrun=False,
         verbose=False,
         chunk_size=100):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, name=name, requests=requests, limits=limits, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, name=name, requests=requests, limits=limits, volumes=volumes, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
@@ -435,6 +441,7 @@ def starmap(func,
             volumes={},
             backoffLimit=0,
             imagePullPolicy=None,
+            name="job-{s}",
             privileged=False,
             timeout=None,
             delete=True,
@@ -445,10 +452,10 @@ def starmap(func,
     thunks = [lambda arg=i: func(*arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, name=name, requests=requests, limits=limits, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, backoffLimit=backoffLimit, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, name=name, requests=requests, limits=limits, backoffLimit=backoffLimit, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
