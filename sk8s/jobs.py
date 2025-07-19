@@ -61,6 +61,8 @@ spec:
           import json
           import sys
           import sk8s
+          import os
+          import traceback
 
           func = sk8s.deserialize_func("{{code}}")
 
@@ -69,8 +71,40 @@ spec:
 
           try:
               result = json.dumps(func())
+
+              if (("result_obs_prefix" in config) 
+                  and (config["result_obs_prefix"] is not None)
+                  and (config["result_obs_prefix"].startswith("s3://"))):
+                  prefix = config["result_obs_prefix"]
+                  with open(f"results.json", "w") as f:
+                        f.write(result)
+                  os.system(f"aws s3 cp results.json {prefix}{{name}}.json")
+
               sys.stdout.write(result)
           except Exception as e:
+              # if results are going to object storage, send exceptions too:
+              if (("result_obs_prefix" in config) 
+                  and (config["result_obs_prefix"] is not None)
+                  and (config["result_obs_prefix"].startswith("s3://"))):
+                  prefix = config["result_obs_prefix"]
+
+                  # Get exception type, value, and traceback
+                  exc_type, exc_value, exc_traceback = sys.exc_info()
+
+                  # Format the traceback into a list of strings
+                  traceback_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
+
+                  # Join the traceback lines into a single string
+                  traceback_string = ''.join(traceback_lines)
+
+                  # Alternatively, get the exception message directly as a string
+                  exception_string = str(e)
+
+                  with open(f"results.json", "w") as f:
+                      f.write(f"Exception message: {exception_string} Full traceback: {traceback_string}")
+
+                  os.system(f"aws s3 cp results.json {prefix}{{name}}.json")
+
               raise e
 
         {%- if (requests is defined and requests|length > 0) or (limits is defined and limits|length > 0) %}
@@ -248,24 +282,45 @@ def fetch_pod_results(pod_name, namespace=None):
         raise
 
 
-def get_jobs_results(jobs, namespace=None):
+def fetch_job_results_obs(job, namespace=None):
+    if namespace is None:
+        namespace = sk8s.util.get_current_namespace()
+    try:
+        obs_prefix = sk8s.configs.load_config()["result_obs_prefix"]
+        obs_file = f"{obs_prefix}{job}.json"
+        if obs_file.startswith("s3://"):
+            return json.loads(subprocess.run(f"aws s3 cp {obs_file} -", shell=True, check=True, capture_output=True).stdout.decode("utf-8"))
+        else:
+            raise NotImplementedError("Only S3 is supported for results collection for now.")
+    except Exception as e:
+        print(f"Failed to fetch logs for job {job}: {e}")
+        raise
+
+
+def get_jobs_results(jobs, namespace=None, sk8s_config=None):
     if sk8s.util.in_pod():
         config.load_incluster_config()
     else: 
         config.load_kube_config()
+
+    if sk8s_config is None:
+        sk8s_config = sk8s.configs.load_config()
         
     core_v1 = client.CoreV1Api()
 
     if namespace is None:
         namespace = sk8s.util.get_current_namespace()
 
-    pods = get_completed_pod_from_jobs(jobs, namespace)
-
     with ThreadPoolExecutor(max_workers=100) as executor:
-        logs = executor.map(functools.partial(fetch_pod_results, namespace=namespace), pods.values())
+        if ("result_obs_prefix" in sk8s_config) and (sk8s_config["result_obs_prefix"] is not None):
+            logs = executor.map(functools.partial(fetch_job_results_obs, namespace=namespace), jobs)
+        else:
+            # Do it the old way, via logs
+            pods = get_completed_pod_from_jobs(jobs, namespace)
+            logs = executor.map(functools.partial(fetch_pod_results, namespace=namespace), pods.values())
 
     results = dict()
-    for job, log in zip(pods.keys(), logs):
+    for job, log in zip(jobs, logs):
         results[job] = log
 
     final = []
@@ -275,7 +330,7 @@ def get_jobs_results(jobs, namespace=None):
     return final
 
 
-def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
+def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0, sk8s_config=None):
     ns = sk8s.get_current_namespace()
 
     if jobs.__class__ == str:
@@ -291,11 +346,16 @@ def wait(jobs, timeout=None, verbose=False, delete=True, polling_interval=1.0):
         else:
             break
 
-    if status.failed.sum() > 0:
-        failures = status.loc[status['failed'] > 0, 'job'].tolist()
-        raise RuntimeError(f"Jobs {' '.join(failures)} failed.")
+    if status.succeeded.sum() != len(jobs):
+        failures = status.loc[(status['succeeded'] == 0) & (status['failed'] > 0), 'job'].tolist()
+        n_succeeded = status.succeeded.sum()
+        n_failed = status.failed.sum()
+        n_active = status.active.sum()
+        n1 = len(jobs)
+        n2 = len(status)
+        raise RuntimeError(f"Jobs {n_succeeded} {n_failed} {n_active} {n1} {n2} {' '.join(failures)} failed.")
 
-    results = get_jobs_results(jobs, ns)
+    results = get_jobs_results(jobs, ns, sk8s_config=sk8s_config)
 
     if delete == True:
         with ThreadPoolExecutor(max_workers=1000) as executor:
@@ -316,22 +376,24 @@ def map(func,
         requests=dict(),
         limits=dict(),
         image=None,
+        backoffLimit=0,
         volumes={},
         imagePullPolicy=None,
         privileged=False,
         timeout=None,
         delete=True,
         asynchro=False,
+        name="job-{s}",
         dryrun=False,
         verbose=False,
         chunk_size=100):
     thunks = [lambda arg=i: func(arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, name=name, requests=requests, limits=limits, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, name=name, requests=requests, limits=limits, volumes=volumes, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
@@ -377,7 +439,9 @@ def starmap(func,
             limits=dict(),
             image=None,
             volumes={},
+            backoffLimit=0,
             imagePullPolicy=None,
+            name="job-{s}",
             privileged=False,
             timeout=None,
             delete=True,
@@ -388,10 +452,10 @@ def starmap(func,
     thunks = [lambda arg=i: func(*arg) for i in iterable]
 
     if dryrun:
-        job_names = [run(thunk, image=image, requests=requests, limits=limits, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
+        job_names = [run(thunk, image=image, name=name, requests=requests, limits=limits, backoffLimit=backoffLimit, imagePullPolicy=imagePullPolicy, privileged=privileged, volumes=volumes, dryrun=dryrun) for thunk in thunks]
         return job_names
     
-    job_info = [run(thunk, image=image, requests=requests, limits=limits, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
+    job_info = [run(thunk, image=image, name=name, requests=requests, limits=limits, backoffLimit=backoffLimit, volumes=volumes, imagePullPolicy=imagePullPolicy, privileged=privileged, dryrun=dryrun, _map_helper=True) for thunk in thunks]
 
     def chunk_job_info(job_info, chunk_size):
         for i in range(0, len(job_info), chunk_size):
