@@ -195,6 +195,25 @@ def test_a_clone_swept_between_resolve_and_job_create_fails_loudly_and_cleans_up
     assert not list(h.root.rglob("*payload*"))  # and so was its payload
 
 
+def test_a_terminating_clone_fails_the_recheck_like_a_deleted_one(h: H) -> None:
+    h.volume()
+    h.populate()
+    real = h.batch.create_namespaced_job
+
+    def create_then_mark_terminating(namespace: str, body: Any) -> Any:
+        out = real(namespace, body)
+        for (_, n) in list(h.core.pvcs):
+            if n in h.clone_names():
+                # deletion issued but held open by finishing pods: deletionTimestamp set
+                h.core.pvcs[(NS, n)].metadata.deletion_timestamp = "2026-10-11T00:00:00Z"
+        return out
+
+    h.batch.create_namespaced_job = create_then_mark_terminating  # type: ignore[method-assign]
+    with pytest.raises(VolumeError, match="is being deleted"):
+        h.reader()
+    assert len(h.batch.deleted) == 1  # the doomed Job was removed, not left to go Pending
+
+
 def test_writer_job_with_a_lost_clone_is_unmarked(h: H) -> None:
     h.volume()
     h.populate()

@@ -755,7 +755,7 @@ class Cluster:
             if m.claim == m.name:
                 continue
             try:
-                self.core.read_namespaced_persistent_volume_claim(
+                claim = self.core.read_namespaced_persistent_volume_claim(
                     name=m.claim, namespace=self.config.namespace
                 )
             except ApiException as exc:
@@ -767,6 +767,13 @@ class Cluster:
                     f"this job was being submitted (another client superseded it); nothing was "
                     f"started. Submit the job again."
                 ) from exc
+            # A Terminating clone (deletion issued, held open by finishing pods) will vanish
+            # before our pod can bind it — treat it the same as already gone.
+            if claim.metadata is not None and claim.metadata.deletion_timestamp is not None:
+                raise VolumeError(
+                    f"the read-only clone {m.claim!r} of volume {m.name!r} is being deleted "
+                    f"(another client superseded it); nothing was started. Submit the job again."
+                )
 
     def _mark_writers(self, plan: _MountPlan, job_name: str) -> None:
         if plan.writers:
