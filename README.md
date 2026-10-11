@@ -102,6 +102,8 @@ When some items of a `map` fail, every other item is still collected and
 **7. Start a detached workflow.** The driver function runs in the cluster as a Job and can
 submit its own Jobs. Your process does not need to stay alive:
 
+> **Rule of thumb:** a plain `submit()`/`run()` is tethered to your Python session — if the process dies, the job still completes but its result is stranded. For anything you might walk away from, use `submit_workflow()` and reattach later with `attach(id)`.
+
 ```python
 import sk8s
 
