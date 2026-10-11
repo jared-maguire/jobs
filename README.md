@@ -200,7 +200,36 @@ print(sk8s.run(lambda x: x * 2, 21))  # 42
 ## Custom images
 
 The official worker image has only sk8s and the standard library. To add packages, layer
-them on a base image. On minikube, build on the local base image from the quickstart:
+them on a base image.
+
+### Recommended: use the minikube registry addon
+
+A local registry makes minikube behave like a real cluster: plain `docker build` and
+`docker push`, and jobs pull by name with the default pull policy.
+
+```bash
+minikube addons enable registry
+kubectl -n kube-system port-forward svc/registry 5000:80 &   # keep this running while you push
+
+# a Dockerfile layered on your base image, e.g. FROM sk8s:dev + RUN pip install pysam
+docker build -t localhost:5000/pysam-worker:1 .
+docker push localhost:5000/pysam-worker:1
+```
+
+```python
+import sk8s
+
+print(sk8s.run(lambda: __import__("pysam").__version__, image="localhost:5000/pysam-worker:1"))
+```
+
+Pods resolve `localhost:5000` through the addon's node-local proxy, so no pull-policy
+override is needed. Setting `image_prefix = "localhost:5000/"` in
+`~/.config/sk8s/config.toml` prepends that registry to the default worker image name,
+the same way you would point a real cluster at an ECR or GAR mirror prefix.
+
+### Fallback: build straight into minikube (no registry)
+
+Build on the local base image from the quickstart:
 
 ```bash
 sk8s image build --tag pysam-worker:1 --base sk8s:dev --pip pysam --minikube

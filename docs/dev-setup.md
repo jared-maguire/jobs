@@ -61,6 +61,25 @@ sk8s doctor
    does that check for you: it puts its generated Dockerfile inside the context and
    raises an error if the tag is missing from `minikube image ls` afterwards.
 
+   Two more `minikube image` caveats. Every `minikube image build` leaks a context
+   tarball at `/tmp/build.*.tar` (multi-GB if `.venv` is in the context, which the
+   repo `.dockerignore` now excludes), so clean `/tmp` periodically or prefer the
+   registry route below. And `minikube image rm` removes by image ID, so tags that
+   share an ID (for example an identical rebuild under a new tag) vanish together.
+
+   **Registry route (recommended for custom images).** Enable the addon, keep a
+   port-forward running while you push, then use plain docker:
+
+   ```bash
+   minikube addons enable registry
+   kubectl -n kube-system port-forward svc/registry 5000:80 &
+   docker build -t localhost:5000/pysam-worker:1 . && docker push localhost:5000/pysam-worker:1
+   ```
+
+   Jobs then use `image="localhost:5000/pysam-worker:1"` with the default pull policy
+   (pods reach `localhost:5000` through the addon's node-local proxy). See
+   [Custom images](../README.md#custom-images) in the README.
+
 ## Legacy default-namespace RBAC
 
 The integration suites predate `sk8s config` and provision the **`default`**

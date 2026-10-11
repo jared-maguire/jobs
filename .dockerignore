@@ -1,1 +1,5 @@
 **/work
+.venv/
+.git/
+.mypy_cache/
+__pycache__/
