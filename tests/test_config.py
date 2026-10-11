@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from sk8s.config import DEFAULT_NAMESPACE, Config, load_config
+import pytest
+
+from sk8s import config as config_mod
+from sk8s.config import DEFAULT_NAMESPACE, Config, config_path, load_config
 
 
 def test_defaults() -> None:
@@ -84,3 +87,46 @@ def test_config_file_is_read_as_utf8(tmp_path: Path, monkeypatch) -> None:  # ty
 
     monkeypatch.setattr(Path, "read_text", strict_default)
     assert load_config(path=f, env={}).image_prefix == "registry.example/café-über/"
+
+
+def test_config_path_default_and_empty_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    default = tmp_path / "default.toml"
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", default)
+    assert config_path({}) == default
+    assert config_path({"SK8S_CONFIG": ""}) == default
+
+
+def test_config_path_env_override(tmp_path: Path) -> None:
+    assert config_path({"SK8S_CONFIG": str(tmp_path / "x.toml")}) == tmp_path / "x.toml"
+
+
+def test_config_path_expands_user(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert config_path({"SK8S_CONFIG": "~/c.toml"}) == tmp_path / "c.toml"
+
+
+def test_load_config_reads_sk8s_config_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", tmp_path / "never.toml")
+    (tmp_path / "never.toml").write_text('namespace = "from-default"\n')
+    f = tmp_path / "alt.toml"
+    f.write_text('namespace = "from-alt"\nstore = "s3://b/"\n')
+    cfg = load_config(env={"SK8S_CONFIG": str(f)})
+    assert cfg.namespace == "from-alt" and cfg.store == "s3://b/"
+
+
+def test_sk8s_config_changes_the_file_not_the_layering(tmp_path: Path) -> None:
+    f = tmp_path / "alt.toml"
+    f.write_text('namespace = "file"\nstore = "s3://b/"\n')
+    env = {"SK8S_CONFIG": str(f), "SK8S_NAMESPACE": "env"}
+    assert load_config(env=env).namespace == "env"  # env > file
+    assert load_config(env=env, namespace="kw").namespace == "kw"  # kwargs > env
+    assert load_config(env=env).store == "s3://b/"  # file still supplies the rest
+
+
+def test_explicit_path_beats_sk8s_config(tmp_path: Path) -> None:
+    a, b = tmp_path / "a.toml", tmp_path / "b.toml"
+    a.write_text('namespace = "a"\n')
+    b.write_text('namespace = "b"\n')
+    assert load_config(path=a, env={"SK8S_CONFIG": str(b)}).namespace == "a"

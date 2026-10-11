@@ -61,7 +61,7 @@ def _load_cfg() -> Config:
     try:
         return load_config()
     except (ValueError, TypeError, OSError) as e:
-        raise Sk8sError(f"cannot load sk8s config ({config_mod.DEFAULT_CONFIG_PATH}): {e}") from e
+        raise Sk8sError(f"cannot load sk8s config ({config_mod.config_path()}): {e}") from e
 
 
 def _namespace(explicit: str | None = None, cfg: Config | None = None) -> str:
@@ -337,7 +337,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
             print("cloud plan (not run; re-run with --apply-cloud to execute):")
             _print_cloud_plan(steps, notes)
     print("\n".join(profile_mod.apply(prof)))
-    path = config_mod.DEFAULT_CONFIG_PATH
+    path = config_mod.config_path()
     write_config(
         path, {"namespace": prof.namespace, "store": prof.store, "image_prefix": prof.image_prefix}
     )

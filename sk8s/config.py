@@ -1,4 +1,7 @@
-"""Layered, frozen configuration: defaults < toml file < SK8S_* env < kwargs."""
+"""Layered, frozen configuration: defaults < toml file < SK8S_* env < kwargs.
+
+The toml file is ``~/.config/sk8s/config.toml`` unless ``SK8S_CONFIG`` names another path.
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -14,6 +17,9 @@ else:
     import tomli as tomllib
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "sk8s" / "config.toml"
+# ``SK8S_CONFIG=<path>`` relocates the file (both reading and ``sk8s config`` writing); it changes
+# WHICH file is the file layer, not the layering.
+CONFIG_PATH_ENV = "SK8S_CONFIG"
 # The dedicated namespace sk8s uses when nothing names one. Never "default".
 DEFAULT_NAMESPACE = "sk8s"
 
@@ -46,13 +52,20 @@ def _coerce(name: str, raw: str) -> Any:
     return raw
 
 
+def config_path(env: Mapping[str, str] | None = None) -> Path:
+    """The config file location: ``SK8S_CONFIG`` if set and non-empty, else the default path."""
+    env = os.environ if env is None else env
+    raw = env.get(CONFIG_PATH_ENV, "")
+    return Path(raw).expanduser() if raw else DEFAULT_CONFIG_PATH
+
+
 def load_config(
     path: Path | None = None,
     env: Mapping[str, str] | None = None,
     **overrides: Any,
 ) -> Config:
-    path = DEFAULT_CONFIG_PATH if path is None else path
     env = os.environ if env is None else env
+    path = config_path(env) if path is None else path
 
     values: dict[str, Any] = {}
     if path.exists():

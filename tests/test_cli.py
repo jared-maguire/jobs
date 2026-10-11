@@ -272,6 +272,20 @@ def test_config_applies_then_writes_file(
     assert "created" in out and str(env) in out
 
 
+def test_config_honours_sk8s_config_env(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], env: Path, tmp_path: Path
+) -> None:
+    _fakes(monkeypatch)
+    alt = tmp_path / "alt" / "c.toml"
+    monkeypatch.setenv("SK8S_CONFIG", str(alt))
+    assert cli.run(["config", "--namespace", NS, "--store", "local:/tmp/x"]) == 0
+    assert tomllib.loads(alt.read_text())["namespace"] == NS
+    assert not env.exists()  # the default file is untouched
+    assert str(alt) in capsys.readouterr().out
+    # and the same file is what the commands read back
+    assert cli._load_cfg().namespace == NS
+
+
 def test_config_second_run_converges(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
     core, _, rbac = _fakes(monkeypatch)
     cli.run(["config", "--namespace", NS])

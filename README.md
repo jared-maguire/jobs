@@ -380,7 +380,8 @@ sk8s at stores you trust.
 
 ## Configuration
 
-Settings layer as: defaults, then `~/.config/sk8s/config.toml`, then `SK8S_*` environment
+Settings layer as: defaults, then `~/.config/sk8s/config.toml` (set `SK8S_CONFIG=<path>` to
+read and write a different file; this changes which file, not the layering), then `SK8S_*` environment
 variables (`SK8S_NAMESPACE`, `SK8S_IMAGE`, `SK8S_STORE`, ...), then keyword arguments
 (`sk8s.configure(namespace=...)`, `Cluster(config, **overrides)`). The fields are listed in
 `sk8s.Config`. The namespace is the explicit setting if there is one, else the active kube
