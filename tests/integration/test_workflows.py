@@ -18,7 +18,7 @@ import pytest
 from sk8s import anchors
 from sk8s.cluster import Cluster
 from sk8s.config import load_config
-from tests.integration.conftest import requires_cluster
+from tests.integration.conftest import requires_cluster, suite_namespace, suite_pull_policy
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(300)]
 
@@ -26,7 +26,7 @@ IMAGE = os.environ.get("SK8S_WORKFLOW_TEST_IMAGE", "sk8s-dev-workflows:latest")
 
 
 def new_cluster() -> Cluster:
-    return Cluster(load_config(namespace="default", image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=30))
+    return Cluster(load_config(namespace=suite_namespace(), image=IMAGE, pull_policy=suite_pull_policy(), ttl_seconds_after_finished=30))
 
 
 @pytest.fixture
@@ -127,7 +127,9 @@ def test_anchor_deletion_cascades(wf_cluster) -> None:  # type: ignore[no-untype
     ns = wf_cluster.config.namespace
     before = workflow_objects(wf_cluster, wf)
     assert before["jobs"]
-    assert len(before["configmaps"]) > 1  # anchor + the job's blobs
+    in_cluster_blobs = wf_cluster.config.store == "k8s"
+    if in_cluster_blobs:
+        assert len(before["configmaps"]) > 1  # anchor + the job's blobs (ConfigMaps on this store)
     name = anchors.anchor_name(wf)
     assert name in before["configmaps"]
 
@@ -136,3 +138,7 @@ def test_anchor_deletion_cascades(wf_cluster) -> None:  # type: ignore[no-untype
     assert wait_until(
         lambda: workflow_objects(wf_cluster, wf) == {"configmaps": [], "jobs": []}, timeout=30
     ), workflow_objects(wf_cluster, wf)
+    if not in_cluster_blobs:
+        # A raw anchor deletion can only cascade to cluster objects; blobs in an external
+        # store (s3/gs) are removed by delete_anchor/clean, not by Kubernetes GC.
+        wf_cluster.store.delete_prefix(wf)

@@ -8,9 +8,9 @@ from kubernetes.client import ApiException
 
 from sk8s.cluster import Cluster
 from sk8s.config import load_config
-from sk8s.errors import Sk8sError
+from sk8s.errors import BlobNotFound, Sk8sError
 from sk8s.services import Service, get_service, serve
-from tests.integration.conftest import requires_cluster
+from tests.integration.conftest import requires_cluster, suite_namespace, suite_pull_policy
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(600)]
 
@@ -21,7 +21,7 @@ PORT = 8080
 
 def _new_cluster() -> Cluster:
     return Cluster(
-        load_config(namespace="default", image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=30)
+        load_config(namespace=suite_namespace(), image=IMAGE, pull_policy=suite_pull_policy(), ttl_seconds_after_finished=30)
     )
 
 
@@ -132,14 +132,20 @@ def test_scale_to_two_replicas(svc: Service, svc_cluster: Cluster) -> None:
     _poll(ready, 120, "2 ready replicas")
 
 
+def _blob_gone(store: Any, uri: str) -> bool:
+    try:
+        store.get(uri)
+    except BlobNotFound:
+        return True
+    return False
+
+
 def test_delete_removes_everything(svc: Service, svc_cluster: Cluster) -> None:
     ns = svc.namespace
     payload_key = f"svc/{NAME}/payload"
     store = svc_cluster.store
-    # the payload blob (a ConfigMap on this store) exists before delete
-    assert store.get(store.uri_for(payload_key))
-    cm_name = store.uri_for(payload_key).rsplit("/", 1)[1]
-    assert not _gone(svc_cluster.core.read_namespaced_config_map, name=cm_name, namespace=ns)
+    payload_uri = store.uri_for(payload_key)
+    assert store.get(payload_uri)  # the payload blob exists before delete (any store)
 
     svc.delete()
 
@@ -147,7 +153,7 @@ def test_delete_removes_everything(svc: Service, svc_cluster: Cluster) -> None:
         return (
             _gone(svc_cluster.apps.read_namespaced_deployment, name=NAME, namespace=ns)
             and _gone(svc_cluster.core.read_namespaced_service, name=NAME, namespace=ns)
-            and _gone(svc_cluster.core.read_namespaced_config_map, name=cm_name, namespace=ns)
+            and _blob_gone(store, payload_uri)
         )
 
     _poll(all_gone, 30, "Deployment, Service and payload to be gone")
