@@ -12,7 +12,7 @@ from sk8s.doctor import (
     probe_store_in_pod,
     submit_probe_job,
 )
-from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout
+from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout, PodFailed, RemoteTraceback
 from sk8s.profile import ClusterProfile, apply, profile_for
 from sk8s.store.base import BlobStore
 from sk8s.store.local import LocalStore
@@ -454,6 +454,12 @@ class Submitter:
         return self.result
 
 
+def _remote(exc: Exception) -> Exception:
+    """What a pod-side failure looks like after decode_result: raised from a RemoteTraceback."""
+    exc.__cause__ = RemoteTraceback("Traceback (in the pod) ...")
+    return exc
+
+
 def _gs_profile(**kw: Any) -> ClusterProfile:
     return profile_for("generic", namespace="team-a", store="gs://bkt/p/", **kw)
 
@@ -513,7 +519,7 @@ def test_worker_probe_is_absent_when_the_cluster_is_unreachable() -> None:
 
 
 def test_worker_probe_failure_names_workload_identity_first() -> None:
-    sub = Submitter(raises=RuntimeError("403 caller does not have storage.objects.create"))
+    sub = Submitter(raises=_remote(RuntimeError("403 caller does not have storage.objects.create")))
     c = _doctor_gs(sub)[WORKER]
     assert not c.ok
     assert "Workload Identity" in c.fix_hint
@@ -526,6 +532,21 @@ def test_worker_probe_failure_names_workload_identity_first() -> None:
         "403 caller does not have",
     ):
         assert needle in c.fix_hint
+
+
+def test_worker_probe_client_side_failure_is_not_blamed_on_workload_identity() -> None:
+    # No RemoteTraceback cause: the error arose before/outside the pod (payload write, API call).
+    sub = Submitter(raises=PermissionError("403 client cannot write the payload"))
+    c = _doctor_gs(sub)[WORKER]
+    assert not c.ok
+    assert "before reaching the pod" in c.fix_hint and "'store writable'" in c.fix_hint
+    assert "403 client cannot write the payload" in c.fix_hint
+    assert "Workload Identity" not in c.fix_hint
+
+
+def test_worker_probe_pod_failure_without_a_result_still_points_at_workload_identity() -> None:
+    c = _doctor_gs(Submitter(raises=PodFailed("doctor-abc", "container crashed")))[WORKER]
+    assert not c.ok and "Workload Identity" in c.fix_hint
 
 
 def test_worker_probe_non_ok_result_fails() -> None:
@@ -554,7 +575,7 @@ def test_worker_probe_not_attempted_when_namespace_or_service_account_missing() 
 
 def test_client_side_store_check_alone_does_not_make_a_gs_store_healthy() -> None:
     """The client's own store probe passes (MemStore), yet a failing pod still fails doctor."""
-    checks = _doctor_gs(Submitter(raises=RuntimeError("denied")))
+    checks = _doctor_gs(Submitter(raises=_remote(RuntimeError("denied"))))
     assert checks["store writable"].ok and not checks[WORKER].ok
 
 
@@ -593,10 +614,16 @@ def test_worker_probe_end_to_end_with_a_seam_that_runs_the_function_locally(
 
     mem = MemStore()
     monkeypatch.setattr(store_mod, "get_store", lambda url, **kw: mem)
-    ok = _doctor_gs(lambda fn, p: fn(p.store))[WORKER]
+    def in_pod(fn: Any, p: ClusterProfile) -> str:  # like a real run: failures arrive remote
+        try:
+            return str(fn(p.store))
+        except Exception as e:
+            raise _remote(e) from e.__cause__ or RemoteTraceback("tb")
+
+    ok = _doctor_gs(in_pod)[WORKER]
     assert ok.ok
     mem.fail_put = PermissionError("403 forbidden")
-    bad = _doctor_gs(lambda fn, p: fn(p.store))[WORKER]
+    bad = _doctor_gs(in_pod)[WORKER]
     assert not bad.ok and "Workload Identity" in bad.fix_hint and "403" in bad.fix_hint
 
 

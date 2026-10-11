@@ -7,6 +7,7 @@ it lives here and never in the library.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import os
 import re
@@ -254,6 +255,11 @@ def _print_cloud_plan(steps: Sequence[CloudStep], notes: Sequence[str]) -> None:
         print(shlex.join(step.argv))
     for note in notes:
         print(f"# note: {note}")
+    if steps:
+        print(
+            "# note: IAM is eventually consistent: if the Workload Identity binding reports the "
+            "GSA doesn't exist yet, wait ~30s and re-run (steps are idempotent)"
+        )
 
 
 def _apply_cloud_plan(steps: Sequence[CloudStep]) -> None:
@@ -283,18 +289,25 @@ def _cmd_config(args: argparse.Namespace) -> int:
             "--project/--region/--repo/--gsa/--bucket-role/--apply-cloud are GKE options; "
             f"provider is {provider!r} (use --provider gke)"
         )
+    project, region = args.project, args.region
     if provider == "gke":
-        if not (args.project and args.region):
+        # Explicit flags win; otherwise read them off a gke_<project>_<location>_<name> context.
+        parts = profile_mod.gke_context_parts(profile_mod.active_context() or "")
+        if parts is not None:
+            project = project or parts[0]
+            region = region or profile_mod.gke_region(parts[1])
+        if not (project and region):
             raise Sk8sError(
-                "provider 'gke' needs --project and --region (they are not inferred); "
-                "use --provider generic to skip the GKE adapter"
+                "provider 'gke' needs --project and --region: the kube context is not named "
+                "gke_<project>_<location>_<name>, so they cannot be inferred "
+                "(or use --provider generic to skip the GKE adapter)"
             )
         if args.apply_cloud and not args.gsa:
             raise Sk8sError("--apply-cloud needs --gsa (the Google service account to create)")
         # The adapter derives the image prefix; a configured one is not carried over.
         extra: dict[str, Any] = dict(
-            project=args.project, region=args.region, repo=args.repo, gsa=args.gsa
-            and gsa_email(args.gsa, args.project),
+            project=project, region=region, repo=args.repo, gsa=args.gsa
+            and gsa_email(args.gsa, project),
         )
     else:
         extra = {"image_prefix": cfg.image_prefix}
@@ -305,7 +318,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
     steps: list[CloudStep] = []
     if provider == "gke":
         steps, notes = gke_cloud_plan(
-            project=args.project, region=args.region, repo=args.repo, gsa=args.gsa,
+            project=project, region=region, repo=args.repo, gsa=args.gsa,
             store=store, namespace=namespace, service_account=prof.service_account,
             bucket_role=args.bucket_role or DEFAULT_BUCKET_ROLE,
         )
@@ -343,6 +356,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "gke", namespace=namespace, store=cfg.store,
             project=parts[0], region=profile_mod.gke_region(parts[1]),
         )
+        if cfg.image_prefix:  # what `sk8s config` persisted (e.g. a custom --repo) wins
+            prof = dataclasses.replace(prof, image_prefix=cfg.image_prefix)
     else:
         prof = profile_mod.profile_for(
             "generic" if provider == "gke" else provider,

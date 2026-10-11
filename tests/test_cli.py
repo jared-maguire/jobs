@@ -41,6 +41,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", path)
     monkeypatch.setattr(k8s, "context_namespace", lambda: "ctx-ns")
     monkeypatch.setattr(profile_mod, "detect_provider", lambda context=None: "local")
+    monkeypatch.setattr(profile_mod, "active_context", lambda: None)  # never the dev's real one
     return path
 
 
@@ -411,6 +412,7 @@ def test_gke_dry_run_prints_the_k8s_plan_and_the_exact_cloud_plan_and_runs_nothi
         assert shlex.join(argv) in lines
     assert "# note: Artifact Registry repo us-central1-docker.pkg.dev/my-proj/sk8s/" in out
     assert "roles/artifactregistry.reader" in out
+    assert "eventually consistent" in out and "wait ~30s" in out
     # ordering: the GSA exists before it is bound
     assert lines.index(shlex.join(CREATE)) < lines.index(shlex.join(BUCKET_BIND)) < lines.index(
         shlex.join(WI_BIND)
@@ -521,6 +523,53 @@ def test_gke_requires_project_and_region_flags(
     assert cli.run(GKE[:i] + GKE[i + 2:]) == 1
     err = capsys.readouterr().err
     assert "--project and --region" in err and "Traceback" not in err
+
+
+def test_gke_infers_project_and_region_from_the_context_name(
+    monkeypatch: pytest.MonkeyPatch, env: Path, runner: Runner
+) -> None:
+    core, _, _ = _fakes(monkeypatch)
+    monkeypatch.setattr(profile_mod, "active_context", lambda: "gke_ctx-proj_europe-west4-b_c1")
+    assert cli.run(["config", "--provider", "gke", "--namespace", NS, "--store", STORE,
+                    "--gsa", "sk8s-worker", "--apply-cloud"]) == 0
+    assert tomllib.loads(env.read_text())["image_prefix"] == (
+        "europe-west4-docker.pkg.dev/ctx-proj/sk8s/"  # zone -> region
+    )
+    gsa = "sk8s-worker@ctx-proj.iam.gserviceaccount.com"
+    assert core.service_accounts[(NS, "sk8s")].metadata.annotations == {WI_ANN: gsa}
+    assert ("gcloud", "iam", "service-accounts", "describe", gsa, "--project", "ctx-proj") in runner.argvs
+
+
+def test_gke_flags_override_the_context_name(
+    monkeypatch: pytest.MonkeyPatch, env: Path, runner: Runner
+) -> None:
+    _fakes(monkeypatch)
+    monkeypatch.setattr(profile_mod, "active_context", lambda: "gke_ctx-proj_europe-west4_c1")
+    assert cli.run(GKE) == 0  # --project my-proj --region us-central1
+    assert tomllib.loads(env.read_text())["image_prefix"] == (
+        "us-central1-docker.pkg.dev/my-proj/sk8s/"
+    )
+
+
+def test_gke_one_flag_plus_context_fills_the_other(
+    monkeypatch: pytest.MonkeyPatch, env: Path, runner: Runner
+) -> None:
+    _fakes(monkeypatch)
+    monkeypatch.setattr(profile_mod, "active_context", lambda: "gke_ctx-proj_europe-west4_c1")
+    assert cli.run(["config", "--provider", "gke", "--namespace", NS, "--project", "mine"]) == 0
+    assert tomllib.loads(env.read_text())["image_prefix"] == (
+        "europe-west4-docker.pkg.dev/mine/sk8s/"
+    )
+
+
+def test_gke_on_a_non_gke_context_without_flags_errors_citing_the_context_format(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], runner: Runner
+) -> None:
+    _fakes(monkeypatch)
+    monkeypatch.setattr(profile_mod, "active_context", lambda: "minikube")
+    assert cli.run(["config", "--provider", "gke", "--namespace", NS]) == 1
+    err = capsys.readouterr().err
+    assert "gke_<project>_<location>_<name>" in err and "--project and --region" in err
 
 
 def test_gke_apply_cloud_requires_gsa(
@@ -698,6 +747,19 @@ def test_doctor_on_a_gke_context_builds_the_gke_profile_from_the_context_name(
     assert cli.run(["doctor"]) == 0
     assert seen[0].rwx_storage_class == "standard-rwx"
     assert seen[0].image_prefix == "us-central1-docker.pkg.dev/my-proj/sk8s/"
+
+
+def test_doctor_on_gke_keeps_the_persisted_image_prefix(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    env.parent.mkdir(parents=True)
+    env.write_text('image_prefix = "us-central1-docker.pkg.dev/my-proj/foo/"\n')
+    monkeypatch.setattr(profile_mod, "detect_provider", lambda context=None: "gke")
+    monkeypatch.setattr(profile_mod, "active_context", lambda: "gke_my-proj_us-central1_c1")
+    seen = _doctor_with(monkeypatch, [Check("x", True)])
+    assert cli.run(["doctor"]) == 0
+    assert seen[0].image_prefix == "us-central1-docker.pkg.dev/my-proj/foo/"
+    assert seen[0].rwx_storage_class == "standard-rwx"
 
 
 def test_doctor_does_not_crash_when_gke_context_is_unreadable(

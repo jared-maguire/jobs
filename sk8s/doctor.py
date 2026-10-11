@@ -14,7 +14,7 @@ from kubernetes import client
 from kubernetes.client import ApiException
 
 from sk8s import k8s
-from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout
+from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout, PodFailed, RemoteTraceback
 from sk8s.profile import ClusterProfile, desired_role, missing_permissions
 from sk8s.store.base import BlobStore
 
@@ -154,6 +154,14 @@ def _worker_probe_hint(profile: ClusterProfile, exc: BaseException) -> str:
             f"the probe pod did not finish in {exc.timeout:.0f}s ({detail}); on an autoscaling "
             f"cluster the first pod can take minutes, so re-run; if it persists, inspect the pod "
             f"in namespace {ns} (kubectl get pods -n {ns})"
+        )
+    pod_side = isinstance(exc, PodFailed) or isinstance(exc.__cause__, RemoteTraceback)
+    if not pod_side:
+        # Pod-side errors come back re-raised with a RemoteTraceback cause; anything else never
+        # got a verdict from the pod (building the client, writing the payload, creating the job).
+        return (
+            "the probe failed before reaching the pod (client-side store/cluster error: fix the "
+            f"'store writable' check and cluster access first, then re-run); {detail}"
         )
     return (
         f"a pod using ServiceAccount {sa!r} cannot use store {profile.store!r}: this is "
@@ -337,11 +345,10 @@ def doctor(
                 result = submit(probe_store_in_pod, profile)
             except Exception as e:
                 return _fail(WORKER_PROBE_NAME, _worker_probe_hint(profile, e))
-            if result != "ok":
-                return _fail(
-                    WORKER_PROBE_NAME,
-                    _worker_probe_hint(profile, RuntimeError(f"probe returned {result!r}")),
-                )
+            if result != "ok":  # the pod answered, just not with a pass: a pod-side verdict
+                bad = RuntimeError(f"probe returned {result!r}")
+                bad.__cause__ = RemoteTraceback("(no traceback: the probe returned normally)")
+                return _fail(WORKER_PROBE_NAME, _worker_probe_hint(profile, bad))
             return _ok(WORKER_PROBE_NAME)
 
         checks.append(guarded(WORKER_PROBE_NAME, worker_check))
