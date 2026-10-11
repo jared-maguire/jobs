@@ -94,10 +94,11 @@ way as above, with a different `-t`) and have an environment override:
 |---|---|---|
 | `test_minikube.py` (core run/map) | `sk8s-dev:latest` | `SK8S_TEST_IMAGE` |
 | `test_workflows.py` | `sk8s-dev-workflows:latest` | `SK8S_WORKFLOW_TEST_IMAGE` |
-| `test_services.py` | `sk8s-dev-services:latest` | (hardcoded) |
+| `test_services.py` | `sk8s-dev-services:latest` | `SK8S_SERVICES_TEST_IMAGE` |
 | `test_volumes.py` | `sk8s-dev-volumes:latest` | `SK8S_VOLUMES_TEST_IMAGE` |
 | `test_config_cli.py` | `sk8s-dev-config:latest` | `SK8S_CONFIG_TEST_IMAGE` |
 | `test_store_s3_minio.py` | `sk8s-dev-stores:latest` | `SK8S_TEST_IMAGE` |
+| `test_stress.py` | `sk8s-dev-cidocs:latest` | `SK8S_STRESS_TEST_IMAGE` |
 
 Suite notes:
 

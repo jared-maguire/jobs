@@ -674,6 +674,16 @@ def test_shell_pod_failure_deletes_job_and_does_not_exec(
     assert len(batch.deleted) == 1 and batch.jobs == {} and execs == []
 
 
+def test_shell_err_image_never_pull_fails_fast(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same bug class as cluster.py's ErrImageNeverPull handling: must not wait out the timeout.
+    batch, execs = _shell_env(monkeypatch, [_pod("Pending", waiting="ErrImageNeverPull")])
+    assert cli.run(["shell"]) == 1
+    assert "ErrImageNeverPull" in capsys.readouterr().err
+    assert len(batch.deleted) == 1 and batch.jobs == {} and execs == []
+
+
 def test_shell_timeout_deletes_job(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     batch, execs = _shell_env(monkeypatch, [_pod("Pending")])
     ticks = iter(range(0, 10_000, 50))
