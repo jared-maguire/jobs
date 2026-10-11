@@ -129,6 +129,13 @@ def serve(
     reachable in-cluster at ``Service.url``. Raises ``ValueError`` for a bad
     name, port or replica count, and ``Sk8sError`` if a service of that name
     already exists. A failed call leaves nothing of its own behind.
+
+    Limitation: two concurrent ``serve()`` calls with the same name can race.
+    Exactly one wins the Deployment/Service create, but both write the payload
+    blob at ``svc/<name>/payload`` first, and the loser's rollback then deletes
+    it, which can leave the winner's pods without a payload. The window is
+    narrow (between the existence pre-check and the create), and the store has
+    no conditional writes to close it. Do not serve the same name concurrently.
     """
     _validate_name(name)
     if port < 1 or port > 65535:
@@ -209,4 +216,9 @@ def get_service(name: str, cluster: Any | None = None) -> Service:
         if _status(e) == 404:
             raise Sk8sError(f"no service named {name!r} in namespace {namespace!r}") from None
         raise
+    labels = obj.metadata.labels or {}
+    if labels.get("sk8s/kind") != "service":
+        # Not ours (e.g. the cluster's "kubernetes" Service): refuse, so that
+        # .delete() on the returned handle can never touch an unmanaged Service.
+        raise Sk8sError(f"no service named {name!r} in namespace {namespace!r}")
     return Service(name, namespace, int(obj.spec.ports[0].port), c)

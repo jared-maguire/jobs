@@ -224,6 +224,19 @@ def test_get_service_missing_name(h: Harness) -> None:
         get_service("ghost", cluster=h.cluster)
 
 
+def test_get_service_rejects_unmanaged_service(h: Harness) -> None:
+    from kubernetes import client
+
+    for labels in (None, {"app": "x"}, {"sk8s/kind": "job"}):
+        h.core.services[("ns1", "kubernetes")] = client.V1Service(
+            metadata=client.V1ObjectMeta(name="kubernetes", namespace="ns1", labels=labels),
+            spec=client.V1ServiceSpec(ports=[client.V1ServicePort(port=443)]),
+        )
+        with pytest.raises(Sk8sError, match="no service named 'kubernetes'"):
+            get_service("kubernetes", cluster=h.cluster)
+    assert ("ns1", "kubernetes") in h.core.services  # untouched
+
+
 def test_logs_concatenates_pod_logs_by_selector(h: Harness) -> None:
     svc = _serve(h)
     seen: dict[str, Any] = {}
