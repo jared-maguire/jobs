@@ -86,6 +86,9 @@ class FakeCoreV1:
         self.namespaces[body.metadata.name] = body
         return body
 
+    def get_api_resources(self) -> Any:
+        return SimpleNamespace(resources=[])
+
     def read_namespace(self, name: str) -> Any:
         try:
             return self.namespaces[name]
@@ -246,3 +249,13 @@ class FakeRbacV1:
 
     def delete_namespaced_role_binding(self, name: str, namespace: str) -> None:
         self._delete(self.role_bindings, "RoleBinding", namespace, name)
+
+
+class FakeStorageV1:
+    def __init__(self, classes: tuple[str, ...] = ()) -> None:
+        self.classes = set(classes)
+
+    def read_storage_class(self, name: str) -> Any:
+        if name not in self.classes:
+            raise ApiException(status=404, reason="Not Found")
+        return SimpleNamespace(metadata=SimpleNamespace(name=name))

@@ -51,3 +51,8 @@ def current_namespace() -> str:
 def rbac_api() -> client.RbacAuthorizationV1Api:
     load()
     return client.RbacAuthorizationV1Api()
+
+
+def storage_api() -> client.StorageV1Api:
+    load()
+    return client.StorageV1Api()
