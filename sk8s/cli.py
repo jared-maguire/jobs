@@ -7,14 +7,18 @@ it lives here and never in the library.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from kubernetes import client
@@ -36,6 +40,7 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
+DEFAULT_BUCKET_ROLE = "roles/storage.objectAdmin"
 SHELL_DEADLINE_SECONDS = 4 * 3600  # a shell job outlives its exec (we exec away), so bound it
 SHELL_READY_TIMEOUT = 120.0
 # Keep the shell pod alive with plain POSIX sh so any image works (no python needed). `sleep
@@ -56,7 +61,7 @@ def _load_cfg() -> Config:
     try:
         return load_config()
     except (ValueError, TypeError, OSError) as e:
-        raise Sk8sError(f"cannot load sk8s config ({config_mod.DEFAULT_CONFIG_PATH}): {e}") from e
+        raise Sk8sError(f"cannot load sk8s config ({config_mod.config_path()}): {e}") from e
 
 
 def _namespace(explicit: str | None = None, cfg: Config | None = None) -> str:
@@ -161,6 +166,116 @@ def write_config(path: Path, updates: dict[str, str]) -> None:
 # --- commands ----------------------------------------------------------------------------------
 
 
+# --- GKE cloud plan (gcloud is sanctioned here, in the CLI, the way kubectl is) ---------------
+
+
+@dataclass(frozen=True)
+class CloudStep:
+    """One gcloud command group: ``argv`` runs unless ``skip_if`` (a probe argv) exits 0."""
+
+    title: str
+    argv: tuple[str, ...]
+    skip_if: tuple[str, ...] | None = None
+
+
+def _run_argv(argv: Sequence[str], *, quiet: bool = False) -> int:
+    """Run ``argv`` (never through a shell); the exit code. The seam tests replace."""
+    out = subprocess.DEVNULL if quiet else None
+    try:
+        return subprocess.run(list(argv), check=False, stdout=out, stderr=out).returncode
+    except FileNotFoundError:
+        raise Sk8sError(f"{argv[0]} not found on PATH: install the Google Cloud CLI") from None
+
+
+def gsa_email(gsa: str, project: str) -> str:
+    """A GSA given as a short name ('sk8s-worker') or a full email, as an email."""
+    return gsa if "@" in gsa else f"{gsa}@{project}.iam.gserviceaccount.com"
+
+
+def bucket_of(store: str) -> str | None:
+    """The bucket of a ``gs://bucket/prefix`` store URL, else None."""
+    if not store.startswith("gs://"):
+        return None
+    return store[len("gs://"):].split("/", 1)[0] or None
+
+
+def gke_cloud_plan(
+    *, project: str, region: str, repo: str, gsa: str | None, store: str,
+    namespace: str, service_account: str, bucket_role: str,
+) -> tuple[list[CloudStep], list[str]]:
+    """(steps, notes): the gcloud command groups that make Workload Identity and the store work.
+
+    Without a GSA there is no identity to wire up, so only notes are produced. Every step is
+    idempotent (the GSA create is skipped when it already exists; IAM bindings are additive).
+    """
+    steps: list[CloudStep] = []
+    notes: list[str] = []
+    if gsa:
+        email = gsa_email(gsa, project)
+        name = email.split("@", 1)[0]
+        steps.append(CloudStep(
+            f"create Google service account {email}",
+            ("gcloud", "iam", "service-accounts", "create", name,
+             "--project", project, "--display-name", "sk8s worker"),
+            skip_if=("gcloud", "iam", "service-accounts", "describe", email, "--project", project),
+        ))
+        bucket = bucket_of(store)
+        if bucket is not None:
+            steps.append(CloudStep(
+                f"grant {bucket_role} on gs://{bucket} to {email}",
+                ("gcloud", "storage", "buckets", "add-iam-policy-binding", f"gs://{bucket}",
+                 "--member", f"serviceAccount:{email}", "--role", bucket_role,
+                 "--project", project),
+            ))
+        else:
+            notes.append(f"store {store!r} is not gs://: no bucket binding is planned")
+        steps.append(CloudStep(
+            f"let Kubernetes ServiceAccount {namespace}/{service_account} act as {email}",
+            ("gcloud", "iam", "service-accounts", "add-iam-policy-binding", email,
+             "--role", "roles/iam.workloadIdentityUser",
+             "--member", f"serviceAccount:{project}.svc.id.goog[{namespace}/{service_account}]",
+             "--project", project),
+        ))
+    else:
+        notes.append("no --gsa given: no Google service account or Workload Identity is planned")
+    notes.append(
+        f"Artifact Registry repo {region}-docker.pkg.dev/{project}/{repo}/: nodes need "
+        "roles/artifactregistry.reader (the default node service account has it for same-project "
+        "repos; otherwise run: gcloud artifacts repositories add-iam-policy-binding "
+        f"{repo} --location {region} --project {project} "
+        "--member serviceAccount:<NODE_SERVICE_ACCOUNT> --role roles/artifactregistry.reader). "
+        "Not run automatically."
+    )
+    return steps, notes
+
+
+def _print_cloud_plan(steps: Sequence[CloudStep], notes: Sequence[str]) -> None:
+    for step in steps:
+        print(f"# {step.title}")
+        print(shlex.join(step.argv))
+    for note in notes:
+        print(f"# note: {note}")
+    if steps:
+        print(
+            "# note: IAM is eventually consistent: if the Workload Identity binding reports the "
+            "GSA doesn't exist yet, wait ~30s and re-run (steps are idempotent)"
+        )
+
+
+def _apply_cloud_plan(steps: Sequence[CloudStep]) -> None:
+    for step in steps:
+        if step.skip_if is not None and _run_argv(step.skip_if, quiet=True) == 0:
+            print(f"cloud: {step.title}: already done")
+            continue
+        print(f"cloud: {step.title}", flush=True)
+        rc = _run_argv(step.argv)
+        if rc != 0:
+            raise Sk8sError(
+                f"gcloud step failed (exit {rc}): {shlex.join(step.argv)}; "
+                "fix the error above and re-run (every step is safe to repeat)"
+            )
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
     cfg = _load_cfg()
     # Unlike the other commands, config never infers the namespace from the kube context: it
@@ -168,17 +283,61 @@ def _cmd_config(args: argparse.Namespace) -> int:
     namespace = args.namespace or cfg.namespace or config_mod.DEFAULT_NAMESPACE
     store = args.store or cfg.store
     provider = args.provider or profile_mod.detect_provider()
-    try:
-        prof = profile_mod.profile_for(
-            provider, namespace=namespace, store=store, image_prefix=cfg.image_prefix
+    gke_given = any((args.project, args.region, args.gsa, args.bucket_role)) or args.repo != "sk8s"
+    if provider != "gke" and (gke_given or args.apply_cloud):
+        raise Sk8sError(
+            "--project/--region/--repo/--gsa/--bucket-role/--apply-cloud are GKE options; "
+            f"provider is {provider!r} (use --provider gke)"
         )
+    project, region = args.project, args.region
+    if provider == "gke":
+        # Explicit flags win; otherwise read them off a gke_<project>_<location>_<name> context.
+        parts = profile_mod.gke_context_parts(profile_mod.active_context() or "")
+        if parts is not None:
+            project = project or parts[0]
+            region = region or profile_mod.gke_region(parts[1])
+        if not (project and region):
+            raise Sk8sError(
+                "provider 'gke' needs --project and --region: the kube context is not named "
+                "gke_<project>_<location>_<name>, so they cannot be inferred "
+                "(or use --provider generic to skip the GKE adapter)"
+            )
+        if args.apply_cloud and not args.gsa:
+            raise Sk8sError("--apply-cloud needs --gsa (the Google service account to create)")
+        # The adapter derives the image prefix; a configured one is not carried over.
+        extra: dict[str, Any] = dict(
+            project=project, region=region, repo=args.repo, gsa=args.gsa
+            and gsa_email(args.gsa, project),
+        )
+    else:
+        extra = {"image_prefix": cfg.image_prefix}
+    try:
+        prof = profile_mod.profile_for(provider, namespace=namespace, store=store, **extra)
     except ValueError as e:
         raise Sk8sError(str(e)) from e
+    steps: list[CloudStep] = []
+    if provider == "gke":
+        steps, notes = gke_cloud_plan(
+            project=project, region=region, repo=args.repo, gsa=args.gsa,
+            store=store, namespace=namespace, service_account=prof.service_account,
+            bucket_role=args.bucket_role or DEFAULT_BUCKET_ROLE,
+        )
     if args.dry_run:
         print("\n".join(profile_mod.plan(prof)))
+        if provider == "gke":
+            print("\ncloud plan (not run):")
+            _print_cloud_plan(steps, notes)
         return 0
+    if provider == "gke":
+        if args.apply_cloud:
+            _apply_cloud_plan(steps)
+            for note in notes:
+                print(f"note: {note}")
+        else:
+            print("cloud plan (not run; re-run with --apply-cloud to execute):")
+            _print_cloud_plan(steps, notes)
     print("\n".join(profile_mod.apply(prof)))
-    path = config_mod.DEFAULT_CONFIG_PATH
+    path = config_mod.config_path()
     write_config(
         path, {"namespace": prof.namespace, "store": prof.store, "image_prefix": prof.image_prefix}
     )
@@ -188,12 +347,22 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     cfg = _load_cfg()
-    prof = profile_mod.profile_for(
-        profile_mod.detect_provider(),
-        namespace=_namespace(None, cfg),
-        store=cfg.store,
-        image_prefix=cfg.image_prefix,
-    )
+    provider = profile_mod.detect_provider()
+    namespace = _namespace(None, cfg)
+    parts = profile_mod.gke_context_parts(profile_mod.active_context() or "")
+    if provider == "gke" and parts is not None:
+        # Project and region come from the context name; the GSA is not needed to check health.
+        prof = profile_mod.profile_for(
+            "gke", namespace=namespace, store=cfg.store,
+            project=parts[0], region=profile_mod.gke_region(parts[1]),
+        )
+        if cfg.image_prefix:  # what `sk8s config` persisted (e.g. a custom --repo) wins
+            prof = dataclasses.replace(prof, image_prefix=cfg.image_prefix)
+    else:
+        prof = profile_mod.profile_for(
+            "generic" if provider == "gke" else provider,
+            namespace=namespace, store=cfg.store, image_prefix=cfg.image_prefix,
+        )
     # Build the store here so a configured endpoint (MinIO etc.) is honoured; if it cannot be built
     # (or no client can be), leave it to doctor, which reports that as a failed check.
     store = None
@@ -440,7 +609,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("config", help="prepare a namespace for sk8s and write the client config")
     p.add_argument("--namespace", help="namespace to create and configure (default: sk8s, or the namespace already configured)")
     p.add_argument("--store", help="blob store (default: configured, else 'k8s')")
-    p.add_argument("--provider", help="local | generic (default: detected from the kube context)")
+    p.add_argument("--provider", help="local | generic | gke (default: detected from the kube context)")
+    p.add_argument("--project", help="gke: Google Cloud project id (required, not inferred)")
+    p.add_argument("--region", help="gke: region of the Artifact Registry repo, e.g. us-central1 (required)")
+    p.add_argument("--repo", default="sk8s", help="gke: Artifact Registry repo name (default: sk8s)")
+    p.add_argument("--gsa", help="gke: Google service account (name or email) workers act as via Workload Identity")
+    p.add_argument("--bucket-role", help=f"gke: role granted to the GSA on the store bucket (default: {DEFAULT_BUCKET_ROLE})")
+    p.add_argument("--apply-cloud", action="store_true", help="gke: also RUN the printed gcloud commands (default: print only)")
     p.add_argument("--dry-run", action="store_true", help="print the plan; apply nothing")
     p.set_defaults(func=_cmd_config)
 

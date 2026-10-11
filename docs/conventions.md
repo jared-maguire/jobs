@@ -129,7 +129,9 @@ segment>` (so a doctor probe is briefly labeled `sk8s/workflow-id=doctor`).
 (controller reference), its blob ConfigMaps (`k8s` store only), and PVCs created with
 `keep=False`. Object-store blobs cannot carry owner references; instead the anchor records
 `sk8s/store` and `sk8s/store-prefix`, and every sk8s code path that deletes an anchor also
-deletes that prefix from the store.
+deletes that prefix from the store. Deleting an anchor by hand (`kubectl delete configmap`)
+is not an sk8s code path, so in an object store its blobs stay behind until you remove them
+(see [GKE guide](gke.md#8-known-behavior-deleting-an-anchor-by-hand)).
 
 **Owned by nothing**: services (Deployment, Service, pod, payload blob) and `keep=True`
 volumes. No workflow label, no ownerReference, never selected by `clean`. They go away only

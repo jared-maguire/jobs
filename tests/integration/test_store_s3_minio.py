@@ -17,7 +17,7 @@ import pytest
 
 from sk8s.errors import RemoteTraceback
 from tests.integration import minio
-from tests.integration.conftest import requires_cluster
+from tests.integration.conftest import requires_cluster, suite_namespace, suite_pull_policy
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(300)]
 
@@ -37,11 +37,12 @@ def s3_client() -> Iterator[Any]:
     import boto3
     from botocore.config import Config as BotoConfig
 
-    in_cluster_endpoint = minio.ensure_minio()
+    ns = suite_namespace()
+    in_cluster_endpoint = minio.ensure_minio(ns)
     assert in_cluster_endpoint.startswith("http://minio.")
     port = _free_port()
     pf = subprocess.Popen(
-        ["kubectl", "port-forward", "svc/minio", f"{port}:{minio.PORT}"],
+        ["kubectl", "-n", ns, "port-forward", "svc/minio", f"{port}:{minio.PORT}"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -89,12 +90,12 @@ def s3_cluster(s3_client):  # type: ignore[no-untyped-def]
     from sk8s.config import load_config
 
     cfg = load_config(
-        namespace="default",  # legacy default-namespace RBAC; see dev-setup.md
+        namespace=suite_namespace(),  # legacy default-namespace RBAC; see dev-setup.md
         image=os.environ.get("SK8S_TEST_IMAGE", "sk8s-dev-stores:latest"),
-        pull_policy="Never",
+        pull_policy=suite_pull_policy(),
         ttl_seconds_after_finished=30,
         store=f"s3://{BUCKET}/{PREFIX}",
-        store_endpoint=f"http://minio.default.svc.cluster.local:{minio.PORT}",
+        store_endpoint=f"http://minio.{suite_namespace()}.svc.cluster.local:{minio.PORT}",
         store_env={
             "AWS_ACCESS_KEY_ID": minio.ACCESS_KEY,
             "AWS_SECRET_ACCESS_KEY": minio.SECRET_KEY,

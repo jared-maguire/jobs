@@ -22,7 +22,8 @@ namespace, when that context explicitly sets one > `sk8s`. Inside a worker pod
 the pod's own namespace always wins.
 
 `sk8s config` creates the namespace (plus the ServiceAccount, Role and
-RoleBinding) and records it in `~/.config/sk8s/config.toml`; `--namespace`
+RoleBinding) and records it in `~/.config/sk8s/config.toml` (or the file named by
+`SK8S_CONFIG`, handy for throwaway clusters and agents); `--namespace`
 defaults to `sk8s` (or the namespace you already configured). `sk8s doctor`
 tells you to run `sk8s config` if any of that is missing:
 

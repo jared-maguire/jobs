@@ -9,7 +9,9 @@ from kubernetes.client import ApiException
 from sk8s import anchors
 from sk8s.cluster import Cluster
 from sk8s.config import Config
-from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout, PodFailed, StoreError
+from sk8s.errors import (
+    BlobNotFound, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
+)
 from sk8s.store.local import LocalStore
 from sk8s.watch import JobEvent
 from tests.fakes import FakeBatchV1, FakeCoreV1
@@ -175,13 +177,86 @@ def test_submit_failure_does_not_leak_payload_blob(tmp_path) -> None:  # type: i
     h = Harness(tmp_path)
 
     def failing_create(namespace: str, body: Any) -> Any:
-        raise ApiException(status=403, reason="Forbidden")
+        raise ApiException(status=500, reason="Internal Server Error")
 
     h.batch.create_namespaced_job = failing_create  # type: ignore[method-assign]
-    with pytest.raises(ApiException):
+    with pytest.raises(ApiException):  # not a refusal: surfaces unchanged
         h.cluster.submit(lambda: 1)
     assert not [p for p in tmp_path.rglob("*") if p.is_file()], "payload blob leaked"
     assert not h.cluster._futures
+
+
+_WARDEN_BODY = (
+    '{"kind":"Status","apiVersion":"v1","status":"Failure","message":"admission webhook '
+    '\\"warden-validating.common-webhooks.networking.gke.io\\" denied the request: GKE Warden '
+    'rejected the request because it violates one or more constraints.\\nViolations details: '
+    '{\\"[denied by autogke-disallow-privilege]\\":[\\"container worker is privileged; not '
+    'allowed in Autopilot\\"]}","reason":"GKE Warden constraints violations","code":400}'
+)
+
+
+def test_api_refusal_becomes_typed_job_rejected_without_leaking(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+
+    def refusing_create(namespace: str, body: Any) -> Any:
+        raise _api_error(400, "Bad Request", _WARDEN_BODY)
+
+    h.batch.create_namespaced_job = refusing_create  # type: ignore[method-assign]
+    with pytest.raises(JobRejected) as ei:
+        h.cluster.submit(lambda: 1, privileged=True)
+    err = ei.value
+    assert err.status == 400
+    assert "not allowed in Autopilot" in err.message  # the server's own words, verbatim
+    assert "HTTP 400" in str(err) and "not allowed in Autopilot" in str(err)
+    assert "privileged=True" in (err.hint or "")
+    assert isinstance(err.__cause__, ApiException)
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()], "payload blob leaked"
+    assert not h.cluster._futures
+
+
+def test_forbidden_refusal_hints_at_rbac_not_privileged(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    rbac_body = (
+        '{"kind":"Status","apiVersion":"v1","status":"Failure","message":"jobs.batch is '
+        'forbidden: User \\"system:serviceaccount:sk8s:sk8s\\" cannot create resource '
+        '\\"jobs\\" in API group \\"batch\\" in the namespace \\"sk8s\\"",'
+        '"reason":"Forbidden","code":403}'
+    )
+
+    def forbidden(namespace: str, body: Any) -> Any:
+        raise _api_error(403, "Forbidden", rbac_body)
+
+    h.batch.create_namespaced_job = forbidden  # type: ignore[method-assign]
+    # Even with privileged=True, an RBAC denial must not blame privileged: the hint is
+    # gated on the server's message, and this one says forbidden, not privileged.
+    with pytest.raises(JobRejected) as ei:
+        h.cluster.submit(lambda: 1, privileged=True)
+    err = ei.value
+    assert err.status == 403
+    assert "cannot create resource" in err.message
+    assert "privileged" not in (err.hint or "")
+    assert "sk8s doctor" in (err.hint or "")
+
+
+def test_invalid_spec_refusal_has_no_hint(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+
+    def invalid(namespace: str, body: Any) -> Any:
+        raise _api_error(422, "Unprocessable Entity", "not json at all")
+
+    h.batch.create_namespaced_job = invalid  # type: ignore[method-assign]
+    # A 422 for an unrelated bad spec, even with privileged=True, gets no privileged
+    # hint when the server's message doesn't mention privileged.
+    with pytest.raises(JobRejected) as ei:
+        h.cluster.submit(lambda: 1, privileged=True)
+    assert ei.value.status == 422 and ei.value.hint is None
+    assert ei.value.message == "Unprocessable Entity"  # unparseable body falls back to the reason
+
+
+def _api_error(status: int, reason: str, body: str) -> ApiException:
+    exc = ApiException(status=status, reason=reason)
+    exc.body = body
+    return exc
 
 
 def test_workflow_id_from_environment(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

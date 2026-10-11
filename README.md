@@ -31,8 +31,8 @@ sk8s.map(lambda x: x ** 2, range(1000), batch_size=50)  # 20 Jobs, results in or
 > **Status: 2.0.0a0 (pre-release).** Not on PyPI yet and no worker images are published
 > yet, so the quickstart below builds the worker image from this checkout. The v1
 > documentation lives on the `main` branch and the `v0.1` tag; upgrading is covered in the
-> [migration guide](docs/migration-v1-to-v2.md). Cloud-specific guides (GKE, EKS) are
-> forthcoming; the quickstart targets minikube.
+> [migration guide](docs/migration-v1-to-v2.md). The quickstart targets minikube; for
+> Google Cloud see the [GKE (Autopilot) guide](docs/gke.md). An EKS guide is forthcoming.
 
 ## Quickstart (about 5 minutes)
 
@@ -380,7 +380,8 @@ sk8s at stores you trust.
 
 ## Configuration
 
-Settings layer as: defaults, then `~/.config/sk8s/config.toml`, then `SK8S_*` environment
+Settings layer as: defaults, then `~/.config/sk8s/config.toml` (set `SK8S_CONFIG=<path>` to
+read and write a different file; this changes which file, not the layering), then `SK8S_*` environment
 variables (`SK8S_NAMESPACE`, `SK8S_IMAGE`, `SK8S_STORE`, ...), then keyword arguments
 (`sk8s.configure(namespace=...)`, `Cluster(config, **overrides)`). The fields are listed in
 `sk8s.Config`. The namespace is the explicit setting if there is one, else the active kube

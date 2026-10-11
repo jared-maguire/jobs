@@ -69,12 +69,66 @@ def test_profile_for_local_has_no_rwx_class() -> None:
         profile_for("local", namespace="n", store="k8s", rwx_storage_class="nfs")
 
 
-@pytest.mark.parametrize("provider", ["gke", "eks", "nope"])
-def test_unknown_provider_names_the_tabled_ones(provider: str) -> None:
+@pytest.mark.parametrize("provider", ["eks", "nope"])
+def test_unknown_provider_names_eks_as_tabled_but_not_gke(provider: str) -> None:
     with pytest.raises(ValueError) as ei:
         profile_for(provider, namespace="n", store="k8s")
     msg = str(ei.value)
-    assert provider in msg and "gke" in msg and "eks" in msg and "tabled" in msg
+    assert provider in msg and "eks" in msg and "tabled" in msg
+    assert "gke" in msg  # listed as supported...
+    assert "gke" not in msg.split("tabled")[0].split("(")[-1]  # ...and not as tabled
+
+
+def test_gke_is_not_in_the_tabled_list() -> None:
+    assert prof.TABLED_PROVIDERS == ("eks",)
+
+
+def _gke(**kw: object) -> ClusterProfile:
+    args: dict[str, object] = dict(project="proj", region="us-central1", namespace="n", store="k8s")
+    args.update(kw)
+    return profile_for("gke", **args)  # type: ignore[arg-type]
+
+
+def test_gke_adapter_parameters_are_exact() -> None:
+    p = _gke(store="gs://b/p", gsa="sk8s-worker@proj.iam.gserviceaccount.com")
+    assert p.image_prefix == "us-central1-docker.pkg.dev/proj/sk8s/"
+    assert p.rwx_storage_class == "standard-rwx"
+    assert p.sa_annotations == {
+        "iam.gke.io/gcp-service-account": "sk8s-worker@proj.iam.gserviceaccount.com"
+    }
+    assert (p.namespace, p.store) == ("n", "gs://b/p")
+    assert p.rules == _profile().rules  # apply logic and rules are shared across providers
+
+
+def test_gke_adapter_repo_override_and_no_gsa_means_no_annotation() -> None:
+    p = _gke(repo="images")
+    assert p.image_prefix == "us-central1-docker.pkg.dev/proj/images/"
+    assert p.sa_annotations == {}
+
+
+@pytest.mark.parametrize("missing", ["project", "region"])
+def test_gke_requires_project_and_region(missing: str) -> None:
+    with pytest.raises(ValueError, match="project and region"):
+        _gke(**{missing: None})
+
+
+def test_gke_rejects_overriding_what_it_derives() -> None:
+    with pytest.raises(ValueError, match="derives"):
+        _gke(image_prefix="reg/")
+    with pytest.raises(ValueError, match="derives"):
+        _gke(rwx_storage_class="nfs")
+
+
+@pytest.mark.parametrize("provider", ["local", "generic"])
+@pytest.mark.parametrize("kw", [{"project": "p"}, {"region": "r"}, {"gsa": "g"}, {"repo": "x"}])
+def test_gke_parameters_are_rejected_for_other_providers(provider: str, kw: dict[str, str]) -> None:
+    with pytest.raises(ValueError, match="GKE parameters"):
+        profile_for(provider, namespace="n", store="k8s", **kw)
+
+
+def test_sa_annotations_default_is_per_instance_and_profile_stays_frozen() -> None:
+    a, b = _profile(), _profile()
+    assert a.sa_annotations == {} and a.sa_annotations is not b.sa_annotations
 
 
 @pytest.mark.parametrize(
@@ -82,7 +136,11 @@ def test_unknown_provider_names_the_tabled_ones(provider: str) -> None:
     [
         ("minikube", "local"),
         ("docker-desktop", "local"),
-        ("gke_proj_us-central1_c", "generic"),
+        ("gke_proj_us-central1_c", "gke"),
+        ("gke_my-proj_us-central1-a_my_cluster", "gke"),
+        ("gke_proj_us-central1", "generic"),
+        ("gke_proj__c", "generic"),
+        ("notgke_proj_us-central1_c", "generic"),
         ("arn:aws:eks:us-west-2:1:cluster/c", "generic"),
         ("kind-kind", "generic"),
         ("", "generic"),
@@ -109,6 +167,15 @@ def test_detect_provider_reads_active_context(monkeypatch: pytest.MonkeyPatch) -
     assert detect_provider() == "local"
 
 
+def test_gke_context_parts_and_region() -> None:
+    assert prof.gke_context_parts("gke_jared-genome-analysis_us-central1_autopilot-cluster-1") == (
+        "jared-genome-analysis", "us-central1", "autopilot-cluster-1",
+    )
+    assert prof.gke_context_parts("minikube") is None
+    assert prof.gke_region("us-central1") == "us-central1"
+    assert prof.gke_region("us-central1-a") == "us-central1"
+
+
 # --- plan --------------------------------------------------------------------------------------
 
 
@@ -121,6 +188,15 @@ def test_plan_lists_every_object_without_touching_a_cluster() -> None:
     assert "team-a" in text and "jobs" in text and "pods/log" in text and "patch" in text
     assert "ensure ServiceAccount sk8s in team-a" in lines  # ensure-only, never replaced
     assert "create-or-replace ServiceAccount" not in text
+
+
+def test_plan_lists_sa_annotations_when_the_profile_has_them() -> None:
+    lines = plan(_gke(gsa="g@proj.iam.gserviceaccount.com"))
+    assert (
+        "annotate ServiceAccount sk8s in n: "
+        "iam.gke.io/gcp-service-account=g@proj.iam.gserviceaccount.com"
+    ) in lines
+    assert not any("annotate" in line for line in plan(_profile()))
 
 
 # --- apply -------------------------------------------------------------------------------------
@@ -310,3 +386,91 @@ def test_missing_permissions_is_subset_based() -> None:
         ]
     )
     assert ("batch", "jobs", "get") in prof.missing_permissions(want, narrowed)
+
+
+# --- ServiceAccount annotations (Workload Identity) ---------------------------------------------
+
+GSA = "sk8s-worker@proj.iam.gserviceaccount.com"
+WI = "iam.gke.io/gcp-service-account"
+
+
+def _gke_apply(core: FakeCoreV1, rbac: FakeRbacV1, gsa: str | None = GSA) -> list[str]:
+    return _apply(_gke(namespace="team-a", gsa=gsa), core, rbac)
+
+
+def test_apply_creates_the_service_account_with_the_annotation() -> None:
+    core, rbac = FakeCoreV1(), FakeRbacV1()
+    out = _gke_apply(core, rbac)
+    assert core.service_accounts[("team-a", "sk8s")].metadata.annotations == {WI: GSA}
+    assert "ServiceAccount sk8s: created" in out
+    assert ("patch", "ServiceAccount", "sk8s") not in core.actions  # annotated at creation
+
+
+def test_apply_without_annotations_creates_a_bare_service_account() -> None:
+    core, rbac = FakeCoreV1(), FakeRbacV1()
+    _apply(_profile(), core, rbac)
+    assert not core.service_accounts[("team-a", "sk8s")].metadata.annotations
+
+
+def test_apply_annotation_is_idempotent() -> None:
+    core, rbac = FakeCoreV1(), FakeRbacV1()
+    _gke_apply(core, rbac)
+    before = list(core.actions)
+    out = _gke_apply(core, rbac)
+    assert core.actions == before
+    assert "ServiceAccount sk8s: unchanged" in out
+
+
+def test_apply_patches_a_missing_annotation_without_recreating_the_service_account() -> None:
+    core, rbac = FakeCoreV1(), FakeRbacV1()
+    _apply(_profile(), core, rbac)  # pre-existing bare SA (e.g. from an earlier plain config)
+    sa = core.service_accounts[("team-a", "sk8s")]
+    sa.secrets = [client.V1ObjectReference(name="tok")]
+    core.actions.clear()
+    out = _gke_apply(core, rbac)
+    assert core.actions == [("patch", "ServiceAccount", "sk8s")]  # no create/replace/delete
+    assert core.service_accounts[("team-a", "sk8s")] is sa and sa.secrets  # same object, secrets kept
+    assert sa.metadata.annotations == {WI: GSA}
+    assert "ServiceAccount sk8s: annotated" in out
+    core.actions.clear()
+    _gke_apply(core, rbac)
+    assert core.actions == []  # converged
+
+
+def test_apply_patches_a_drifted_annotation_and_keeps_foreign_ones() -> None:
+    core, rbac = FakeCoreV1(), FakeRbacV1()
+    _gke_apply(core, rbac, gsa="old@proj.iam.gserviceaccount.com")
+    core.service_accounts[("team-a", "sk8s")].metadata.annotations["other/ann"] = "keep"
+    core.actions.clear()
+    _gke_apply(core, rbac)
+    assert core.actions == [("patch", "ServiceAccount", "sk8s")]
+    assert core.service_accounts[("team-a", "sk8s")].metadata.annotations == {
+        WI: GSA, "other/ann": "keep",
+    }
+
+
+def test_apply_without_gsa_leaves_an_existing_annotation_alone() -> None:
+    core, rbac = FakeCoreV1(), FakeRbacV1()
+    _gke_apply(core, rbac)
+    core.actions.clear()
+    _gke_apply(core, rbac, gsa=None)
+    assert core.actions == []
+    assert core.service_accounts[("team-a", "sk8s")].metadata.annotations == {WI: GSA}
+
+
+def test_service_account_create_409_race_still_converges_annotations() -> None:
+    class Racy(FakeCoreV1):
+        def read_namespaced_service_account(self, name: str, namespace: str) -> object:
+            if ("create", "ServiceAccount", name) not in self.actions:
+                # first read 404s; someone creates it bare right after
+                self.service_accounts[(namespace, name)] = client.V1ServiceAccount(
+                    metadata=client.V1ObjectMeta(name=name)
+                )
+                raise ApiException(status=404, reason="Not Found")
+            return super().read_namespaced_service_account(name, namespace)
+
+    core = Racy()
+    _gke_apply(core, FakeRbacV1())
+    assert ("create", "ServiceAccount", "sk8s") in core.actions
+    assert ("patch", "ServiceAccount", "sk8s") in core.actions
+    assert core.service_accounts[("team-a", "sk8s")].metadata.annotations == {WI: GSA}

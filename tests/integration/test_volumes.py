@@ -20,7 +20,7 @@ from kubernetes.client import ApiException
 from sk8s import create_volume, delete_volume, scratch_volume
 from sk8s.cluster import Cluster
 from sk8s.config import load_config
-from tests.integration.conftest import requires_cluster
+from tests.integration.conftest import requires_cluster, suite_namespace, suite_pull_policy
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(300)]
 
@@ -36,7 +36,7 @@ GONE_TIMEOUT = 3 * TTL
 def _new_cluster() -> Cluster:
     # Legacy default-namespace RBAC (dev-setup.md); pinned so we don't follow the "sk8s" default.
     return Cluster(
-        load_config(namespace="default", image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=TTL)
+        load_config(namespace=suite_namespace(), image=IMAGE, pull_policy=suite_pull_policy(), ttl_seconds_after_finished=TTL)
     )
 
 
@@ -187,3 +187,37 @@ def test_scratch_volume(vol_cluster: Cluster) -> None:
         assert vol_cluster.run(_write(path, "scratch"), volumes=vol, timeout=240) == "written"
         assert vol_cluster.run(_read(path), volumes=vol, timeout=240) == "scratch"
     _wait_pvc_gone(vol_cluster, vol)
+
+
+# --- RWX (GKE Filestore), opt-in: it is the one expensive thing the suites can create -------------
+#
+# SK8S_GKE_RWX=1 runs it. Basic-tier Filestore has a 1 TiB minimum (~$0.2-0.3/hour while the
+# instance exists), so the volume is created late and deleted immediately, and the test waits
+# for the PVC (and so the instance) to be gone. The storage class defaults to GKE's
+# ``standard-rwx``; override with SK8S_GKE_RWX_CLASS.
+
+_RWX = os.environ.get("SK8S_GKE_RWX") == "1"
+
+
+@pytest.mark.skipif(not _RWX, reason="set SK8S_GKE_RWX=1 (creates a Filestore instance, 1 TiB minimum)")
+@pytest.mark.timeout(2400)
+def test_rwx_volume_shared_between_jobs(vol_cluster: Cluster) -> None:
+    sc = os.environ.get("SK8S_GKE_RWX_CLASS", "standard-rwx")
+    vol = create_volume("1Ti", access_modes=("ReadWriteMany",), storage_class=sc, cluster=vol_cluster)
+    try:
+        pvc = vol_cluster.core.read_namespaced_persistent_volume_claim(
+            name=vol, namespace=vol_cluster.config.namespace
+        )
+        assert pvc.spec.access_modes == ["ReadWriteMany"]
+        # Two jobs at once on the same volume: ReadWriteMany is what lets them share it.
+        w1 = vol_cluster.submit(_write(f"/mnt/{vol}/one.txt", "one"), volumes=vol)
+        w2 = vol_cluster.submit(_write(f"/mnt/{vol}/two.txt", "two"), volumes=vol)
+        assert w1.result(timeout=1500) == "written"  # first pod pays Filestore provisioning
+        assert w2.result(timeout=300) == "written"
+        assert vol_cluster.run(_read(f"/mnt/{vol}/one.txt"), volumes=vol, timeout=300) == "one"
+        assert vol_cluster.run(_read(f"/mnt/{vol}/two.txt"), volumes=vol, timeout=300) == "two"
+    finally:
+        delete_volume(vol, cluster=vol_cluster)
+    # PVC deletion waits for the TTL reaper to drop the job pods, then the CSI driver deletes
+    # the Filestore instance (minutes); verify with `gcloud filestore instances list`.
+    _poll(lambda: not _pvc_exists(vol_cluster, vol), 600, f"PVC {vol} to be deleted", interval=5)

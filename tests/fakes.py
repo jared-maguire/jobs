@@ -117,6 +117,15 @@ class FakeCoreV1:
         self.service_accounts[(namespace, name)] = body
         return body
 
+    def patch_namespaced_service_account(self, name: str, namespace: str, body: Any) -> Any:
+        """Merge-patch of metadata.annotations from a dict body."""
+        self.actions.append(("patch", "ServiceAccount", name))
+        sa = self.read_namespaced_service_account(name=name, namespace=namespace)
+        patch = (body.get("metadata") or {}).get("annotations")
+        if patch:
+            sa.metadata.annotations = {**(sa.metadata.annotations or {}), **patch}
+        return sa
+
     def create_namespaced_persistent_volume_claim(self, namespace: str, body: Any) -> Any:
         if (namespace, body.metadata.name) in self.pvcs:
             raise ApiException(status=409, reason="Conflict")
