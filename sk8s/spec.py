@@ -34,6 +34,7 @@ def build_job(
     ttl: int,
     privileged: bool,
     store_endpoint: str | None = None,
+    store_env: dict[str, str] | None = None,
 ) -> client.V1Job:
     labels = {"app.kubernetes.io/managed-by": MANAGED_BY, "sk8s/workflow-id": workflow_id}
     env = [
@@ -45,6 +46,8 @@ def build_job(
     ]
     if store_endpoint:
         env.append(client.V1EnvVar(name="SK8S_S3_ENDPOINT", value=store_endpoint))
+    for key, value in (store_env or {}).items():
+        env.append(client.V1EnvVar(name=key, value=value))
     resources = None
     if requests or limits:
         resources = client.V1ResourceRequirements(

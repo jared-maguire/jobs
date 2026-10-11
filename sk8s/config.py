@@ -4,7 +4,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -28,6 +28,9 @@ class Config:
     ttl_seconds_after_finished: int = 3600
     retention_days: int = 7
     keep_results: bool = False
+    # Extra env vars exported to worker pods (e.g. AWS_* creds for an S3-compatible store).
+    # Config file / kwargs only: values are never read from SK8S_* env vars.
+    store_env: dict[str, str] = field(default_factory=dict)
 
 
 _FIELDS = {f.name: f.type for f in dataclasses.fields(Config)}
@@ -54,6 +57,8 @@ def load_config(
         data = tomllib.loads(path.read_text())
         values.update({k: v for k, v in data.items() if k in _FIELDS})
     for name in _FIELDS:
+        if name == "store_env":
+            continue
         env_key = f"SK8S_{name.upper()}"
         if env_key in env:
             values[name] = _coerce(name, env[env_key])

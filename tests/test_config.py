@@ -52,3 +52,16 @@ def test_store_endpoint_layers(tmp_path: Path) -> None:
     assert load_config(path=f, env={}).store_endpoint == "http://file:9000"
     cfg = load_config(path=f, env={"SK8S_STORE_ENDPOINT": "http://env:9000"})
     assert cfg.store_endpoint == "http://env:9000"
+
+
+def test_store_env_default_is_independent_and_file_settable(tmp_path: Path) -> None:
+    a, b = Config(), Config()
+    assert a.store_env == {} and a.store_env is not b.store_env
+    f = tmp_path / "config.toml"
+    f.write_text('[store_env]\nAWS_ACCESS_KEY_ID = "k"\n')
+    assert load_config(path=f, env={}).store_env == {"AWS_ACCESS_KEY_ID": "k"}
+
+
+def test_store_env_not_read_from_environment() -> None:
+    cfg = load_config(path=Path("/nonexistent"), env={"SK8S_STORE_ENV": "junk"})
+    assert cfg.store_env == {}

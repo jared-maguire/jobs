@@ -507,3 +507,16 @@ def test_store_endpoint_flows_to_job_env_and_store_factory(tmp_path, monkeypatch
     env = {e.name: e.value for e in batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].env}
     assert env["SK8S_S3_ENDPOINT"] == "http://minio:9000"
     assert seen["endpoint"] == "http://minio:9000"
+
+
+def test_store_env_flows_to_job_env(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    batch = FakeBatchV1()
+    cfg = Config(namespace="ns1", image="sk8s:dev", store_env={"AWS_ACCESS_KEY_ID": "k"})
+    cluster = Cluster(
+        cfg, batch_api=batch, core_api=FakeCoreV1(),
+        store=LocalStore(tmp_path), watcher_events=lambda: iter(()),
+    )
+    _OPEN.append(cluster)
+    fut = cluster.submit(lambda: 1)
+    env = {e.name: e.value for e in batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].env}
+    assert env["AWS_ACCESS_KEY_ID"] == "k"

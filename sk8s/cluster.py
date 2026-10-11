@@ -203,6 +203,7 @@ class Cluster:
             result_key=result_key,
             store=self.config.store,
             store_endpoint=self.config.store_endpoint,
+            store_env=self.config.store_env,
             service_account=opts.get("service_account", self.config.service_account),
             pull_policy=opts.get("pull_policy", self.config.pull_policy),
             requests=opts.get("requests", {}),

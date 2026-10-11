@@ -66,3 +66,11 @@ def test_s3_endpoint_exported_only_when_configured() -> None:
     assert "SK8S_S3_ENDPOINT" not in _env(make())
     assert "SK8S_S3_ENDPOINT" not in _env(make(store_endpoint=None))
     assert _env(make(store_endpoint="http://minio:9000"))["SK8S_S3_ENDPOINT"] == "http://minio:9000"
+
+
+def test_store_env_exported_to_worker() -> None:
+    assert "AWS_ACCESS_KEY_ID" not in _env(make())
+    env = _env(make(store_env={"AWS_ACCESS_KEY_ID": "k", "AWS_SECRET_ACCESS_KEY": "s"}))
+    assert env["AWS_ACCESS_KEY_ID"] == "k"
+    assert env["AWS_SECRET_ACCESS_KEY"] == "s"
+    assert env["SK8S_STORE"] == "k8s"  # core vars untouched

@@ -24,3 +24,30 @@
    ```
    SK8S_INTEGRATION=1 pytest tests/integration -v
    ```
+
+## S3 store integration tests (MinIO)
+
+`tests/integration/test_store_s3_minio.py` runs the S3 store against a MinIO
+deployed in the cluster by `tests/integration/minio.py` (Deployment + Service
+`minio` in the current namespace, default `minioadmin` credentials; created on
+first use and reused afterwards, never torn down automatically). The client
+reaches it through a `kubectl port-forward svc/minio` that the fixture starts and
+stops; worker pods reach it via `minio.default.svc.cluster.local:9000` and get
+their credentials from `Config.store_env`.
+
+1. Build a worker image that includes the `s3` extra (boto3). Use a feature
+   tag so you do not clobber `sk8s-dev:latest`:
+
+   ```
+   minikube image build -t sk8s-dev-stores:latest -f docker/Dockerfile.dev .
+   ```
+2. Run the tests (the image defaults to `sk8s-dev-stores:latest`; override with
+   `SK8S_TEST_IMAGE`):
+
+   ```
+   SK8S_INTEGRATION=1 pytest tests/integration/test_store_s3_minio.py -v
+   ```
+
+Notes: `minio/minio` is no longer published on Docker Hub or quay.io, so the
+helper uses `cgr.dev/chainguard/minio:latest` (override with
+`SK8S_TEST_MINIO_IMAGE`). To remove it: `kubectl delete deploy,svc minio`.
