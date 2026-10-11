@@ -20,7 +20,7 @@ from kubernetes.client import ApiException
 from sk8s import create_volume, delete_volume, scratch_volume
 from sk8s.cluster import Cluster
 from sk8s.config import load_config
-from tests.integration.conftest import requires_cluster
+from tests.integration.conftest import requires_cluster, suite_namespace, suite_pull_policy
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(300)]
 
@@ -36,7 +36,7 @@ GONE_TIMEOUT = 3 * TTL
 def _new_cluster() -> Cluster:
     # Legacy default-namespace RBAC (dev-setup.md); pinned so we don't follow the "sk8s" default.
     return Cluster(
-        load_config(namespace="default", image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=TTL)
+        load_config(namespace=suite_namespace(), image=IMAGE, pull_policy=suite_pull_policy(), ttl_seconds_after_finished=TTL)
     )
 
 

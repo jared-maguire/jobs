@@ -26,7 +26,7 @@ from sk8s.cluster import Cluster
 from sk8s.config import load_config
 from sk8s.doctor import doctor
 from sk8s.profile import apply, profile_for
-from tests.integration.conftest import requires_cluster
+from tests.integration.conftest import requires_cluster, suite_pull_policy
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(300)]
 
@@ -92,7 +92,7 @@ def cluster_for(namespace: str, tmp_path: Path) -> Cluster:
             tmp_path / "absent.toml",  # never read the real user's config
             namespace=namespace,
             image=IMAGE,
-            pull_policy="Never",
+            pull_policy=suite_pull_policy(),
             store="k8s",
             ttl_seconds_after_finished=30,
         )
@@ -268,7 +268,7 @@ def test_workflows_lists_and_kill_removes(
     ns = fresh_ns(NS_CLI)
     apply(profile_for("local", namespace=ns, store="k8s"))
     home = tmp_path / "home"
-    write_user_config(home, namespace=ns, store="k8s", image=IMAGE, pull_policy="Never")
+    write_user_config(home, namespace=ns, store="k8s", image=IMAGE, pull_policy=suite_pull_policy())
 
     empty = run_cli(home, "workflows")
     assert empty.returncode == 0, (empty.stdout, empty.stderr)

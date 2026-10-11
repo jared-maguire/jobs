@@ -44,14 +44,14 @@ import pytest
 from sk8s import anchors
 from sk8s.cluster import Cluster
 from sk8s.config import load_config
-from tests.integration.conftest import requires_cluster
+from tests.integration.conftest import requires_cluster, suite_namespace, suite_pull_policy
 
 pytestmark = [
     pytest.mark.integration, pytest.mark.stress, requires_cluster, pytest.mark.timeout(900),
 ]
 
 IMAGE = os.environ.get("SK8S_STRESS_TEST_IMAGE", "sk8s-dev-cidocs:latest")
-NS = "default"
+NS = suite_namespace()
 TTL = 20  # modest ttl_seconds_after_finished
 WORK_SECONDS = 150  # clients start new rounds until this long after launch (~3 min total)
 HARD_SECONDS = 330  # shared hard deadline: every wait in every client is bounded by it
@@ -72,7 +72,7 @@ class Shared(NamedTuple):
 
 def _make_cluster() -> Cluster:
     return Cluster(
-        load_config(namespace=NS, image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=TTL)
+        load_config(namespace=NS, image=IMAGE, pull_policy=suite_pull_policy(), ttl_seconds_after_finished=TTL)
     )
 
 
