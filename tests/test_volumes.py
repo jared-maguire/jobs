@@ -15,9 +15,12 @@ NS = "ns1"
 
 
 class Harness:
-    def __init__(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, tmp_path, rwx_storage_class: str | None = None) -> None:  # type: ignore[no-untyped-def]
         self.core = FakeCoreV1()
-        cfg = Config(namespace=NS, image="sk8s:dev", store=f"local:{tmp_path}")
+        cfg = Config(
+            namespace=NS, image="sk8s:dev", store=f"local:{tmp_path}",
+            rwx_storage_class=rwx_storage_class,
+        )
         self.cluster = Cluster(
             cfg, batch_api=FakeBatchV1(), core_api=self.core,
             store=LocalStore(tmp_path), watcher_events=lambda: iter(()),
@@ -46,7 +49,8 @@ def test_create_returns_name_and_builds_pvc(h: Harness) -> None:
 
 def test_size_and_access_modes_pass_through_verbatim(h: Harness) -> None:
     name = sk8s.create_volume(
-        "1500M", access_modes=["ReadWriteMany", "ReadOnlyMany"], cluster=h.cluster
+        "1500M", access_modes=["ReadWriteMany", "ReadOnlyMany"], storage_class="x",
+        cluster=h.cluster,
     )
     pvc = h.pvc(name)
     assert pvc.spec.resources.requests["storage"] == "1500M"
@@ -56,6 +60,71 @@ def test_size_and_access_modes_pass_through_verbatim(h: Harness) -> None:
 def test_storage_class_only_when_given(h: Harness) -> None:
     name = sk8s.create_volume("1Gi", storage_class="fast", cluster=h.cluster)
     assert h.pvc(name).spec.storage_class_name == "fast"
+
+
+# --- storage-class resolution (the v1 pattern) ---------------------------------------------------
+
+
+@pytest.fixture
+def mapped(tmp_path):  # type: ignore[no-untyped-def]
+    harness = Harness(tmp_path, rwx_storage_class="standard-rwx")
+    yield harness
+    harness.cluster.close()
+
+
+def test_rwx_resolves_to_the_configured_class(mapped: Harness) -> None:
+    for modes in (["ReadWriteMany"], ["ReadWriteOnce", "ReadWriteMany"], "ReadWriteMany"):
+        name = sk8s.create_volume("1Ti", access_modes=modes, cluster=mapped.cluster)
+        assert mapped.pvc(name).spec.storage_class_name == "standard-rwx"
+
+
+def test_rwx_without_a_mapped_class_is_a_typed_error_with_a_config_hint(h: Harness) -> None:
+    with pytest.raises(Sk8sError) as e:
+        sk8s.create_volume("1Ti", access_modes=["ReadWriteMany"], cluster=h.cluster)
+    assert "sk8s config" in str(e.value) and "storage_class=" in str(e.value)
+    assert not h.core.pvcs and not h.core.create_calls  # nothing half-made, no Pending PVC
+
+
+def test_an_explicit_storage_class_always_wins(h: Harness, mapped: Harness) -> None:
+    for harness in (h, mapped):  # unmapped (would otherwise raise) and mapped
+        name = sk8s.create_volume(
+            "1Ti", access_modes=["ReadWriteMany"], storage_class="mine", cluster=harness.cluster
+        )
+        assert harness.pvc(name).spec.storage_class_name == "mine"
+
+
+@pytest.mark.parametrize(
+    "modes",
+    [["ReadWriteOnce"], ["ReadOnlyMany"], ["ReadWriteOncePod"], ["ReadWriteOnce", "ReadOnlyMany"]],
+)
+def test_non_rwx_modes_leave_the_class_to_the_cluster_default(
+    mapped: Harness, modes: list[str]
+) -> None:
+    name = sk8s.create_volume("1Gi", access_modes=modes, cluster=mapped.cluster)
+    assert mapped.pvc(name).spec.storage_class_name is None
+
+
+def test_plain_rwo_volume_is_byte_identical_to_before_class_resolution(
+    h: Harness, mapped: Harness
+) -> None:
+    """RF2: the PVC built for a default volume is the pre-branch body, mapped class or not."""
+    from kubernetes import client
+
+    for harness in (h, mapped):
+        name = sk8s.create_volume("5Gi", name="data", keep=True, cluster=harness.cluster)
+        body = client.ApiClient().sanitize_for_serialization(harness.pvc(name))
+        body["metadata"].pop("uid", None)  # assigned by the fake API server, not by sk8s
+        assert body == {
+            "metadata": {
+                "name": "data",
+                "namespace": NS,
+                "labels": {"app.kubernetes.io/managed-by": "sk8s", "sk8s/kind": "volume-keep"},
+            },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "resources": {"requests": {"storage": "5Gi"}},
+            },
+        }
 
 
 def test_generated_name_is_dns1123(h: Harness) -> None:

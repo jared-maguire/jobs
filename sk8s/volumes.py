@@ -87,8 +87,12 @@ def create_volume(
 
     ``size`` (e.g. ``"10Gi"``) and ``access_modes`` go to the PVC spec verbatim.
     ``name`` defaults to a generated ``vol-<rand6>``; an explicit name must be a
-    DNS-1123 label (``ValueError``) and unused (``Sk8sError``). ``storage_class``
-    is set only when given (otherwise the cluster default applies).
+    DNS-1123 label (``ValueError``) and unused (``Sk8sError``).
+
+    ``storage_class`` always wins when given. Otherwise it is resolved from the access
+    modes, as in v1: ``ReadWriteMany`` selects the class ``sk8s config`` recorded for this
+    cluster (``Sk8sError`` with a ``sk8s config`` hint if none is recorded, rather than a
+    PVC stuck in ``Pending``); any other modes leave it unset so the cluster default applies.
 
     By default the volume is owned by the workflow's anchor and is deleted with
     the workflow. ``keep=True`` makes it independent of any workflow; delete it
@@ -103,6 +107,14 @@ def create_volume(
         _validate_name(name)
     c = _resolve(cluster)
     namespace = _namespace(c)
+    if storage_class is None and "ReadWriteMany" in modes:
+        storage_class = c.config.rwx_storage_class
+        if storage_class is None:
+            raise Sk8sError(
+                "access_modes includes ReadWriteMany but no RWX storage class is configured "
+                "for this cluster; run `sk8s config` (it records the profile's class), set "
+                "SK8S_RWX_STORAGE_CLASS, or pass storage_class= explicitly"
+            )
 
     labels = {_MANAGED_BY_LABEL: MANAGED_BY}
     owner_references = None
