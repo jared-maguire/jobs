@@ -1,4 +1,4 @@
-"""Worker image definitions: Dockerfile generation (build/push live elsewhere)."""
+"""Worker images: Dockerfile generation plus docker build/push and minikube build helpers."""
 from __future__ import annotations
 
 import os
@@ -65,6 +65,24 @@ def generate_dockerfile(
 _STDERR_TAIL_LINES = 50
 
 
+def _text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
+def _output_tail(stderr: Any, stdout: Any) -> str:
+    """One tail of at most ``_STDERR_TAIL_LINES`` lines: stderr first, then stdout.
+
+    Stdout lines only fill whatever room stderr leaves, so a legacy builder
+    that prints pip's error on stdout still surfaces it.
+    """
+    err = _text(stderr).splitlines()[-_STDERR_TAIL_LINES:]
+    room = _STDERR_TAIL_LINES - len(err)
+    out = _text(stdout).splitlines()[-room:] if room > 0 else []
+    return "\n".join([*err, *out])
+
+
 def _run(runner: Callable[..., Any] | None, argv: list[str], what: str, **kwargs: Any) -> None:
     run = subprocess.run if runner is None else runner
     try:
@@ -72,10 +90,7 @@ def _run(runner: Callable[..., Any] | None, argv: list[str], what: str, **kwargs
     except FileNotFoundError as e:
         raise Sk8sError(f"{what} failed: {argv[0]!r} not found on PATH") from e
     if proc.returncode != 0:
-        stderr = proc.stderr
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode(errors="replace")
-        tail = "\n".join((stderr or "").splitlines()[-_STDERR_TAIL_LINES:])
+        tail = _output_tail(proc.stderr, proc.stdout)
         raise Sk8sError(f"{what} failed (exit {proc.returncode}):\n{tail}")
 
 
@@ -102,7 +117,10 @@ def build(
 
     The Dockerfile (given, or generated from ``pip``/``conda``/``channels``) is
     fed to docker on stdin. With ``push=True`` the image is pushed afterwards.
+    An explicit ``dockerfile`` cannot be combined with ``pip``/``conda``/``channels``.
     """
+    if dockerfile is not None and (pip or conda or channels):
+        raise ValueError("dockerfile cannot be combined with pip/conda/channels")
     if dockerfile is None:
         dockerfile = generate_dockerfile(pip=pip, conda=conda, channels=channels)
     _run(runner, ["docker", "build", "-t", tag, "-f", "-", str(path)],

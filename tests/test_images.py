@@ -91,17 +91,18 @@ def test_dockerfile_worker_definition():
 
 
 class FakeRunner:
-    def __init__(self, returncode=0, stderr=""):
+    def __init__(self, returncode=0, stderr="", stdout=""):
         self.calls = []
         self.returncode = returncode
         self.stderr = stderr
+        self.stdout = stdout
         self.minikube_file_text = None
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
         if argv[0] == "minikube":
             self.minikube_file_text = Path(argv[argv.index("-f") + 1]).read_text()
-        return subprocess.CompletedProcess(argv, self.returncode, "", self.stderr)
+        return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
 
 
 def test_build_exact_argv_and_dockerfile_via_input():
@@ -144,6 +145,45 @@ def test_build_failure_raises_with_stderr_tail_capped_at_50_lines():
     assert "line199" in msg
     assert "line100" not in msg
     assert msg.count("line") <= 50
+
+
+def test_failure_tail_combines_stderr_then_stdout_capped_at_50_lines():
+    stderr = "\n".join(f"err{i}" for i in range(10))
+    stdout = "\n".join(f"out{i}" for i in range(200)) + "\nMARKER-PIP"
+    r = FakeRunner(returncode=1, stderr=stderr, stdout=stdout)
+    with pytest.raises(Sk8sError) as ei:
+        images.build("t:1", dockerfile="FROM x\n", runner=r)
+    body = str(ei.value).split("\n")[1:]
+    assert len(body) == 50
+    assert body[:10] == [f"err{i}" for i in range(10)]
+    assert body[-1] == "MARKER-PIP"
+    assert "out160" not in body and "out161" in body
+
+
+def test_failure_tail_full_stderr_leaves_no_room_for_stdout():
+    stderr = "\n".join(f"err{i}" for i in range(80))
+    r = FakeRunner(returncode=1, stderr=stderr, stdout="MARKER-OUT")
+    with pytest.raises(Sk8sError) as ei:
+        images.build("t:1", dockerfile="FROM x\n", runner=r)
+    msg = str(ei.value)
+    assert "MARKER-OUT" not in msg
+    assert "err79" in msg and "err29" not in msg
+
+
+def test_build_missing_docker_binary_raises_sk8s_error():
+    def runner(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file", argv[0])
+
+    with pytest.raises(Sk8sError, match="'docker' not found on PATH"):
+        images.build("t:1", dockerfile="FROM x\n", runner=runner)
+
+
+@pytest.mark.parametrize("kw", [{"pip": ["x"]}, {"conda": ["x"]}, {"channels": ["c"]}])
+def test_build_dockerfile_with_generation_args_raises(kw):
+    r = FakeRunner()
+    with pytest.raises(ValueError, match="dockerfile cannot be combined"):
+        images.build("t:1", dockerfile="FROM x\n", runner=r, **kw)
+    assert r.calls == []
 
 
 def test_build_without_push_runs_only_build():
