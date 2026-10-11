@@ -64,3 +64,66 @@ def test_oversized_result_becomes_error(tmp_path: Path, monkeypatch) -> None:  #
     assert code == 1
     with pytest.raises(BlobTooLarge, match="s3:// or gs://"):
         serialize.decode_result(blob)
+
+
+def run_service_worker(tmp_path: Path, func, args=(), kwargs={}):  # type: ignore[no-untyped-def]
+    store = LocalStore(tmp_path)
+    payload_uri = store.put("svc/api/payload", serialize.encode_payload(func, args, kwargs))
+    env = {
+        "SK8S_STORE": f"local:{tmp_path}",
+        "SK8S_PAYLOAD_URI": payload_uri,
+        "SK8S_SERVICE": "1",
+    }
+    return worker.main(env), store
+
+
+def test_service_mode_return_is_error_and_writes_no_blob(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    code, _ = run_service_worker(tmp_path, lambda: "done")
+    assert code == 1
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+    assert sorted(p.name for p in tmp_path.rglob("*") if p.is_file()) == ["payload"]
+
+
+def test_service_mode_calls_function_with_args(tmp_path: Path) -> None:
+    # cloudpickle serializes closures by value, so observe via a file instead
+    marker = tmp_path / "marker.txt"
+
+    def serve2(a: int, b: int = 0) -> None:
+        marker.write_text(f"{a},{b}")
+        raise RuntimeError("stop")
+
+    code, _ = run_service_worker(tmp_path, serve2, (1,), {"b": 2})
+    assert code == 1
+    assert marker.read_text() == "1,2"
+
+
+def test_service_mode_raise_logs_exception_and_writes_no_blob(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def boom() -> None:
+        raise KeyError("missing")
+
+    code, _ = run_service_worker(tmp_path, boom)
+    assert code == 1
+    assert any(r.exc_info for r in caplog.records)
+    assert sorted(p.name for p in tmp_path.rglob("*") if p.is_file()) == ["payload"]
+
+
+def test_service_mode_does_not_need_result_key(tmp_path: Path) -> None:
+    code, _ = run_service_worker(tmp_path, lambda: None)  # env has no SK8S_RESULT_KEY
+    assert code == 1
+
+
+def test_service_flag_other_than_1_is_job_mode(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path)
+    payload_uri = store.put("wf/j/payload", serialize.encode_payload(lambda: 5, (), {}))
+    env = {
+        "SK8S_STORE": f"local:{tmp_path}",
+        "SK8S_PAYLOAD_URI": payload_uri,
+        "SK8S_RESULT_KEY": "wf/j/result",
+        "SK8S_SERVICE": "0",
+    }
+    assert worker.main(env) == 0
+    assert serialize.decode_result(store.get(store.uri_for("wf/j/result"))) == 5
