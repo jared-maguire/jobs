@@ -7,6 +7,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -20,6 +21,7 @@ from sk8s import anchors, clones, serialize, spec, volumes
 from sk8s.config import Config, load_config
 from sk8s.errors import (
     BlobNotFound, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
+    VolumeAttachBlocked, VolumeProvisioningFailed,
 )
 from sk8s.future import JobFuture
 from sk8s.store import get_store
@@ -33,6 +35,16 @@ JOB_OPTIONS = {
 }
 
 _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
+# Volume diagnoses (spike-report.md section 11). Both are events, not container waiting reasons:
+# the pod only ever says ContainerCreating / Pending. Match on the persistent signatures only; the
+# transient attach noise ("CSINode ... does not contain driver", "ControllerPublish not permitted
+# ... backoff condition") shares the FailedAttachVolume reason and must never be fatal.
+_ATTACH_BLOCKED = re.compile(r"Volume is already used by pod\(s\) (?P<pods>.+?)\s*$")
+_NO_CONTENT_SOURCE = "VolumeContentSource must be provided"
+# A real detach takes ~8-15s after the holder finishes (spike section 7); a holder that is
+# still alive a minute after we first saw the block is a wedge, not a hand-over.
+_VOLUME_WEDGE_GRACE = 60.0
+_STUCK_PHASES = ("imagepull", "volume-stuck")
 _SELECTOR = "app.kubernetes.io/managed-by=sk8s"
 # Workflow ids that collide with non-workflow key prefixes in the store.
 RESERVED_WORKFLOW_IDS = frozenset({"svc", "doctor"})
@@ -170,6 +182,9 @@ class Cluster:
         self._atexit_hook: Callable[[], None] | None = None
         self._futures: dict[str, tuple[JobFuture, bool, str]] = {}  # name -> (future, keep_results, image)
         self._mount_plans: dict[str, _MountPlan] = {}  # job name -> clone-backed volume bookkeeping
+        self._diagnoses: dict[str, PodFailed] = {}  # job name -> the typed error for a "volume-stuck" job
+        self._attach_blocked_since: dict[str, float] = {}  # pod name -> when its attach block was first seen
+        self._events_forbidden = False
         self._sleep: Callable[[float], None] = time.sleep
         self._watcher = JobWatcher(
             watcher_events if watcher_events is not None else self._k8s_events,
@@ -332,7 +347,7 @@ class Cluster:
         # failed. _collect still prefers a stored result blob over this verdict.
         for name in sorted(expected - listed):
             yield (name, "failed")
-        yield from self._pull_failures()
+        yield from self._probe_failures()
 
         stream_kwargs: dict[str, Any] = {}
         resource_version = getattr(getattr(listing, "metadata", None), "resource_version", None)
@@ -358,9 +373,15 @@ class Cluster:
             now = time.monotonic()
             if now - last_pull_check > 30:
                 last_pull_check = now
-                yield from self._pull_failures()
+                yield from self._probe_failures()
         # stream timeout -> return; JobWatcher reconnects (and we re-LIST)
+        yield from self._probe_failures()
+
+    def _probe_failures(self) -> Iterator[JobEvent]:
+        """Every diagnostic probe, run on the same cadence (each stream (re)connect and every
+        30s of stream activity, so a stuck job surfaces within about a minute of its grace)."""
         yield from self._pull_failures()
+        yield from self._volume_failures()
 
     def _pull_failures(self) -> Iterator[JobEvent]:
         """Diagnostic probe for stuck image pulls. Best-effort: any failure here
@@ -386,6 +407,103 @@ class Cluster:
             log.exception("image-pull probe failed; continuing without pull diagnostics")
             return
         yield from found
+
+    def _volume_failures(self) -> Iterator[JobEvent]:
+        """Diagnostic probe for volume wedges. Best-effort like the pull probe: any failure
+        degrades to "no volume diagnostics" and never stops job events from flowing."""
+        found: list[JobEvent] = []
+        try:
+            if not self._futures:
+                return
+            pods = self.core.list_namespaced_pod(
+                namespace=self.config.namespace, label_selector=_SELECTOR
+            )
+            waiting: list[tuple[str, Any]] = []  # (job, pod) for our pods that have not started
+            live_pods = set()
+            for pod in pods.items:
+                job = (pod.metadata.labels or {}).get("job-name")
+                if job not in self._futures:
+                    continue
+                if pod.status is None or pod.status.phase != "Pending":
+                    continue  # running (or over): any event on it is history
+                live_pods.add(pod.metadata.name)
+                if any(v.persistent_volume_claim is not None for v in pod.spec.volumes or []):
+                    waiting.append((job, pod))
+            for gone in set(self._attach_blocked_since) - live_pods:
+                del self._attach_blocked_since[gone]
+            if not waiting or self._events_forbidden:
+                return
+            attach = self._events("reason=FailedAttachVolume")
+            if self._events_forbidden:
+                return
+            provisioning = self._events("involvedObject.kind=PersistentVolumeClaim,reason=ProvisioningFailed")
+            for job, pod in waiting:
+                diagnosis = self._diagnose_pod(pod, attach, provisioning)
+                if diagnosis is not None:
+                    self._diagnoses[job] = diagnosis
+                    found.append((job, "volume-stuck"))
+        except Exception:  # noqa: BLE001
+            log.exception("volume probe failed; continuing without volume diagnostics")
+            return
+        yield from found
+
+    def _events(self, field_selector: str) -> list[Any]:
+        try:
+            listing = self.core.list_namespaced_event(
+                namespace=self.config.namespace, field_selector=field_selector
+            )
+        except ApiException as exc:
+            if exc.status != 403:
+                raise
+            # The Role predates the events rule (re-run `sk8s config`): no diagnostics, say so once.
+            self._events_forbidden = True
+            log.warning(
+                "not allowed to read events in namespace %s, so stuck volume mounts cannot be "
+                "diagnosed; re-run `sk8s config` to grant the read-only events rule",
+                self.config.namespace,
+            )
+            return []
+        return list(listing.items)
+
+    def _diagnose_pod(self, pod: Any, attach: list[Any], provisioning: list[Any]) -> PodFailed | None:
+        job = pod.metadata.labels["job-name"]
+        mounts = {
+            v.persistent_volume_claim.claim_name: v.name
+            for v in pod.spec.volumes or []
+            if v.persistent_volume_claim is not None
+        }
+        for ev in provisioning:  # infeasible: no grace period
+            involved = ev.involved_object
+            if involved.name in mounts and _NO_CONTENT_SOURCE in (ev.message or ""):
+                return VolumeProvisioningFailed(
+                    job, mounts[involved.name], involved.name, ev.message
+                )
+        for ev in attach:
+            if ev.involved_object.name != pod.metadata.name:
+                continue
+            match = _ATTACH_BLOCKED.search(ev.message or "")
+            if match is None:
+                continue  # transient attach noise, not the persistent signature
+            holders = [h for h in re.split(r"[,\s]+", match.group("pods")) if h]
+            live = [h for h in holders if self._pod_holds_volumes(h)]
+            if not live:
+                self._attach_blocked_since.pop(pod.metadata.name, None)  # a detach in flight
+                return None
+            since = self._attach_blocked_since.setdefault(pod.metadata.name, self._clock())
+            if self._clock() - since < _VOLUME_WEDGE_GRACE:
+                return None
+            claim, volume = next(iter(mounts.items()))
+            return VolumeAttachBlocked(job, volume, claim, live, ev.message)
+        return None
+
+    def _pod_holds_volumes(self, name: str) -> bool:
+        """True unless the pod is over or gone (a finished pod releases its disk, spike section 7)."""
+        try:
+            pod = self.core.read_namespaced_pod(name=name, namespace=self.config.namespace)
+        except ApiException as exc:
+            return bool(exc.status != 404)
+        phase = None if pod.status is None else pod.status.phase
+        return phase not in ("Succeeded", "Failed")
 
     # --- submission --------------------------------------------------------
     def submit(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture:
@@ -611,7 +729,7 @@ class Cluster:
         except BaseException as exc:  # noqa: BLE001 — a future must never be stranded
             log.exception("resolving job %s failed unexpectedly", name)
             error = StoreError(f"could not resolve job {name}: {exc!r}")
-        if phase == "imagepull":
+        if phase in _STUCK_PHASES:
             self._delete_stuck_job(name)
         # Clean up before resolving so a caller woken by the future sees a clean store (and a
         # writer's volume already carries its new generation).
@@ -637,7 +755,7 @@ class Cluster:
                 break
             except BlobNotFound as exc:
                 fetch_error = exc
-                if phase == "imagepull":
+                if phase in _STUCK_PHASES:
                     break
             except Exception as exc:  # noqa: BLE001 — store trouble must not strand the future
                 fetch_error = exc
@@ -656,10 +774,13 @@ class Cluster:
             return None, err
         if phase == "imagepull":
             return None, ImagePullError(name, image=image)
+        if phase == "volume-stuck":
+            diagnosis = self._diagnoses.pop(name, None)
+            return None, diagnosis or PodFailed(name, reason="its volume mount never completed")
         return None, PodFailed(name, reason=self._failure_reason(name), logs=self._safe_logs(name))
 
     def _delete_stuck_job(self, name: str) -> None:
-        """A job stuck in ImagePullBackOff never finishes, so its TTL never fires."""
+        """A job stuck in ImagePullBackOff or on a volume never finishes, so its TTL never fires."""
         try:
             self.batch.delete_namespaced_job(
                 name=name, namespace=self.config.namespace, propagation_policy="Background"

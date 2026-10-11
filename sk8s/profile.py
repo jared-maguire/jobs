@@ -16,6 +16,7 @@ from kubernetes.client import ApiException
 from sk8s import k8s
 
 VERBS: tuple[str, ...] = ("get", "list", "watch", "create", "delete", "patch")
+EVENT_VERBS: tuple[str, ...] = ("get", "list", "watch")
 LOCAL_CONTEXTS: frozenset[str] = frozenset({"minikube", "docker-desktop"})
 TABLED_PROVIDERS: tuple[str, ...] = ("eks",)
 GKE_WI_ANNOTATION = "iam.gke.io/gcp-service-account"
@@ -39,6 +40,9 @@ ROLE_RULES: tuple[PolicyRule, ...] = (
     ),
     PolicyRule(("batch",), ("jobs",), VERBS),
     PolicyRule(("apps",), ("deployments",), VERBS),
+    # Read-only: the volume diagnostics read pod and PVC events (FailedAttachVolume,
+    # ProvisioningFailed) to turn a silent Pending hang into a typed error.
+    PolicyRule(("",), ("events",), EVENT_VERBS),
 )
 
 

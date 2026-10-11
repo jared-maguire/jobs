@@ -9,6 +9,8 @@ from sk8s.config import Config, load_config  # noqa: E402
 from sk8s.errors import (  # noqa: E402
     BlobNotFound, BlobTooLarge, ImagePullError, JobRejected, JobTimeout, MapFailed, PodFailed,
     RemoteException, RemoteTraceback, ResultDecodeError, Sk8sError, StoreError, VersionMismatch,
+    VolumeAttachBlocked, VolumeError, VolumeNotFound, VolumeNotPopulated,
+    VolumeProvisioningFailed, VolumeWaitTimeout,
 )
 from sk8s.future import JobFuture  # noqa: E402
 from sk8s.local import LocalCluster  # noqa: E402
@@ -25,4 +27,6 @@ __all__ = [
     "Sk8sError", "StoreError", "BlobNotFound", "BlobTooLarge", "VersionMismatch",
     "JobTimeout", "JobRejected", "PodFailed", "ImagePullError", "RemoteException",
     "RemoteTraceback", "MapFailed", "ResultDecodeError",
+    "VolumeError", "VolumeNotFound", "VolumeNotPopulated", "VolumeWaitTimeout",
+    "VolumeAttachBlocked", "VolumeProvisioningFailed",
 ]

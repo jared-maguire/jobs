@@ -7,7 +7,9 @@ import time
 from typing import Callable, Iterator
 
 JobEvent = tuple[str, str]  # (job_name, phase)
-TERMINAL = {"succeeded", "failed", "imagepull"}
+# "imagepull" and "volume-stuck" are diagnoses, not Kubernetes phases: the Job will never finish
+# on its own, and the watcher resolves its future with a typed error instead.
+TERMINAL = {"succeeded", "failed", "imagepull", "volume-stuck"}
 _RECENT_TTL = 60.0
 
 log = logging.getLogger("sk8s.watch")

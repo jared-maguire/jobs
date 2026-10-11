@@ -47,8 +47,11 @@ def test_role_rules_are_the_exact_table() -> None:
         ("", "persistentvolumeclaims"),
         ("apps", "deployments"),
         ("", "services"),
+        ("", "events"),
     }
     assert set(flat) == expected
+    # Everything gets the full verb set except events: the diagnostics only ever read them.
+    assert flat.pop(("", "events")) == {"get", "list", "watch"}
     assert all(v == set(VERBS) for v in flat.values())
     assert prof.VERBS == VERBS
 
@@ -252,7 +255,10 @@ def test_apply_converges_a_role_missing_a_verb() -> None:
         rule.verbs = [v for v in rule.verbs if v != "patch"]
     out = _apply(_profile(), core, rbac)
     assert ("replace", "Role", "sk8s") in rbac.actions
-    assert all("patch" in r.verbs for r in rbac.roles[("team-a", "sk8s")].rules)
+    # (the events rule is deliberately read-only, so it never had "patch" to lose)
+    assert all(
+        "patch" in r.verbs for r in rbac.roles[("team-a", "sk8s")].rules if "events" not in r.resources
+    )
     assert any(line.startswith("Role") and "replaced" in line for line in out)
     rbac.actions.clear()
     _apply(_profile(), core, rbac)
