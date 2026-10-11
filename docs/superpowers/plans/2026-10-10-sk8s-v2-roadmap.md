@@ -20,14 +20,19 @@ independently mergeable software.
 
 | # | Plan | Branch | Depends on | Status |
 |---|------|--------|-----------|--------|
-| 1 | Foundation: data plane, worker, futures, core API | `feat/core` | — | **Planned** (`2026-10-10-sk8s-v2-plan-1-foundation.md`) |
-| 2 | Workflows: anchors, detached submit/attach, retention GC | `feat/workflows` | 1 | not planned |
-| 3 | Cloud stores: S3 + GCS backends, MinIO tests | `feat/stores-cloud` | 1 | not planned |
-| 4 | Volumes: PVCs, anchor ownership, scratch_volume | `feat/volumes` | 1 (+2 for anchor refs) | not planned |
-| 5 | Services: serve(), Service handle, get_service | `feat/services` | 1 | not planned |
-| 6 | Images: published base images, `sk8s image build`, release CI | `feat/images` | 1 | not planned |
-| 7 | Cluster config: ClusterProfile, `sk8s config`/`doctor`, CLI | `feat/cluster-config` | 1 (CLI workflow cmds need 2) | not planned |
-| 8 | CI & docs: minikube per-PR workflow, GKE/EKS nightly matrix, docs site, migration guide | `feat/ci-docs` | 3, 6, 7 | not planned |
+| 1 | Foundation: data plane, worker, futures, core API | `feat/core` | — | **Merged** (PR #70) |
+| 2 | Workflows: anchors, detached submit/attach, retention GC | `feat/workflows` | 1 | **In progress** (`...plan-2-workflows.md`) |
+| 3 | Cloud stores: S3 + GCS backends, MinIO tests | `feat/stores-cloud` | 1 | **In progress** (`...plan-3-stores-cloud.md`) |
+| 4 | Volumes: PVCs, anchor ownership, scratch_volume | `feat/volumes` | 1 (+2 for anchor refs) | wave 2 |
+| 5 | Services: serve(), Service handle, get_service | `feat/services` | 1 | **In progress** (`...plan-5-services.md`) |
+| 6 | Images: published base images, builders, release CI | `feat/images` | 1 | **In progress** (`...plan-6-images.md`) |
+| 7 | Cluster config: ClusterProfile, `sk8s config`/`doctor`, CLI | `feat/cluster-config` | 1 (CLI workflow cmds need 2) | wave 2 |
+| 8 | CI & docs: minikube per-PR workflow, GKE/EKS nightly matrix, docs site, migration guide | `feat/ci-docs` | 3, 6, 7 | wave 3 |
+
+Execution notes (2026-10-10): Jared waived plan-review gates ("get it all done").
+Integration suites share one minikube → integration tasks run serially across
+features, each with its own image tag (SK8S_TEST_IMAGE). Plans 2 and 5 both
+touch worker.py/__init__.py: second-to-merge rebases.
 
 Parallelizable after Plan 1 merges: 2, 3, 4*, 5, 6, 7 (— *4's anchor-ownership
 task waits on 2; its PVC core does not).
