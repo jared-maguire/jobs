@@ -3,7 +3,6 @@ import datetime
 import os
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +22,11 @@ from sk8s import anchors, cli
 from sk8s.doctor import Check
 from sk8s.errors import Sk8sError
 from tests.fakes import FakeBatchV1, FakeCoreV1, FakeRbacV1
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 NS = "team-a"
 
