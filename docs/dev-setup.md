@@ -57,9 +57,7 @@ sk8s doctor
 
    The raw `minikube image build` can exit 0 even when the build fails (for example an
    unresolvable `FROM`, or a `-f` Dockerfile outside the build context), so check
-   `minikube image ls | grep sk8s-dev` after building. `sk8s image build --minikube`
-   does that check for you: it puts its generated Dockerfile inside the context and
-   raises an error if the tag is missing from `minikube image ls` afterwards.
+   `minikube image ls | grep sk8s-dev` after building.
 
    Two more `minikube image` caveats. Every `minikube image build` leaks a context
    tarball at `/tmp/build.*.tar` (multi-GB if `.venv` is in the context, which the

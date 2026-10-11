@@ -1,11 +1,9 @@
-"""Worker images: Dockerfile generation plus docker build/push and minikube build helpers."""
+"""Worker images: Dockerfile generation plus docker build/push helpers."""
 from __future__ import annotations
 
-import os
 import shlex
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -131,49 +129,4 @@ def build(
          f"docker build {tag}", input=dockerfile)
     if push:
         _push(tag, runner=runner)
-    return tag
-
-
-def _image_known(listing: str, tag: str) -> bool:
-    """Whether ``minikube image ls`` output lists ``tag`` (it prefixes ``docker.io/library/``)."""
-    name = tag if ":" in tag.rsplit("/", 1)[-1] or "@" in tag else f"{tag}:latest"
-    wanted = {name, f"docker.io/{name}", f"docker.io/library/{name}"}
-    return any(line.strip() in wanted for line in listing.splitlines())
-
-
-def build_in_minikube(
-    tag: str,
-    *,
-    dockerfile: str | None = None,
-    path: str | Path = ".",
-    runner: Callable[..., Any] | None = None,
-) -> str:
-    """Build straight into minikube's image store (no registry round trip).
-
-    ``minikube image build`` cannot read a Dockerfile from stdin, and a ``-f``
-    path outside the build context makes it a silent no-op (exit 0, no image).
-    So the text goes into a uniquely named file at the context root, which is
-    removed afterwards. Because minikube can also report success for a build
-    that produced nothing, the image is checked with ``minikube image ls``
-    and a missing tag raises Sk8sError.
-    """
-    if dockerfile is None:
-        raise ValueError("build_in_minikube requires a dockerfile")
-    fd, name = tempfile.mkstemp(prefix=".sk8s-build-", suffix=".Dockerfile", dir=str(path))
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(dockerfile)
-        os.chmod(name, 0o644)
-        built = _run(runner, ["minikube", "image", "build", "-t", tag, "-f",
-                              os.path.basename(name), str(path)],
-                     f"minikube image build {tag}")
-    finally:
-        os.unlink(name)
-    listing = _run(runner, ["minikube", "image", "ls"], "minikube image ls")
-    if not _image_known(_text(listing.stdout), tag):
-        tail = _output_tail(built.stderr, built.stdout)
-        raise Sk8sError(
-            f"minikube image build {tag} exited 0 but the image is not in "
-            f"`minikube image ls`; minikube build failures can be silent.\n{tail}"
-        )
     return tag
