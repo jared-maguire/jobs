@@ -151,29 +151,42 @@ class Cluster:
         yield from self._pull_failures()
 
     def _pull_failures(self) -> Iterator[JobEvent]:
-        with_futures = list(self._futures)
-        if not with_futures:
+        """Diagnostic probe for stuck image pulls. Best-effort: any failure here
+        (missing pods RBAC, odd pod status) degrades to "no pull diagnostics" and
+        must never prevent job events from flowing."""
+        found: list[JobEvent] = []
+        try:
+            if not self._futures:
+                return
+            pods = self.core.list_namespaced_pod(
+                namespace=self.config.namespace,
+                label_selector=_SELECTOR,
+            )
+            for pod in pods.items:
+                job = (pod.metadata.labels or {}).get("job-name")
+                if job not in self._futures:
+                    continue
+                for cs in (pod.status.container_statuses or []) if pod.status else []:
+                    waiting = cs.state.waiting if cs.state is not None else None
+                    if waiting and waiting.reason in _WAITING_PULL_REASONS:
+                        found.append((job, "imagepull"))
+        except Exception:  # noqa: BLE001
+            log.exception("image-pull probe failed; continuing without pull diagnostics")
             return
-        pods = self.core.list_namespaced_pod(
-            namespace=self.config.namespace,
-            label_selector=_SELECTOR,
-        )
-        for pod in pods.items:
-            job = (pod.metadata.labels or {}).get("job-name")
-            if job not in self._futures:
-                continue
-            for cs in pod.status.container_statuses or []:
-                waiting = cs.state.waiting
-                if waiting and waiting.reason in _WAITING_PULL_REASONS:
-                    yield (job, "imagepull")
+        yield from found
 
     # --- submission --------------------------------------------------------
     def submit(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture:
         opts = {k: kwargs.pop(k) for k in list(kwargs) if k in JOB_OPTIONS}
         opts.pop("timeout", None)  # timeout is a run()/result() concern
         name = spec.job_name(opts.get("name_prefix", "job"))
-        namespace = opts.get("namespace") or self.config.namespace
+        namespace = self.config.namespace
         assert namespace is not None
+        if opts.get("namespace") not in (None, namespace):
+            raise ValueError(
+                f"namespace={opts['namespace']!r} differs from this cluster's namespace "
+                f"{namespace!r}: per-job namespaces arrive in a later release"
+            )
         image = opts.get("image") or default_image(self.config)
         payload_key = f"{self.workflow_id}/{name}/payload"
         result_key = f"{self.workflow_id}/{name}/result"
@@ -235,6 +248,8 @@ class Cluster:
         except BaseException as exc:  # noqa: BLE001 — a future must never be stranded
             log.exception("resolving job %s failed unexpectedly", name)
             error = StoreError(f"could not resolve job {name}: {exc!r}")
+        if phase == "imagepull":
+            self._delete_stuck_job(name)
         # Clean up before resolving so a caller woken by the future sees a clean store.
         self._cleanup(name, keep)
         try:
@@ -277,6 +292,15 @@ class Cluster:
         if phase == "imagepull":
             return None, ImagePullError(name, image=image)
         return None, PodFailed(name, reason=self._failure_reason(name), logs=self._safe_logs(name))
+
+    def _delete_stuck_job(self, name: str) -> None:
+        """A job stuck in ImagePullBackOff never finishes, so its TTL never fires."""
+        try:
+            self.batch.delete_namespaced_job(
+                name=name, namespace=self.config.namespace, propagation_policy="Background"
+            )
+        except Exception:  # noqa: BLE001 — best-effort; the future still resolves
+            log.exception("could not delete image-pull-stuck job %s", name)
 
     def _cleanup(self, name: str, keep: bool) -> None:
         keys = [f"{self.workflow_id}/{name}/payload"]

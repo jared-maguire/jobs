@@ -1,8 +1,10 @@
 import queue
-from typing import Iterator
+from types import SimpleNamespace
+from typing import Any, Iterator
 
 import pytest
 from kubernetes import client
+from kubernetes.client import ApiException
 
 from sk8s.cluster import Cluster
 from sk8s.config import Config
@@ -10,6 +12,16 @@ from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout, PodFailed, Sto
 from sk8s.store.local import LocalStore
 from sk8s.watch import JobEvent
 from tests.fakes import FakeBatchV1, FakeCoreV1
+
+
+_OPEN: "list[Cluster]" = []
+
+
+@pytest.fixture(autouse=True)
+def _close_clusters() -> Iterator[None]:
+    yield
+    while _OPEN:
+        _OPEN.pop().close()
 
 
 class Harness:
@@ -24,6 +36,7 @@ class Harness:
             cfg, batch_api=self.batch, core_api=FakeCoreV1(), store=self.store,
             watcher_events=self._event_iter,
         )
+        _OPEN.append(self.cluster)
 
     def _event_iter(self) -> Iterator[JobEvent]:
         while True:
@@ -70,7 +83,8 @@ def test_failed_job_reraises_user_exception(tmp_path) -> None:  # type: ignore[n
         fut.result(timeout=10)
 
 
-def test_failed_job_without_result_raises_podfailed(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_failed_job_without_result_raises_podfailed(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("sk8s.cluster._RETRY_DELAY", 0.0)
     h = Harness(tmp_path)
     fut = h.cluster.submit(lambda: 1)
     h.events.put((fut.job_name, "failed"))  # no worker ran: infra failure
@@ -185,12 +199,20 @@ def test_delete_failure_does_not_lose_result(tmp_path) -> None:  # type: ignore[
     assert fut.result(timeout=10) == "ok"
 
 
-def test_terminal_event_after_cancel_is_harmless(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_terminal_event_after_cancel_is_harmless(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import concurrent.futures
+
+    monkeypatch.setattr("sk8s.cluster._RETRY_DELAY", 0.0)
     h = Harness(tmp_path)
     fut = h.cluster.submit(lambda: 1)
-    assert fut.cancel() is True
-    h.cluster._on_terminal(fut.job_name, "succeeded")  # future already cancelled
-    assert fut.cancelled() or fut.done()
+    # Cancel the future without going through the backend, so the cluster's entry
+    # is still present when the terminal event arrives: set_result hits
+    # InvalidStateError, which must be swallowed.
+    assert concurrent.futures.Future.cancel(fut) is True
+    assert fut.job_name in h.cluster._futures
+    h.cluster._on_terminal(fut.job_name, "succeeded")  # must not raise
+    assert fut.cancelled()
+    assert fut.job_name not in h.cluster._futures
 
 
 def test_result_late_visible_is_retried(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -291,3 +313,118 @@ def test_phase_respects_backoff_limit(tmp_path) -> None:  # type: ignore[no-unty
     got = dict(next(gen) for _ in range(2))
     gen.close()
     assert got == {retrying.job_name: "active", exhausted.job_name: "failed"}
+
+
+# --- fix round 1 -----------------------------------------------------------------
+
+
+class _RaisingCore(FakeCoreV1):
+    def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
+        raise ApiException(status=403, reason="Forbidden")
+
+
+def test_pull_probe_failure_does_not_wedge_event_stream(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    h.cluster._core = _RaisingCore()
+    fut = h.cluster.submit(lambda: 1)
+    _set_status(h, fut.job_name, succeeded=1)
+    job = h.batch.jobs[("ns1", fut.job_name)]
+    watch_opened: list[bool] = []
+
+    class FakeWatch:
+        def stream(self, *_a: Any, **_kw: Any) -> Iterator[dict[str, Any]]:
+            watch_opened.append(True)
+            yield {"object": job}
+
+    monkeypatch.setattr("kubernetes.watch.Watch", FakeWatch)
+    events = list(h.cluster._k8s_events())
+    # list replay, then (probe failed harmlessly) the watch opened and delivered
+    assert events == [(fut.job_name, "succeeded"), (fut.job_name, "succeeded")]
+    assert watch_opened == [True]
+
+
+def test_future_resolves_when_pull_probe_raises(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    h.cluster._core = _RaisingCore()
+    fut = h.cluster.submit(lambda x: x + 1, 1)
+    import sk8s.worker as worker
+
+    job = h.batch.jobs[("ns1", fut.job_name)]
+    env = {e.name: e.value for e in job.spec.template.spec.containers[0].env}
+    env["SK8S_STORE"] = f"local:{h.store.root}"
+    worker.main(env)
+    _set_status(h, fut.job_name, succeeded=1)
+    gen = h.cluster._k8s_events()
+    h.events.put(next(gen))
+    gen.close()
+    assert fut.result(timeout=10) == 2
+
+
+def test_pull_probe_tolerates_missing_container_state(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 1)
+
+    class Core(FakeCoreV1):
+        def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
+            cs = SimpleNamespace(state=None)
+            pod = SimpleNamespace(
+                metadata=SimpleNamespace(labels={"job-name": fut.job_name}),
+                status=SimpleNamespace(container_statuses=[cs]),
+            )
+            return SimpleNamespace(items=[pod])
+
+    h.cluster._core = Core()
+    assert list(h.cluster._pull_failures()) == []
+
+
+def test_pull_probe_detects_image_pull_backoff(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 1)
+
+    class Core(FakeCoreV1):
+        def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
+            waiting = SimpleNamespace(reason="ImagePullBackOff")
+            cs = SimpleNamespace(state=SimpleNamespace(waiting=waiting))
+            pod = SimpleNamespace(
+                metadata=SimpleNamespace(labels={"job-name": fut.job_name}),
+                status=SimpleNamespace(container_statuses=[cs]),
+            )
+            return SimpleNamespace(items=[pod])
+
+    h.cluster._core = Core()
+    assert list(h.cluster._pull_failures()) == [(fut.job_name, "imagepull")]
+
+
+def test_imagepull_deletes_stuck_job(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 1, image="nope:1")
+    h.events.put((fut.job_name, "imagepull"))
+    with pytest.raises(ImagePullError):
+        fut.result(timeout=10)
+    assert fut.job_name in h.batch.deleted
+
+
+def test_imagepull_delete_failure_still_resolves(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+
+    def bad_delete(**_: Any) -> None:
+        raise ApiException(status=500, reason="nope")
+
+    h.batch.delete_namespaced_job = bad_delete  # type: ignore[method-assign,assignment]
+    fut = h.cluster.submit(lambda: 1, image="nope:1")
+    h.cluster._on_terminal(fut.job_name, "imagepull")  # must not raise
+    assert isinstance(fut.exception(timeout=1), ImagePullError)
+
+
+def test_per_job_namespace_mismatch_rejected(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    with pytest.raises(ValueError, match="later release"):
+        h.cluster.submit(lambda: 1, namespace="other")
+    assert h.batch.jobs == {}  # nothing created
+    assert h.cluster._futures == {}
+
+
+def test_per_job_namespace_same_value_accepted(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 1, namespace="ns1")
+    assert ("ns1", fut.job_name) in h.batch.jobs
