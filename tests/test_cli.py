@@ -347,10 +347,247 @@ def test_config_unknown_provider_exit_1(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], env: Path
 ) -> None:
     _fakes(monkeypatch)
-    assert cli.run(["config", "--provider", "gke", "--namespace", NS]) == 1
+    assert cli.run(["config", "--provider", "eks", "--namespace", NS]) == 1
     err = capsys.readouterr().err
-    assert "gke" in err and "tabled" in err and "Traceback" not in err
+    assert "eks" in err and "tabled" in err and "Traceback" not in err
     assert not env.exists()
+
+
+# --- config --provider gke (cloud plan) --------------------------------------------------------
+
+PROJ, REGION, BUCKET = "my-proj", "us-central1", "my-bucket"
+STORE = f"gs://{BUCKET}/sk8s/"
+EMAIL = f"sk8s-worker@{PROJ}.iam.gserviceaccount.com"
+WI_ANN = "iam.gke.io/gcp-service-account"
+GKE = ["config", "--provider", "gke", "--namespace", NS, "--store", STORE,
+       "--project", PROJ, "--region", REGION]
+
+DESCRIBE = ("gcloud", "iam", "service-accounts", "describe", EMAIL, "--project", PROJ)
+CREATE = ("gcloud", "iam", "service-accounts", "create", "sk8s-worker",
+          "--project", PROJ, "--display-name", "sk8s worker")
+BUCKET_BIND = ("gcloud", "storage", "buckets", "add-iam-policy-binding", f"gs://{BUCKET}",
+               "--member", f"serviceAccount:{EMAIL}", "--role", "roles/storage.objectAdmin",
+               "--project", PROJ)
+WI_BIND = ("gcloud", "iam", "service-accounts", "add-iam-policy-binding", EMAIL,
+           "--role", "roles/iam.workloadIdentityUser",
+           "--member", f"serviceAccount:{PROJ}.svc.id.goog[{NS}/sk8s]", "--project", PROJ)
+
+
+class Runner:
+    """Stand-in for cli._run_argv: records (argv, quiet), exit codes by argv prefix."""
+
+    def __init__(self, codes: dict[tuple[str, ...], int] | None = None) -> None:
+        self.calls: list[tuple[tuple[str, ...], bool]] = []
+        self.codes = codes or {}
+
+    def __call__(self, argv: Any, *, quiet: bool = False) -> int:
+        self.calls.append((tuple(argv), quiet))
+        return self.codes.get(tuple(argv), 0)
+
+    @property
+    def argvs(self) -> list[tuple[str, ...]]:
+        return [a for a, _ in self.calls]
+
+
+@pytest.fixture
+def runner(monkeypatch: pytest.MonkeyPatch) -> Runner:
+    r = Runner()
+    monkeypatch.setattr(cli, "_run_argv", r)
+    return r
+
+
+def test_gke_dry_run_prints_the_k8s_plan_and_the_exact_cloud_plan_and_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], env: Path, runner: Runner
+) -> None:
+    core, _, rbac = _fakes(monkeypatch)
+    monkeypatch.setattr(profile_mod, "apply", lambda *a, **k: pytest.fail("apply called"))
+    assert cli.run([*GKE, "--gsa", "sk8s-worker", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert f"annotate ServiceAccount sk8s in {NS}: {WI_ANN}={EMAIL}" in lines
+    import shlex
+
+    for argv in (CREATE, BUCKET_BIND, WI_BIND):  # printed as the exact argv, shell-quoted
+        assert shlex.join(argv) in lines
+    assert "# note: Artifact Registry repo us-central1-docker.pkg.dev/my-proj/sk8s/" in out
+    assert "roles/artifactregistry.reader" in out
+    # ordering: the GSA exists before it is bound
+    assert lines.index(shlex.join(CREATE)) < lines.index(shlex.join(BUCKET_BIND)) < lines.index(
+        shlex.join(WI_BIND)
+    )
+    assert runner.calls == [] and core.actions == [] and rbac.actions == [] and not env.exists()
+
+
+def test_gke_without_apply_cloud_prints_the_plan_applies_k8s_and_runs_no_gcloud(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], env: Path, runner: Runner
+) -> None:
+    core, _, rbac = _fakes(monkeypatch)
+    assert cli.run([*GKE, "--gsa", EMAIL]) == 0
+    out = capsys.readouterr().out
+    assert "not run" in out and "--apply-cloud" in out and "service-accounts create" in out
+    assert runner.calls == []
+    sa = core.service_accounts[(NS, "sk8s")]
+    assert sa.metadata.annotations == {WI_ANN: EMAIL}
+    assert tomllib.loads(env.read_text()) == {
+        "namespace": NS, "store": STORE, "image_prefix": "us-central1-docker.pkg.dev/my-proj/sk8s/",
+    }
+
+
+def test_gke_apply_cloud_runs_each_group_as_argv_in_order_then_applies_k8s(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], env: Path, runner: Runner
+) -> None:
+    core, _, rbac = _fakes(monkeypatch)
+    runner.codes[DESCRIBE] = 1  # GSA does not exist yet
+    assert cli.run([*GKE, "--gsa", "sk8s-worker", "--apply-cloud"]) == 0
+    assert runner.calls == [(DESCRIBE, True), (CREATE, False), (BUCKET_BIND, False), (WI_BIND, False)]
+    assert all(isinstance(a, str) for argv in runner.argvs for a in argv)
+    assert core.service_accounts[(NS, "sk8s")].metadata.annotations == {WI_ANN: EMAIL}
+    assert env.exists()
+    assert "note:" in capsys.readouterr().out  # the AR note is still shown, never executed
+
+
+def test_gke_apply_cloud_skips_creating_an_existing_gsa_but_still_binds(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], runner: Runner
+) -> None:
+    _fakes(monkeypatch)
+    runner.codes[DESCRIBE] = 0
+    assert cli.run([*GKE, "--gsa", EMAIL, "--apply-cloud"]) == 0
+    assert runner.argvs == [DESCRIBE, BUCKET_BIND, WI_BIND]
+    assert "already done" in capsys.readouterr().out
+
+
+def test_gke_apply_cloud_failure_is_exit_1_and_applies_nothing_else(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], env: Path, runner: Runner
+) -> None:
+    core, _, rbac = _fakes(monkeypatch)
+    runner.codes[DESCRIBE] = 1
+    runner.codes[BUCKET_BIND] = 1
+    assert cli.run([*GKE, "--gsa", EMAIL, "--apply-cloud"]) == 1
+    err = capsys.readouterr().err
+    assert "gcloud step failed" in err and "buckets add-iam-policy-binding" in err
+    assert "Traceback" not in err
+    assert runner.argvs == [DESCRIBE, CREATE, BUCKET_BIND]  # stopped at the failure
+    assert core.actions == [] and rbac.actions == [] and not env.exists()
+
+
+def test_gke_bucket_role_is_configurable(monkeypatch: pytest.MonkeyPatch, runner: Runner) -> None:
+    _fakes(monkeypatch)
+    cli.run([*GKE, "--gsa", EMAIL, "--apply-cloud", "--bucket-role", "roles/storage.objectViewer"])
+    bind = next(a for a in runner.argvs if "buckets" in a)
+    assert bind[bind.index("--role") + 1] == "roles/storage.objectViewer"
+
+
+def test_gke_non_gs_store_plans_no_bucket_binding(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], runner: Runner
+) -> None:
+    _fakes(monkeypatch)
+    i = GKE.index("--store")
+    cli.run([*GKE[:i], "--store", "k8s", *GKE[i + 2:], "--gsa", EMAIL, "--dry-run"])
+    out = capsys.readouterr().out
+    assert "buckets" not in out and "is not gs://" in out
+
+
+def test_gke_without_gsa_has_no_gcloud_commands_and_no_annotation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], runner: Runner
+) -> None:
+    core, _, _ = _fakes(monkeypatch)
+    assert cli.run(GKE) == 0
+    assert runner.calls == [] and "gcloud iam" not in capsys.readouterr().out
+    assert not core.service_accounts[(NS, "sk8s")].metadata.annotations
+
+
+def test_gke_repo_flag_flows_to_the_image_prefix(
+    monkeypatch: pytest.MonkeyPatch, env: Path, runner: Runner
+) -> None:
+    _fakes(monkeypatch)
+    assert cli.run([*GKE, "--repo", "images"]) == 0
+    assert tomllib.loads(env.read_text())["image_prefix"].endswith("/my-proj/images/")
+
+
+def test_gke_second_apply_converges(monkeypatch: pytest.MonkeyPatch, runner: Runner) -> None:
+    core, _, rbac = _fakes(monkeypatch)
+    cli.run([*GKE, "--gsa", EMAIL])
+    n = (len(core.actions), len(rbac.actions))
+    cli.run([*GKE, "--gsa", EMAIL])
+    assert (len(core.actions), len(rbac.actions)) == n
+
+
+@pytest.mark.parametrize("drop", ["--project", "--region"])
+def test_gke_requires_project_and_region_flags(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], drop: str, runner: Runner
+) -> None:
+    _fakes(monkeypatch)
+    i = GKE.index(drop)
+    assert cli.run(GKE[:i] + GKE[i + 2:]) == 1
+    err = capsys.readouterr().err
+    assert "--project and --region" in err and "Traceback" not in err
+
+
+def test_gke_apply_cloud_requires_gsa(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], runner: Runner
+) -> None:
+    _fakes(monkeypatch)
+    assert cli.run([*GKE, "--apply-cloud"]) == 1
+    assert "--gsa" in capsys.readouterr().err and runner.calls == []
+
+
+@pytest.mark.parametrize("flag", [["--project", "p"], ["--gsa", "g"], ["--apply-cloud"], ["--repo", "r"]])
+def test_gke_options_are_rejected_for_other_providers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], flag: list[str],
+    runner: Runner,
+) -> None:
+    _fakes(monkeypatch)
+    assert cli.run(["config", "--provider", "generic", "--namespace", NS, *flag]) == 1
+    assert "GKE options" in capsys.readouterr().err and runner.calls == []
+
+
+def test_gke_is_used_when_detected_from_the_context(
+    monkeypatch: pytest.MonkeyPatch, runner: Runner
+) -> None:
+    core, _, _ = _fakes(monkeypatch)
+    monkeypatch.setattr(profile_mod, "detect_provider", lambda context=None: "gke")
+    assert cli.run(["config", "--namespace", NS, "--project", PROJ, "--region", REGION,
+                    "--gsa", EMAIL]) == 0
+    assert core.service_accounts[(NS, "sk8s")].metadata.annotations == {WI_ANN: EMAIL}
+
+
+def test_config_help_documents_the_gke_options(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.run(["config", "--help"])
+    out = capsys.readouterr().out
+    for flag in ("--project", "--region", "--repo", "--gsa", "--bucket-role", "--apply-cloud"):
+        assert flag in out
+
+
+def test_gcloud_helpers() -> None:
+    assert cli.gsa_email("w", "p") == "w@p.iam.gserviceaccount.com"
+    assert cli.gsa_email("w@x.iam.gserviceaccount.com", "p") == "w@x.iam.gserviceaccount.com"
+    assert cli.bucket_of("gs://b/p/") == "b" and cli.bucket_of("gs://b") == "b"
+    assert cli.bucket_of("s3://b/p") is None and cli.bucket_of("gs://") is None
+
+
+def test_run_argv_is_argv_only_never_a_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_run(argv: Any, **kw: Any) -> Any:
+        seen["argv"], seen["kw"] = argv, kw
+        return SimpleNamespace(returncode=3)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert cli._run_argv(["gcloud", "a; rm -rf /", "b"]) == 3
+    assert seen["argv"] == ["gcloud", "a; rm -rf /", "b"]
+    assert not seen["kw"].get("shell") and seen["kw"]["stdout"] is None
+    cli._run_argv(["gcloud", "x"], quiet=True)
+    assert seen["kw"]["stdout"] is subprocess.DEVNULL and seen["kw"]["stderr"] is subprocess.DEVNULL
+
+
+def test_run_argv_missing_gcloud_is_a_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(*a: Any, **k: Any) -> Any:
+        raise FileNotFoundError("gcloud")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    with pytest.raises(Sk8sError, match="gcloud not found"):
+        cli._run_argv(["gcloud", "x"])
 
 
 def test_config_apply_failure_writes_no_file(
@@ -450,6 +687,27 @@ def test_doctor_uses_configured_namespace_and_store(monkeypatch: pytest.MonkeyPa
     seen = _doctor_with(monkeypatch, [Check("x", True)])
     cli.run(["doctor"])
     assert (seen[0].namespace, seen[0].store, seen[0].image_prefix) == ("cfg-ns", "local:/s", "reg/")
+
+
+def test_doctor_on_a_gke_context_builds_the_gke_profile_from_the_context_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(profile_mod, "detect_provider", lambda context=None: "gke")
+    monkeypatch.setattr(profile_mod, "active_context", lambda: "gke_my-proj_us-central1-a_c1")
+    seen = _doctor_with(monkeypatch, [Check("x", True)])
+    assert cli.run(["doctor"]) == 0
+    assert seen[0].rwx_storage_class == "standard-rwx"
+    assert seen[0].image_prefix == "us-central1-docker.pkg.dev/my-proj/sk8s/"
+
+
+def test_doctor_does_not_crash_when_gke_context_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(profile_mod, "detect_provider", lambda context=None: "gke")
+    monkeypatch.setattr(profile_mod, "active_context", lambda: None)
+    seen = _doctor_with(monkeypatch, [Check("x", True)])
+    assert cli.run(["doctor"]) == 0
+    assert seen[0].rwx_storage_class is None
 
 
 def test_doctor_builds_store_with_configured_endpoint_and_injects_it(

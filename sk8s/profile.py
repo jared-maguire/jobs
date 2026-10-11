@@ -1,13 +1,14 @@
 """Declarative cluster profile: what a namespace needs so sk8s can run there, plus plan/apply.
 
 Provider adapters supply PARAMETERS only (``profile_for``); ``plan`` and ``apply`` are shared.
-Adding a cloud provider later means registering one more adapter in ``_ADAPTERS`` (and removing
-it from ``TABLED_PROVIDERS``); nothing in plan/apply changes.
+Adding a cloud provider means registering one more adapter in ``_ADAPTERS`` (and removing it
+from ``TABLED_PROVIDERS``); nothing in plan/apply changes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from kubernetes import client, config
 from kubernetes.client import ApiException
@@ -16,7 +17,9 @@ from sk8s import k8s
 
 VERBS: tuple[str, ...] = ("get", "list", "watch", "create", "delete", "patch")
 LOCAL_CONTEXTS: frozenset[str] = frozenset({"minikube", "docker-desktop"})
-TABLED_PROVIDERS: tuple[str, ...] = ("gke", "eks")
+TABLED_PROVIDERS: tuple[str, ...] = ("eks",)
+GKE_WI_ANNOTATION = "iam.gke.io/gcp-service-account"
+_GKE_CONTEXT = re.compile(r"gke_(?P<project>[^_]+)_(?P<location>[^_]+)_(?P<cluster>.+)")
 MANAGED_BY = {"app.kubernetes.io/managed-by": "sk8s"}
 
 
@@ -47,6 +50,9 @@ class ClusterProfile:
     rules: tuple[PolicyRule, ...] = ROLE_RULES
     rwx_storage_class: str | None = None  # None for local
     image_prefix: str = ""
+    # ServiceAccount annotations apply() keeps present (e.g. GKE Workload Identity). Only the
+    # declared keys are managed; others on the live object are left alone.
+    sa_annotations: dict[str, str] = field(default_factory=dict)
 
     @property
     def role_name(self) -> str:
@@ -56,11 +62,11 @@ class ClusterProfile:
 
 # --- provider adapters -------------------------------------------------------------------------
 
-Adapter = Callable[[str, str, str, str | None], ClusterProfile]
+Adapter = Callable[..., ClusterProfile]
 
 
 def _local(
-    namespace: str, store: str, image_prefix: str, rwx_storage_class: str | None
+    *, namespace: str, store: str, image_prefix: str, rwx_storage_class: str | None, **_: Any
 ) -> ClusterProfile:
     if rwx_storage_class is not None:
         raise ValueError("provider 'local' has no RWX storage class; use provider 'generic'")
@@ -68,7 +74,7 @@ def _local(
 
 
 def _generic(
-    namespace: str, store: str, image_prefix: str, rwx_storage_class: str | None
+    *, namespace: str, store: str, image_prefix: str, rwx_storage_class: str | None, **_: Any
 ) -> ClusterProfile:
     return ClusterProfile(
         namespace=namespace,
@@ -78,7 +84,34 @@ def _generic(
     )
 
 
-_ADAPTERS: dict[str, Adapter] = {"local": _local, "generic": _generic}
+def _gke(
+    *,
+    namespace: str,
+    store: str,
+    image_prefix: str,
+    rwx_storage_class: str | None,
+    project: str | None,
+    region: str | None,
+    repo: str,
+    gsa: str | None,
+) -> ClusterProfile:
+    if not project or not region:
+        raise ValueError("provider 'gke' requires project and region")
+    if image_prefix or rwx_storage_class is not None:
+        raise ValueError(
+            "provider 'gke' derives image_prefix (Artifact Registry) and rwx_storage_class "
+            "(standard-rwx) itself; do not pass them"
+        )
+    return ClusterProfile(
+        namespace=namespace,
+        store=store,
+        image_prefix=f"{region}-docker.pkg.dev/{project}/{repo}/",
+        rwx_storage_class="standard-rwx",
+        sa_annotations={GKE_WI_ANNOTATION: gsa} if gsa else {},
+    )
+
+
+_ADAPTERS: dict[str, Adapter] = {"local": _local, "generic": _generic, "gke": _gke}
 
 
 def profile_for(
@@ -88,29 +121,67 @@ def profile_for(
     store: str,
     image_prefix: str = "",
     rwx_storage_class: str | None = None,
+    project: str | None = None,
+    region: str | None = None,
+    repo: str = "sk8s",
+    gsa: str | None = None,
 ) -> ClusterProfile:
     try:
         adapter = _ADAPTERS[provider]
     except KeyError:
+        supported = ", ".join(_ADAPTERS)
+        tabled = f" ({', '.join(TABLED_PROVIDERS)} are tabled)" if TABLED_PROVIDERS else ""
+        raise ValueError(f"unknown provider {provider!r}; supported: {supported}{tabled}") from None
+    if provider != "gke" and (project or region or gsa or repo != "sk8s"):
         raise ValueError(
-            f"unknown provider {provider!r}; supported: {', '.join(_ADAPTERS)} "
-            f"({', '.join(TABLED_PROVIDERS)} are tabled)"
-        ) from None
-    return adapter(namespace, store, image_prefix, rwx_storage_class)
+            f"project/region/repo/gsa are GKE parameters; provider {provider!r} does not take them"
+        )
+    return adapter(
+        namespace=namespace,
+        store=store,
+        image_prefix=image_prefix,
+        rwx_storage_class=rwx_storage_class,
+        project=project,
+        region=region,
+        repo=repo,
+        gsa=gsa,
+    )
+
+
+def gke_context_parts(context: str) -> tuple[str, str, str] | None:
+    """(project, location, cluster) of a ``gke_<project>_<location>_<name>`` context, else None."""
+    m = _GKE_CONTEXT.fullmatch(context)
+    return (m["project"], m["location"], m["cluster"]) if m else None
+
+
+def gke_region(location: str) -> str:
+    """A GKE location is a region (us-central1) or a zone (us-central1-a); return the region."""
+    return re.sub(r"-[a-z]$", "", location)
+
+
+def active_context() -> str | None:
+    """The active kube context's name, or None when it cannot be read."""
+    try:
+        _, active = config.list_kube_config_contexts()  # type: ignore[no-untyped-call]
+        name = active.get("name")
+        return str(name) if name else None
+    except Exception:
+        return None
 
 
 def detect_provider(context: str | None = None) -> str:
-    """'local' for minikube/docker-desktop kube contexts, else 'generic'.
+    """'local' for minikube/docker-desktop, 'gke' for ``gke_<project>_<location>_<name>``, else
+    'generic'.
 
     With no argument, inspects the active kube context (any failure to read it means 'generic').
     """
     if context is None:
-        try:
-            _, active = config.list_kube_config_contexts()  # type: ignore[no-untyped-call]
-            context = active.get("name")
-        except Exception:
+        context = active_context()
+        if context is None:
             return "generic"
-    return "local" if context in LOCAL_CONTEXTS else "generic"
+    if context in LOCAL_CONTEXTS:
+        return "local"
+    return "gke" if gke_context_parts(context) else "generic"
 
 
 # --- plan --------------------------------------------------------------------------------------
@@ -123,6 +194,8 @@ def plan(profile: ClusterProfile) -> list[str]:
         f"ensure Namespace {ns}",
         f"ensure ServiceAccount {sa} in {ns}",
     ]
+    for key, value in sorted(profile.sa_annotations.items()):
+        lines.append(f"annotate ServiceAccount {sa} in {ns}: {key}={value}")
     for r in profile.rules:
         groups = ",".join(g or "core" for g in r.api_groups)
         lines.append(
@@ -235,6 +308,40 @@ def _same_role_ref(a: client.V1RoleBinding, b: client.V1RoleBinding) -> bool:
     return (ra.kind, ra.name, ra.api_group) == (rb.kind, rb.name, rb.api_group)
 
 
+def _ensure_service_account(core: client.CoreV1Api, profile: ClusterProfile) -> str:
+    """Create the ServiceAccount if missing; otherwise only patch in the profile's annotations.
+
+    Never replaced or recreated (that would drop its secrets); annotations the profile does not
+    name are left alone.
+    """
+    sa, ns = profile.service_account, profile.namespace
+    try:
+        have = core.read_namespaced_service_account(name=sa, namespace=ns)
+    except ApiException as e:
+        if _status(e) != 404:
+            raise
+        meta = _meta(sa, ns)
+        if profile.sa_annotations:
+            meta.annotations = dict(profile.sa_annotations)
+        try:
+            core.create_namespaced_service_account(
+                namespace=ns, body=client.V1ServiceAccount(metadata=meta)
+            )
+            return f"ServiceAccount {sa}: created"
+        except ApiException as e2:
+            if _status(e2) != 409:
+                raise
+            have = core.read_namespaced_service_account(name=sa, namespace=ns)
+    live = (have.metadata.annotations if have.metadata is not None else None) or {}
+    drift = {k: v for k, v in profile.sa_annotations.items() if live.get(k) != v}
+    if not drift:
+        return f"ServiceAccount {sa}: unchanged"
+    core.patch_namespaced_service_account(
+        name=sa, namespace=ns, body={"metadata": {"annotations": drift}}
+    )
+    return f"ServiceAccount {sa}: annotated"
+
+
 def apply(
     profile: ClusterProfile,
     *,
@@ -266,23 +373,7 @@ def apply(
                 raise
             out.append(f"Namespace {ns}: exists")
 
-    # ServiceAccount: nothing declarative beyond its existence (replacing would drop its secrets).
-    try:
-        core.read_namespaced_service_account(name=sa, namespace=ns)
-        out.append(f"ServiceAccount {sa}: unchanged")
-    except ApiException as e:
-        if _status(e) != 404:
-            raise
-        try:
-            core.create_namespaced_service_account(
-                namespace=ns,
-                body=client.V1ServiceAccount(metadata=_meta(sa, ns)),
-            )
-            out.append(f"ServiceAccount {sa}: created")
-        except ApiException as e2:
-            if _status(e2) != 409:
-                raise
-            out.append(f"ServiceAccount {sa}: unchanged")
+    out.append(_ensure_service_account(core, profile))
 
     # Role: replace when the rule set has drifted (e.g. a verb was removed).
     want_role = desired_role(profile)

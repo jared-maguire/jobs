@@ -206,7 +206,7 @@ installed by `pip`. Flags are double-dashed (`--dry-run`, not `-dryrun`).
 | `python -m sk8s config-cluster -dryrun` | `sk8s config --dry-run` |
 | `python -m sk8s config-cluster -apply` / `config-local` | `sk8s config [--namespace NS]` |
 | `python -m sk8s config-cluster -check` | `sk8s doctor` |
-| `python -m sk8s config-gke ...`, `config-eks ...` | `sk8s config --provider generic` creates the namespace and RBAC on any cluster. GKE and EKS profiles are not available yet (`--provider gke` is rejected as "tabled"); cloud guides are forthcoming. |
+| `python -m sk8s config-gke ...`, `config-eks ...` | `sk8s config --provider generic` creates the namespace and RBAC on any cluster. On GKE use `sk8s config --provider gke --project P --region R --gsa NAME` (prints the `gcloud` Workload Identity plan; `--apply-cloud` runs it). An EKS profile is not available yet (`--provider eks` is rejected as "tabled"); cloud guides are forthcoming. |
 | `python -m sk8s containers [-push] [-dev_mode]` | `sk8s image build --tag T --pip P [--push]` for custom images; `docker/Dockerfile.dev` for development builds |
 | `python -m sk8s clean_namespace` | `sk8s clean [--older-than 7d]`, `sk8s kill WORKFLOW` |
 | `python -m sk8s shell -image I -volumes ... -privileged ...` | `sk8s shell [--image I]` (the volume, privileged and service-account flags are gone) |
@@ -224,4 +224,4 @@ New in v2: `sk8s workflows`, `sk8s logs`, `sk8s kill`, `sk8s clean`, `sk8s docto
   `serve()` your own function.
 - The terminal dashboard and `kubewatch`.
 - Job and service YAML templates (`job_template=`, `template=`) and `dryrun` output.
-- Cloud-specific setup code for GKE and EKS (tabled; see the command-line table above).
+- Cloud-specific setup code for GKE and EKS (GKE is now `sk8s config --provider gke`; EKS is tabled; see the command-line table above).

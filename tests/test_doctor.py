@@ -4,8 +4,15 @@ import pytest
 from kubernetes import client
 from kubernetes.client import ApiException
 
-from sk8s.doctor import Check, doctor
-from sk8s.errors import BlobNotFound
+from sk8s.doctor import (
+    WORKER_PROBE_TIMEOUT,
+    Check,
+    StoreProbeError,
+    doctor,
+    probe_store_in_pod,
+    submit_probe_job,
+)
+from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout
 from sk8s.profile import ClusterProfile, apply, profile_for
 from sk8s.store.base import BlobStore
 from sk8s.store.local import LocalStore
@@ -426,3 +433,220 @@ def test_every_check_failing_still_returns_every_check() -> None:
     checks = _run(p, FakeCoreV1(), FakeRbacV1(), store, FakeStorageV1())
     assert len(checks) == 6
     assert [c.ok for n, c in checks.items() if n != "cluster reachable"] == [False] * 5
+
+
+# --- worker identity (in-cluster store probe) --------------------------------------------------
+
+WORKER = "worker identity (in-cluster store probe)"
+
+
+class Submitter:
+    """Stub for the job-submission seam: records calls, returns or raises as told."""
+
+    def __init__(self, result: Any = "ok", raises: Exception | None = None) -> None:
+        self.calls: list[tuple[Any, ClusterProfile]] = []
+        self.result, self.raises = result, raises
+
+    def __call__(self, fn: Any, profile: ClusterProfile) -> Any:
+        self.calls.append((fn, profile))
+        if self.raises:
+            raise self.raises
+        return self.result
+
+
+def _gs_profile(**kw: Any) -> ClusterProfile:
+    return profile_for("generic", namespace="team-a", store="gs://bkt/p/", **kw)
+
+
+def _doctor_gs(
+    submit: Any, p: ClusterProfile | None = None, core: Any = None, rbac: Any = None
+) -> dict[str, Check]:
+    p = p or _gs_profile()
+    if core is None:
+        core, rbac = _converged(p)
+    checks = doctor(
+        p, core_api=core, rbac_api=rbac, batch_api=FakeBatchV1(),  # type: ignore[arg-type]
+        store=MemStore(), submit_probe=submit,
+    )
+    return {c.name: c for c in checks}
+
+
+def test_worker_probe_appears_and_passes_for_a_reachable_gs_store() -> None:
+    sub = Submitter()
+    checks = _doctor_gs(sub)
+    assert checks[WORKER].ok and checks[WORKER].fix_hint == ""
+    assert all(c.ok for c in checks.values())
+    assert len(sub.calls) == 1 and sub.calls[0][1].store == "gs://bkt/p/"
+    assert sub.calls[0][0] is probe_store_in_pod  # the job runs the probe function itself
+
+
+@pytest.mark.parametrize("store", ["k8s", "s3://b/p", "local:/tmp/x"])
+def test_worker_probe_is_absent_not_failed_for_other_stores(store: str) -> None:
+    sub = Submitter()
+    p = profile_for("generic", namespace="team-a", store=store)
+    core, rbac = _converged(p)
+    checks = doctor(
+        p, core_api=core, rbac_api=rbac, batch_api=FakeBatchV1(),  # type: ignore[arg-type]
+        store=MemStore(), submit_probe=sub,
+    )
+    assert WORKER not in {c.name for c in checks}
+    assert all(c.ok for c in checks)
+    assert sub.calls == []
+
+
+def test_worker_probe_is_absent_for_the_local_provider() -> None:
+    sub = Submitter()
+    p = profile_for("local", namespace="team-a", store="local:/tmp/x")
+    core, rbac = _converged(p)
+    checks = doctor(
+        p, core_api=core, rbac_api=rbac, batch_api=FakeBatchV1(),  # type: ignore[arg-type]
+        store=MemStore(), submit_probe=sub,
+    )
+    assert WORKER not in {c.name for c in checks} and sub.calls == []
+
+
+def test_worker_probe_is_absent_when_the_cluster_is_unreachable() -> None:
+    sub = Submitter()
+    checks = _doctor_gs(sub, core=_Down(), rbac=_Down())
+    assert WORKER not in checks and sub.calls == []
+    assert not checks["cluster reachable"].ok
+
+
+def test_worker_probe_failure_names_workload_identity_first() -> None:
+    sub = Submitter(raises=RuntimeError("403 caller does not have storage.objects.create"))
+    c = _doctor_gs(sub)[WORKER]
+    assert not c.ok
+    assert "Workload Identity" in c.fix_hint
+    assert c.fix_hint.index("Workload Identity") < c.fix_hint.index("403")  # lead with the cause
+    for needle in (
+        "iam.gke.io/gcp-service-account",
+        "roles/iam.workloadIdentityUser",
+        "serviceAccount:<project>.svc.id.goog[team-a/sk8s]",
+        "roles/storage.objectAdmin",
+        "403 caller does not have",
+    ):
+        assert needle in c.fix_hint
+
+
+def test_worker_probe_non_ok_result_fails() -> None:
+    c = _doctor_gs(Submitter(result="nope"))[WORKER]
+    assert not c.ok and "Workload Identity" in c.fix_hint
+
+
+def test_worker_probe_image_pull_failure_gets_an_image_hint() -> None:
+    c = _doctor_gs(Submitter(raises=ImagePullError("doctor-abc", "reg/x:1")))[WORKER]
+    assert not c.ok and "image" in c.fix_hint and "reg/x:1" in c.fix_hint
+    assert "Workload Identity" not in c.fix_hint
+
+
+def test_worker_probe_timeout_gets_a_timeout_hint() -> None:
+    c = _doctor_gs(Submitter(raises=JobTimeout("doctor-abc", 600.0)))[WORKER]
+    assert not c.ok and "600s" in c.fix_hint and "autoscal" in c.fix_hint
+
+
+def test_worker_probe_not_attempted_when_namespace_or_service_account_missing() -> None:
+    sub = Submitter()
+    checks = _doctor_gs(sub, core=FakeCoreV1(), rbac=FakeRbacV1())
+    assert not checks[WORKER].ok and "not attempted" in checks[WORKER].fix_hint
+    assert "sk8s config" in checks[WORKER].fix_hint
+    assert sub.calls == []
+
+
+def test_client_side_store_check_alone_does_not_make_a_gs_store_healthy() -> None:
+    """The client's own store probe passes (MemStore), yet a failing pod still fails doctor."""
+    checks = _doctor_gs(Submitter(raises=RuntimeError("denied")))
+    assert checks["store writable"].ok and not checks[WORKER].ok
+
+
+def test_worker_probe_function_round_trips_and_cleans_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sk8s.store as store_mod
+
+    mem = MemStore()
+    seen: list[str] = []
+
+    def fake_get_store(url: str, **kw: Any) -> BlobStore:
+        seen.append(url)
+        return mem
+
+    monkeypatch.setattr(store_mod, "get_store", fake_get_store)
+    assert probe_store_in_pod("gs://bkt/p/") == "ok"
+    assert seen == ["gs://bkt/p/"]
+    assert mem.blobs == {} and len(mem.deletes) == 1  # put, get, delete, confirmed gone
+
+
+def test_worker_probe_function_raises_when_the_store_denies_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sk8s.store as store_mod
+
+    mem = MemStore()
+    mem.fail_put = PermissionError("403 forbidden")
+    monkeypatch.setattr(store_mod, "get_store", lambda url, **kw: mem)
+    with pytest.raises(StoreProbeError, match="write failed.*403"):
+        probe_store_in_pod("gs://bkt/p/")
+
+
+def test_worker_probe_end_to_end_with_a_seam_that_runs_the_function_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sk8s.store as store_mod
+
+    mem = MemStore()
+    monkeypatch.setattr(store_mod, "get_store", lambda url, **kw: mem)
+    ok = _doctor_gs(lambda fn, p: fn(p.store))[WORKER]
+    assert ok.ok
+    mem.fail_put = PermissionError("403 forbidden")
+    bad = _doctor_gs(lambda fn, p: fn(p.store))[WORKER]
+    assert not bad.ok and "Workload Identity" in bad.fix_hint and "403" in bad.fix_hint
+
+
+def test_default_submission_runs_the_probe_through_a_cluster_with_the_profiles_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sk8s.cluster as cluster_mod
+
+    log: dict[str, Any] = {}
+
+    class FakeCluster:
+        def __init__(self, config: Any) -> None:
+            log["config"] = config
+
+        def run(self, fn: Any, *args: Any, **kw: Any) -> Any:
+            log["run"] = (fn, args, kw)
+            return "ok"
+
+        def close(self) -> None:
+            log["closed"] = True
+
+    monkeypatch.setattr(cluster_mod, "Cluster", FakeCluster)
+    p = profile_for("gke", namespace="team-a", store="gs://bkt/p/", project="pr", region="us-central1")
+    assert submit_probe_job(probe_store_in_pod, p) == "ok"
+    cfg = log["config"]
+    assert (cfg.namespace, cfg.store, cfg.service_account) == ("team-a", "gs://bkt/p/", "sk8s")
+    assert cfg.image_prefix == "us-central1-docker.pkg.dev/pr/sk8s/"
+    fn, args, kw = log["run"]
+    assert fn is probe_store_in_pod and args == ("gs://bkt/p/",)
+    assert kw["timeout"] == WORKER_PROBE_TIMEOUT
+    assert log["closed"] is True
+
+
+def test_default_submission_closes_the_cluster_when_the_probe_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sk8s.cluster as cluster_mod
+
+    closed: list[bool] = []
+
+    class FakeCluster:
+        def __init__(self, config: Any) -> None: ...
+
+        def run(self, fn: Any, *args: Any, **kw: Any) -> Any:
+            raise RuntimeError("boom")
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(cluster_mod, "Cluster", FakeCluster)
+    with pytest.raises(RuntimeError, match="boom"):
+        submit_probe_job(probe_store_in_pod, _gs_profile())
+    assert closed == [True]

@@ -5,6 +5,7 @@ checks that need it report not-ok with a "cluster unreachable" hint instead of c
 """
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
@@ -13,7 +14,7 @@ from kubernetes import client
 from kubernetes.client import ApiException
 
 from sk8s import k8s
-from sk8s.errors import BlobNotFound
+from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout
 from sk8s.profile import ClusterProfile, desired_role, missing_permissions
 from sk8s.store.base import BlobStore
 
@@ -23,6 +24,9 @@ _UNREACHABLE = (
     "cluster unreachable: fix 'cluster reachable' first "
     "(check your kubeconfig/current context and that the cluster is running)"
 )
+
+WORKER_PROBE_NAME = "worker identity (in-cluster store probe)"
+WORKER_PROBE_TIMEOUT = 600.0  # generous: an autoscaling cluster may add a node before the pod runs
 
 T = TypeVar("T")
 
@@ -105,6 +109,64 @@ def _probe_store(store: BlobStore) -> None:
                 pass
 
 
+def probe_store_in_pod(store_url: str) -> str:
+    """The function the worker-identity check runs INSIDE a pod: a store round-trip using the
+    pod's own credentials (for ``gs://``, its Workload Identity). Returns ``"ok"`` or raises."""
+    from sk8s.store import get_store  # lazy: runs in the pod, where only the store is needed
+
+    _probe_store(get_store(store_url))
+    return "ok"
+
+
+# The submission seam: run ``fn(store_url)`` in a pod of the cluster and return its result (or
+# raise what the job raised). Unit tests stub it; the default goes through a real Cluster.
+ProbeSubmit = Callable[[Callable[[str], str], ClusterProfile], str]
+
+
+def submit_probe_job(fn: Callable[[str], str], profile: ClusterProfile) -> str:
+    from sk8s.cluster import Cluster  # lazy: building a Cluster needs a kube config
+    from sk8s.config import load_config
+
+    config = dataclasses.replace(
+        load_config(),
+        namespace=profile.namespace,
+        store=profile.store,
+        service_account=profile.service_account,
+        image_prefix=profile.image_prefix,
+    )
+    cluster = Cluster(config)
+    try:
+        return str(cluster.run(fn, profile.store, timeout=WORKER_PROBE_TIMEOUT, name_prefix="doctor"))
+    finally:
+        cluster.close()
+
+
+def _worker_probe_hint(profile: ClusterProfile, exc: BaseException) -> str:
+    ns, sa = profile.namespace, profile.service_account
+    detail = f"probe error: {_describe(exc)}"
+    if isinstance(exc, ImagePullError):
+        return (
+            f"the probe pod could not pull its image ({detail}); push the worker image to "
+            "your registry (sk8s image build/push) and check that nodes may read it"
+        )
+    if isinstance(exc, JobTimeout):
+        return (
+            f"the probe pod did not finish in {exc.timeout:.0f}s ({detail}); on an autoscaling "
+            f"cluster the first pod can take minutes, so re-run; if it persists, inspect the pod "
+            f"in namespace {ns} (kubectl get pods -n {ns})"
+        )
+    return (
+        f"a pod using ServiceAccount {sa!r} cannot use store {profile.store!r}: this is "
+        "usually Workload Identity misconfiguration. Check (1) the ServiceAccount carries "
+        "annotation iam.gke.io/gcp-service-account=<gsa> (sk8s config --provider gke --gsa ...); "
+        f"(2) that GSA has roles/iam.workloadIdentityUser for member "
+        f"serviceAccount:<project>.svc.id.goog[{ns}/{sa}]; (3) the GSA has "
+        "roles/storage.objectAdmin on the bucket; (4) Workload Identity is enabled on the "
+        "cluster and node pool. 'sk8s config --provider gke ... --apply-cloud' sets up 1-3. "
+        f"({detail})"
+    )
+
+
 def doctor(
     profile: ClusterProfile,
     *,
@@ -114,12 +176,16 @@ def doctor(
     store: BlobStore | None = None,
     storage_api: client.StorageV1Api | None = None,
     store_endpoint: str | None = None,
+    submit_probe: ProbeSubmit | None = None,
 ) -> list[Check]:
     """Run every check for ``profile``; never raises, one failure never hides the rest.
 
     ``batch_api`` is accepted for symmetry with the other injected clients; no current check needs
     it. ``store_endpoint`` is the S3-compatible endpoint used when the store has to be built here
     (an injected ``store`` is used as-is). ``storage_api`` backs the storage-class check, which only runs when the profile names one.
+    ``submit_probe`` is the seam for the worker-identity check (see ``ProbeSubmit``); that check
+    exists only when the cluster is reachable AND the store is ``gs://``, where the client's own
+    credentials say nothing about the pods'.
     """
     ns, sa = profile.namespace, profile.service_account
     core, core_err = _resolve(core_api, k8s.core_api)
@@ -254,4 +320,29 @@ def doctor(
                 raise
 
         checks.append(guarded("storage class exists", storage_check))
+
+    # 7. worker identity: the pods' credentials, not the client's, must reach a gs:// store.
+    if reachable and profile.store.startswith("gs://"):
+        prerequisites = [c for c in checks if c.name in ("namespace exists", "service account exists")]
+
+        def worker_check() -> Check:
+            if not all(c.ok for c in prerequisites):
+                return _fail(
+                    WORKER_PROBE_NAME,
+                    f"not attempted: namespace {ns!r} / ServiceAccount {sa!r} are not ready; "
+                    "fix those checks first (run: sk8s config)",
+                )
+            submit = submit_probe if submit_probe is not None else submit_probe_job
+            try:
+                result = submit(probe_store_in_pod, profile)
+            except Exception as e:
+                return _fail(WORKER_PROBE_NAME, _worker_probe_hint(profile, e))
+            if result != "ok":
+                return _fail(
+                    WORKER_PROBE_NAME,
+                    _worker_probe_hint(profile, RuntimeError(f"probe returned {result!r}")),
+                )
+            return _ok(WORKER_PROBE_NAME)
+
+        checks.append(guarded(WORKER_PROBE_NAME, worker_check))
     return checks
