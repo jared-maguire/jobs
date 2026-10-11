@@ -39,7 +39,7 @@ def submit_workflow(
     """
     _check_cluster(cluster)
     owned = cluster is None
-    c: Cluster = _new_cluster() if owned else cluster
+    c: Cluster = cluster if cluster is not None else _new_cluster()
     wf = new_workflow_id()
     try:
         c.bind_workflow(wf, adopt=False, detached=True)
@@ -73,7 +73,7 @@ def attach(workflow_id: str, cluster: Any | None = None) -> WorkflowHandle:
     """
     _check_cluster(cluster)
     owned = cluster is None
-    c: Cluster = _new_cluster(workflow_id=workflow_id) if owned else cluster
+    c: Cluster = cluster if cluster is not None else _new_cluster(workflow_id=workflow_id)
     try:
         if anchors.get_anchor(c.core, namespace=_ns(c), workflow_id=workflow_id) is None:
             raise Sk8sError(f"unknown workflow {workflow_id}: no anchor in namespace {_ns(c)}")
