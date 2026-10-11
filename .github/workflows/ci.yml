@@ -15,6 +15,31 @@ permissions:
   contents: read
 
 jobs:
+  # Detect whether anything outside docs changed; docs-only PRs skip the
+  # (~5 min) minikube integration job. Fail-safe: any error or ambiguity
+  # (force-push, new branch) counts as a code change and runs everything.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.check.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          set -u
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$BASE" "${{ github.sha }}" | grep -vE '^docs/|\.md$' | grep -q .; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   unit:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -42,6 +67,8 @@ jobs:
 
   # The real integration suite against a live minikube cluster (not mocks).
   integration:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
