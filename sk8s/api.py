@@ -28,6 +28,9 @@ def configure(cluster: Any | None = None, **config_overrides: Any) -> None:
     - ``configure()`` or ``configure(cluster=None)``: full reset. Clears the
       default cluster and all stored overrides.
     - Passing both ``cluster`` and overrides raises ``ValueError``.
+
+    ``submit_workflow``/``attach`` build their own cluster from the stored overrides
+    and deliberately ignore a cluster installed here (see ``sk8s.workflows``).
     """
     global _default_cluster, _config_overrides
     if cluster is not None and config_overrides:
@@ -50,6 +53,14 @@ def _cluster() -> Any:
             from sk8s.cluster import Cluster
             _default_cluster = Cluster(**_config_overrides)
         return _default_cluster
+
+
+def _new_cluster(**extra: Any) -> Any:
+    """A new, unshared Cluster built from the configure() overrides (one per workflow)."""
+    from sk8s.cluster import Cluster
+    with _lock:
+        overrides = {**_config_overrides, **extra}
+    return Cluster(**overrides)
 
 
 def run(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:

@@ -6,6 +6,7 @@ import pytest
 from kubernetes import client
 from kubernetes.client import ApiException
 
+from sk8s import anchors
 from sk8s.cluster import Cluster
 from sk8s.config import Config
 from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout, PodFailed, StoreError
@@ -27,13 +28,14 @@ def _close_clusters() -> Iterator[None]:
 class Harness:
     """Cluster wired to fakes; the test plays the role of the k8s control plane."""
 
-    def __init__(self, tmp_path, keep_results=False):  # type: ignore[no-untyped-def]
+    def __init__(self, tmp_path, keep_results=False, core=None):  # type: ignore[no-untyped-def]
         self.batch = FakeBatchV1()
+        self.core = core if core is not None else FakeCoreV1()
         self.store = LocalStore(tmp_path)
         self.events: "queue.Queue[JobEvent]" = queue.Queue()
         cfg = Config(namespace="ns1", image="sk8s:dev", keep_results=keep_results)
         self.cluster = Cluster(
-            cfg, batch_api=self.batch, core_api=FakeCoreV1(), store=self.store,
+            cfg, batch_api=self.batch, core_api=self.core, store=self.store,
             watcher_events=self._event_iter,
         )
         _OPEN.append(self.cluster)
@@ -495,6 +497,173 @@ def test_per_job_namespace_same_value_accepted(tmp_path) -> None:  # type: ignor
     h = Harness(tmp_path)
     fut = h.cluster.submit(lambda: 1, namespace="ns1")
     assert ("ns1", fut.job_name) in h.batch.jobs
+
+
+# --- final review: Job deletion must resolve futures ---------------------------------
+
+_DELETED_REASON = "job was deleted before completing (workflow killed or expired?)"
+
+
+def _fake_watch(monkeypatch, events: "list[dict[str, Any]]") -> None:  # type: ignore[no-untyped-def]
+    class FakeWatch:
+        def stream(self, *_a: Any, **_kw: Any) -> Iterator[dict[str, Any]]:
+            yield from events
+
+    monkeypatch.setattr("kubernetes.watch.Watch", FakeWatch)
+
+
+def test_deleted_watch_event_fails_active_job_with_deleted_reason(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("sk8s.cluster._RETRY_DELAY", 0.0)
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 1)
+    job = h.batch.jobs[("ns1", fut.job_name)]
+    _set_status(h, fut.job_name, active=1)
+    _fake_watch(monkeypatch, [{"type": "DELETED", "object": job}])
+    gen = h.cluster._k8s_events()
+    assert next(gen) == (fut.job_name, "active")  # the LIST replay
+    # the job is cascade-deleted (kill/clean) after the LIST, then DELETED arrives
+    del h.batch.jobs[("ns1", fut.job_name)]
+    assert next(gen) == (fut.job_name, "failed")  # not "active": DELETED is never dropped
+    gen.close()
+    h.events.put((fut.job_name, "failed"))
+    with pytest.raises(PodFailed) as ei:
+        fut.result(timeout=10)
+    assert ei.value.reason == _DELETED_REASON
+
+
+def test_reconnect_list_omitting_registered_job_fails_it(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("sk8s.cluster._RETRY_DELAY", 0.0)
+    h = Harness(tmp_path)
+    gone = h.cluster.submit(lambda: 1)
+    kept = h.cluster.submit(lambda: 2)
+    _set_status(h, kept.job_name, active=1)
+    del h.batch.jobs[("ns1", gone.job_name)]  # deleted while the stream was down
+    _fake_watch(monkeypatch, [])
+    events = list(h.cluster._k8s_events())
+    assert (gone.job_name, "failed") in events
+    assert (kept.job_name, "active") in events
+    assert (kept.job_name, "failed") not in events
+    h.events.put((gone.job_name, "failed"))
+    with pytest.raises(PodFailed) as ei:
+        gone.result(timeout=10)
+    assert ei.value.reason == _DELETED_REASON
+    assert not kept.done()
+
+
+def test_reconnect_list_ignores_job_registered_after_snapshot(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A job registered while the LIST is in flight is not 'absent': it postdates the list."""
+    h = Harness(tmp_path)
+    _fake_watch(monkeypatch, [])
+    real_list = h.batch.list_namespaced_job
+    late: list[str] = []
+
+    def list_then_submit(*a: Any, **kw: Any) -> Any:
+        result = real_list(*a, **kw)  # snapshot of jobs: does not contain the late one
+        late.append(h.cluster.submit(lambda: 1).job_name)
+        return result
+
+    h.batch.list_namespaced_job = list_then_submit  # type: ignore[method-assign]
+    events = list(h.cluster._k8s_events())
+    assert late and all(name != late[0] for name, _ in events)
+
+
+def test_ttl_deleted_job_with_result_blob_resolves_with_result(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda x: x + 1, 41)
+    job = h.batch.jobs[("ns1", fut.job_name)]
+    import sk8s.worker as worker
+
+    env = {e.name: e.value for e in job.spec.template.spec.containers[0].env}
+    env["SK8S_STORE"] = f"local:{h.store.root}"
+    worker.main(env)  # result blob stored; the success event was missed
+    del h.batch.jobs[("ns1", fut.job_name)]  # TTL controller reaped the finished job
+    _fake_watch(monkeypatch, [{"type": "DELETED", "object": job}])
+    gen = h.cluster._k8s_events()
+    assert next(gen) == (fut.job_name, "failed")  # absent from the LIST
+    gen.close()
+    h.events.put((fut.job_name, "failed"))
+    assert fut.result(timeout=10) == 42  # the result wins over the failed verdict
+
+
+def test_deleted_event_for_unfinished_job_with_result_blob_in_stream(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: "kept")
+    job = h.batch.jobs[("ns1", fut.job_name)]
+    import sk8s.worker as worker
+
+    env = {e.name: e.value for e in job.spec.template.spec.containers[0].env}
+    env["SK8S_STORE"] = f"local:{h.store.root}"
+    worker.main(env)
+    _set_status(h, fut.job_name, succeeded=1)
+    _fake_watch(monkeypatch, [{"type": "DELETED", "object": job}])
+    events = list(h.cluster._k8s_events())
+    assert events[-1] == (fut.job_name, "failed")  # DELETED yields failed regardless of status
+    h.events.put(events[-1])
+    assert fut.result(timeout=10) == "kept"
+
+
+# --- final review: deleted anchor must fail loudly ----------------------------------
+
+
+def test_deleted_anchor_detected_after_freshness_window(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    now = [1000.0]
+    h.cluster._clock = lambda: now[0]
+    h.cluster.submit(lambda: 1)  # creates and caches the anchor at t=1000
+    del h.core.configmaps[("ns1", anchors.anchor_name(h.cluster.workflow_id))]
+    now[0] += 30  # inside the window: no re-verification, no extra API cost
+    h.cluster.submit(lambda: 2)
+    now[0] += 61  # beyond the window since the last verification
+    jobs_before = len(h.batch.jobs)
+    with pytest.raises(RuntimeError, match="was deleted"):
+        h.cluster.submit(lambda: 3)
+    assert len(h.batch.jobs) == jobs_before  # nothing was created into the dead anchor
+    with pytest.raises(RuntimeError, match="was deleted"):
+        h.cluster.submit(lambda: 4)  # and it stays loud
+
+
+def test_present_anchor_is_reverified_at_most_once_per_window(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    now = [1000.0]
+    h.cluster._clock = lambda: now[0]
+    h.cluster.submit(lambda: 1)
+    reads: list[str] = []
+    real = h.core.read_namespaced_config_map
+
+    def counting(name: str, namespace: str) -> Any:
+        reads.append(name)
+        return real(name=name, namespace=namespace)
+
+    h.core.read_namespaced_config_map = counting  # type: ignore[method-assign]
+    for _ in range(5):
+        h.cluster.submit(lambda: 1)
+    assert reads == []
+    now[0] += 61
+    h.cluster.submit(lambda: 1)
+    h.cluster.submit(lambda: 1)
+    assert len(reads) == 1
+
+
+def test_transient_error_during_anchor_reverify_does_not_block_submit(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    now = [1000.0]
+    h.cluster._clock = lambda: now[0]
+    h.cluster.submit(lambda: 1)
+
+    def flaky(name: str, namespace: str) -> Any:
+        raise ApiException(status=500, reason="boom")
+
+    h.core.read_namespaced_config_map = flaky  # type: ignore[method-assign]
+    now[0] += 61
+    assert h.cluster.submit(lambda: 2).job_name
+
+
+def test_registered_snapshot_reflects_register_and_unregister(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 1)
+    assert h.cluster._watcher.registered() == {fut.job_name}
+    h.cluster.untrack_job(fut.job_name)
+    assert h.cluster._watcher.registered() == set()
 
 
 def test_store_endpoint_flows_to_job_env_and_store_factory(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

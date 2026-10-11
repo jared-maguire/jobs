@@ -5,6 +5,8 @@ import random
 import re
 import string
 
+from typing import Any
+
 from kubernetes import client
 
 MANAGED_BY = "sk8s"
@@ -33,6 +35,9 @@ def build_job(
     backoff_limit: int,
     ttl: int,
     privileged: bool,
+    owner: Any | None = None,
+    anchor_name: str | None = None,
+    anchor_uid: str | None = None,
     store_endpoint: str | None = None,
     store_env: dict[str, str] | None = None,
 ) -> client.V1Job:
@@ -43,7 +48,15 @@ def build_job(
         client.V1EnvVar(name="SK8S_PAYLOAD_URI", value=payload_uri),
         client.V1EnvVar(name="SK8S_RESULT_KEY", value=result_key),
         client.V1EnvVar(name="SK8S_WORKFLOW_ID", value=workflow_id),
+        # Nested submissions from inside the pod build their Cluster from SK8S_* env, so
+        # they must inherit how this pod itself was launched.
+        client.V1EnvVar(name="SK8S_IMAGE", value=image),
+        client.V1EnvVar(name="SK8S_PULL_POLICY", value=pull_policy),
+        client.V1EnvVar(name="SK8S_SERVICE_ACCOUNT", value=service_account),
     ]
+    if anchor_name and anchor_uid:  # lets the worker own its result blob via the anchor
+        env.append(client.V1EnvVar(name="SK8S_ANCHOR_NAME", value=anchor_name))
+        env.append(client.V1EnvVar(name="SK8S_ANCHOR_UID", value=anchor_uid))
     if store_endpoint:
         env.append(client.V1EnvVar(name="SK8S_S3_ENDPOINT", value=store_endpoint))
     for key, value in (store_env or {}).items():
@@ -85,7 +98,10 @@ def build_job(
     return client.V1Job(
         api_version="batch/v1",
         kind="Job",
-        metadata=client.V1ObjectMeta(name=name, namespace=namespace, labels=labels),
+        metadata=client.V1ObjectMeta(
+            name=name, namespace=namespace, labels=labels,
+            owner_references=[owner] if owner is not None else None,
+        ),
         spec=client.V1JobSpec(
             backoff_limit=backoff_limit,
             ttl_seconds_after_finished=ttl,

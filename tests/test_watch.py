@@ -214,3 +214,22 @@ def test_fresh_buffered_event_resolves_within_ttl() -> None:
     finally:
         release.set()
         w.stop()
+
+
+def test_registered_returns_a_snapshot_copy() -> None:
+    _, _, resolve = collect_resolver()
+
+    def events() -> Iterator[JobEvent]:
+        while True:
+            time.sleep(0.01)
+            yield ("x", "active")
+
+    w = JobWatcher(events, resolve)
+    w.register("a")
+    w.register("b")
+    snap = w.registered()
+    assert snap == {"a", "b"}
+    snap.add("zzz")  # mutating the snapshot must not touch the watcher
+    w.unregister("a")
+    assert w.registered() == {"b"}
+    w.stop()

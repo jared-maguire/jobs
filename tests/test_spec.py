@@ -33,6 +33,10 @@ def test_basic_fields() -> None:
     assert env["SK8S_RESULT_KEY"] == "wf-x/job-abc123/result"
     assert env["SK8S_STORE"] == "k8s"
     assert env["SK8S_WORKFLOW_ID"] == "wf-x"
+    # nested in-pod submissions inherit image / pull policy / service account
+    assert env["SK8S_IMAGE"] == c.image
+    assert env["SK8S_PULL_POLICY"] == c.image_pull_policy
+    assert env["SK8S_SERVICE_ACCOUNT"]
 
 
 def test_resources_and_volumes() -> None:
@@ -56,6 +60,16 @@ def test_job_name_valid_and_random() -> None:
     assert n1 != n2
     assert re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", n1)
     assert len(job_name("x" * 100)) <= 63
+
+
+def test_owner_reference() -> None:
+    from kubernetes import client
+
+    assert make().metadata.owner_references is None
+    ref = client.V1OwnerReference(
+        api_version="v1", kind="ConfigMap", name="sk8s-anchor-wf-x", uid="u-1", controller=True
+    )
+    assert make(owner=ref).metadata.owner_references == [ref]
 
 
 def _env(job) -> dict:  # type: ignore[no-untyped-def]
