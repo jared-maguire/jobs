@@ -34,6 +34,11 @@ def batch_api() -> client.BatchV1Api:
     return client.BatchV1Api()
 
 
+def apps_api() -> client.AppsV1Api:
+    load()
+    return client.AppsV1Api()
+
+
 def current_namespace() -> str:
     if in_pod():
         return (_SA_DIR / "namespace").read_text().strip()

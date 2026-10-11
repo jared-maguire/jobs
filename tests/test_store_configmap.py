@@ -114,3 +114,35 @@ def test_factory_k8s_branch_with_injected_api(monkeypatch: pytest.MonkeyPatch) -
 def test_factory_unknown_store() -> None:
     with pytest.raises(ValueError, match="unknown store"):
         get_store("bogus", namespace="ns1", core_api=FakeCoreV1())
+
+
+def test_service_key_gets_service_labels_and_no_workflow_id() -> None:
+    s = make_store()
+    s.put("svc/api/payload", b"x")
+    cm = s.core_api.configmaps[("ns1", "sk8s-svc-api-payload")]
+    assert cm.metadata.labels == {
+        "app.kubernetes.io/managed-by": "sk8s",
+        "sk8s/kind": "service",
+        "sk8s/service": "api",
+    }
+
+
+def test_workflow_key_labels_unchanged() -> None:
+    s = make_store()
+    s.put("wf-a/job-b/payload", b"x")
+    cm = s.core_api.configmaps[("ns1", "sk8s-wf-a-job-b-payload")]
+    assert cm.metadata.labels == {
+        "app.kubernetes.io/managed-by": "sk8s",
+        "sk8s/workflow-id": "wf-a",
+    }
+
+
+def test_delete_prefix_for_service_keys() -> None:
+    s = make_store()
+    s.put("svc/api/payload", b"x")
+    s.put("svc/api2/payload", b"x")
+    s.put("wf-a/j/payload", b"x")
+    s.delete_prefix("svc/api")
+    assert set(s.core_api.configmaps) == {("ns1", "sk8s-svc-api2-payload"), ("ns1", "sk8s-wf-a-j-payload")}
+    s.delete_prefix("svc")
+    assert set(s.core_api.configmaps) == {("ns1", "sk8s-wf-a-j-payload")}
