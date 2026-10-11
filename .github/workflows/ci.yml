@@ -75,7 +75,7 @@ jobs:
         run: |
           for tag in sk8s-dev-ci:ci sk8s-dev-services:latest; do
             minikube image build -t "$tag" \
-              --build-opt=build-arg=PYTHON_VERSION="$PYTHON_VERSION" \
+              --build-opt=opt=build-arg:PYTHON_VERSION="$PYTHON_VERSION" \
               -f docker/Dockerfile.dev .
           done
           minikube image ls
