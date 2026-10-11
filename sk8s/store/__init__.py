@@ -31,9 +31,9 @@ def get_store(
 
         return S3Store.from_url(store, endpoint=endpoint)
     if store.startswith("gs://"):
-        raise NotImplementedError(
-            f"{store!r}: the GCS backend is not implemented yet"
-        )
+        from sk8s.store.gcs import GCSStore
+
+        return GCSStore.from_url(store)
     raise ValueError(f"unknown store {store!r}")
 
 

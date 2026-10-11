@@ -32,5 +32,5 @@ strict = true
 packages = ["sk8s"]
 
 [[tool.mypy.overrides]]
-module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+module = ["boto3", "boto3.*", "botocore", "botocore.*", "google.cloud", "google.cloud.*"]
 ignore_missing_imports = true

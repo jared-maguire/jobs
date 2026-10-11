@@ -111,11 +111,6 @@ def test_factory_k8s_branch_with_injected_api(monkeypatch: pytest.MonkeyPatch) -
     assert s.namespace == "ns1" and s.core_api is core
 
 
-def test_factory_gcs_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        get_store("gs://bucket/prefix/", namespace="ns1", core_api=FakeCoreV1())
-
-
 def test_factory_unknown_store() -> None:
     with pytest.raises(ValueError, match="unknown store"):
         get_store("bogus", namespace="ns1", core_api=FakeCoreV1())
