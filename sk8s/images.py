@@ -46,6 +46,8 @@ def generate_dockerfile(
         raise ValueError("nothing to build: give at least one pip or conda dependency")
     if base is not None and conda:
         raise ValueError("base cannot be combined with conda deps")
+    if channels and not conda:
+        raise ValueError("channels require conda deps")
 
     if not conda:
         lines = [f"FROM {base or default_base()}"]

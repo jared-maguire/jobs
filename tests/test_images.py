@@ -60,6 +60,11 @@ def test_base_with_conda_raises():
         images.generate_dockerfile(base="b:1", conda=["samtools"])
 
 
+def test_channels_without_conda_raises():
+    with pytest.raises(ValueError, match="channels require conda deps"):
+        images.generate_dockerfile(base="b:1", pip=["x"], channels=["bioconda"])
+
+
 def test_conda_without_channels_or_pip():
     out = images.generate_dockerfile(conda=["samtools"])
     assert "-c " not in out
