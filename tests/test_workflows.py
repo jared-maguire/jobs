@@ -4,6 +4,7 @@ from typing import Any, Iterator
 
 import pytest
 from kubernetes import client
+from kubernetes.client import ApiException
 
 import sk8s
 from sk8s import workflows
@@ -384,3 +385,33 @@ def test_non_cluster_argument_is_a_type_error(tmp_path) -> None:  # type: ignore
         workflows.submit_workflow(double, 1, cluster=object())
     with pytest.raises(TypeError, match="Cluster"):
         workflows.attach("wf-x", cluster="nope")
+
+
+def test_check_alive_tolerates_transient_api_errors(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(workflows, "_POLL", 0.05)
+    h = Harness(tmp_path)
+    handle = workflows.submit_workflow(double, 4, cluster=h.cluster)
+    driver = _anchor(h, handle.id).metadata.annotations["sk8s/driver-job"]
+    real_read = h.core.read_namespaced_config_map
+    real_list = h.batch.list_namespaced_job
+    flaky = {"read": 1, "list": 1}
+
+    def read(name: str, namespace: str) -> Any:
+        if flaky["read"]:
+            flaky["read"] -= 1
+            raise ApiException(status=500, reason="Internal Server Error")
+        return real_read(name=name, namespace=namespace)
+
+    def list_jobs(*a: Any, **k: Any) -> Any:
+        if flaky["list"]:
+            flaky["list"] -= 1
+            raise ApiException(status=503, reason="Unavailable")
+        return real_list(*a, **k)
+
+    monkeypatch.setattr(h.core, "read_namespaced_config_map", read)
+    monkeypatch.setattr(h.batch, "list_namespaced_job", list_jobs)
+    h.finish_job(driver)
+    h.events.get_nowait()  # swallow the watch event: only _check_alive can settle the driver
+    h.batch.jobs[(NS, driver)].status = client.V1JobStatus(succeeded=1)
+    assert handle.result(timeout=10) == 8
+    assert flaky == {"read": 0, "list": 0}  # both failures were hit and survived

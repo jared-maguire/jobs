@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import threading
 import time
 from typing import Any, Callable
@@ -11,6 +12,8 @@ from sk8s.api import _new_cluster
 from sk8s.cluster import Cluster, job_phase, new_workflow_id
 from sk8s.errors import BlobNotFound, JobTimeout, Sk8sError
 from sk8s.future import JobFuture
+
+log = logging.getLogger("sk8s.workflows")
 
 _TERMINAL = ("succeeded", "failed")
 _POLL = 2.0  # seconds between liveness checks while waiting on the driver
@@ -166,9 +169,16 @@ class WorkflowHandle:
         controller) is resolved from the API/store directly; and a workflow deleted by
         another process (no local kill flag) is detected via its anchor."""
         name = fut.job_name
-        if anchors.get_anchor(
-            self._cluster.core, namespace=_ns(self._cluster), workflow_id=self.id
-        ) is None:
+        try:
+            anchor = anchors.get_anchor(
+                self._cluster.core, namespace=_ns(self._cluster), workflow_id=self.id
+            )
+        except Sk8sError:
+            raise
+        except Exception:  # noqa: BLE001 — transient API trouble must not abort a long wait
+            log.debug("anchor read failed for workflow %s; retrying next slice", self.id, exc_info=True)
+            return
+        if anchor is None:
             try:
                 self._cluster.store.get(self._cluster.store.uri_for(f"{self.id}/{name}/result"))
             except BlobNotFound:
@@ -180,7 +190,14 @@ class WorkflowHandle:
                 return
             self._cluster.settle_job(name, "succeeded")
             return
-        job = next((j for j in self._jobs() if j.metadata.name == name), None)
+        try:
+            jobs = self._jobs()
+        except Sk8sError:
+            raise
+        except Exception:  # noqa: BLE001 — transient API trouble must not abort a long wait
+            log.debug("job list failed for workflow %s; retrying next slice", self.id, exc_info=True)
+            return
+        job = next((j for j in jobs if j.metadata.name == name), None)
         phase = "failed" if job is None else job_phase(job)  # reaped: result blob decides
         if phase in _TERMINAL:
             self._cluster.settle_job(name, phase)
