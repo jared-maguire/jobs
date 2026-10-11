@@ -51,7 +51,10 @@ against the v2 code in this repository.
    rebuilt locally you get `sk8s.RemoteException` (with `.type_name`, `.message`,
    `.tb_text`). Infrastructure problems have their own types, all subclasses of
    `sk8s.Sk8sError`: `PodFailed`, `ImagePullError`, `JobTimeout` (also a `TimeoutError`),
-   `StoreError`, `BlobNotFound`, `BlobTooLarge` and `VersionMismatch`. `map` raises
+   `JobRejected` (the API server refused to create the Job — an admission denial such as
+   `privileged=True` on GKE Autopilot, an RBAC `403`, or an invalid spec; in v1 these
+   escaped as raw `kubernetes.client.ApiException`s), `StoreError`, `BlobNotFound`,
+   `BlobTooLarge` and `VersionMismatch`. `map` raises
    `sk8s.MapFailed` after collecting every item; `e.failures` is a list of
    `(index, exception)`.
 

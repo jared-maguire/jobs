@@ -60,11 +60,19 @@ def _job_rejected(name: str, exc: ApiException, *, privileged: bool) -> JobRejec
     except (TypeError, ValueError):
         pass
     message = (message or str(exc.reason or "") or "rejected").strip()
+    # Hints are gated on evidence in the server's message, not on the request alone:
+    # a 403 can equally be an RBAC denial, and blaming privileged=True there misleads.
     hint = None
-    if privileged:
+    lowered = message.lower()
+    if privileged and "privileged" in lowered:
         hint = (
             "privileged=True was requested; managed clusters such as GKE Autopilot refuse "
             "privileged containers. Drop privileged=True or use a cluster that allows it."
+        )
+    elif exc.status == 403 and "forbidden" in lowered:
+        hint = (
+            "the credentials sk8s is using may lack permission to create Jobs in this "
+            "namespace; run `sk8s doctor` to check the ServiceAccount's Role."
         )
     return JobRejected(name, exc.status, message, hint)
 

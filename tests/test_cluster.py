@@ -214,17 +214,43 @@ def test_api_refusal_becomes_typed_job_rejected_without_leaking(tmp_path) -> Non
     assert not h.cluster._futures
 
 
-def test_api_refusal_without_privileged_has_no_privileged_hint(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_forbidden_refusal_hints_at_rbac_not_privileged(tmp_path) -> None:  # type: ignore[no-untyped-def]
     h = Harness(tmp_path)
+    rbac_body = (
+        '{"kind":"Status","apiVersion":"v1","status":"Failure","message":"jobs.batch is '
+        'forbidden: User \\"system:serviceaccount:sk8s:sk8s\\" cannot create resource '
+        '\\"jobs\\" in API group \\"batch\\" in the namespace \\"sk8s\\"",'
+        '"reason":"Forbidden","code":403}'
+    )
 
     def forbidden(namespace: str, body: Any) -> Any:
-        raise _api_error(403, "Forbidden", "not json at all")
+        raise _api_error(403, "Forbidden", rbac_body)
 
     h.batch.create_namespaced_job = forbidden  # type: ignore[method-assign]
+    # Even with privileged=True, an RBAC denial must not blame privileged: the hint is
+    # gated on the server's message, and this one says forbidden, not privileged.
     with pytest.raises(JobRejected) as ei:
-        h.cluster.submit(lambda: 1)
-    assert ei.value.status == 403 and ei.value.hint is None
-    assert ei.value.message == "Forbidden"  # unparseable body falls back to the reason
+        h.cluster.submit(lambda: 1, privileged=True)
+    err = ei.value
+    assert err.status == 403
+    assert "cannot create resource" in err.message
+    assert "privileged" not in (err.hint or "")
+    assert "sk8s doctor" in (err.hint or "")
+
+
+def test_invalid_spec_refusal_has_no_hint(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+
+    def invalid(namespace: str, body: Any) -> Any:
+        raise _api_error(422, "Unprocessable Entity", "not json at all")
+
+    h.batch.create_namespaced_job = invalid  # type: ignore[method-assign]
+    # A 422 for an unrelated bad spec, even with privileged=True, gets no privileged
+    # hint when the server's message doesn't mention privileged.
+    with pytest.raises(JobRejected) as ei:
+        h.cluster.submit(lambda: 1, privileged=True)
+    assert ei.value.status == 422 and ei.value.hint is None
+    assert ei.value.message == "Unprocessable Entity"  # unparseable body falls back to the reason
 
 
 def _api_error(status: int, reason: str, body: str) -> ApiException:
