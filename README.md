@@ -31,8 +31,8 @@ sk8s.map(lambda x: x ** 2, range(1000), batch_size=50)  # 20 Jobs, results in or
 > **Status: 2.0.0a0 (pre-release).** Not on PyPI yet and no worker images are published
 > yet, so the quickstart below builds the worker image from this checkout. The v1
 > documentation lives on the `main` branch and the `v0.1` tag; upgrading is covered in the
-> [migration guide](docs/migration-v1-to-v2.md). Cloud-specific guides (GKE, EKS) are
-> forthcoming; the quickstart targets minikube.
+> [migration guide](docs/migration-v1-to-v2.md). The quickstart targets minikube; for
+> Google Cloud see the [GKE (Autopilot) guide](docs/gke.md). An EKS guide is forthcoming.
 
 ## Quickstart (about 5 minutes)
 
