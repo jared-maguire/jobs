@@ -124,7 +124,6 @@ def test_delete_anchor_uses_recorded_prefix(tmp_path) -> None:  # type: ignore[n
 
 def test_delete_anchor_best_effort(tmp_path) -> None:  # type: ignore[no-untyped-def]
     core = FakeCoreV1()
-    deleted: list[str] = []
 
     class Broken(LocalStore):
         def delete_prefix(self, prefix: str) -> None:
@@ -135,7 +134,6 @@ def test_delete_anchor_best_effort(tmp_path) -> None:  # type: ignore[no-untyped
     assert (NS, "sk8s-anchor-wf-a") not in core.configmaps
     # a missing anchor still tries the store and never raises
     anchors.delete_anchor(core, Broken(tmp_path), namespace=NS, workflow_id="gone")
-    assert deleted == []
 
 
 # --- Cluster wiring ------------------------------------------------------------
@@ -206,9 +204,7 @@ def test_in_pod_adopts_existing_anchor(tmp_path, monkeypatch) -> None:  # type: 
     existing = _create(core, "wf-driver")
     core.create_calls.clear()
     monkeypatch.setenv("SK8S_WORKFLOW_ID", "wf-driver")
-    h = Harness.__new__(Harness)  # reuse the pattern, but with the pre-made core
-    h.__init__(tmp_path)  # type: ignore[misc]
-    h.cluster._core = core
+    h = Harness(tmp_path, core=core)
     fut = h.cluster.submit(lambda: 1)
     assert core.create_calls == []  # adopted, never created
     assert len(core.configmaps) == 1
@@ -220,8 +216,7 @@ def test_in_pod_adoption_never_deletes_driver_anchor(tmp_path, monkeypatch) -> N
     core = FakeCoreV1()
     _create(core, "wf-driver")
     monkeypatch.setenv("SK8S_WORKFLOW_ID", "wf-driver")
-    h = Harness(tmp_path)
-    h.cluster._core = core
+    h = Harness(tmp_path, core=core)
     fut = h.cluster.submit(lambda: 1)
     h.finish_job(fut.job_name)
     fut.result(timeout=10)
@@ -240,7 +235,10 @@ def test_close_with_pending_future_does_not_delete(tmp_path) -> None:  # type: i
     h = Harness(tmp_path)
     h.cluster.submit(lambda: 1)  # never finishes
     h.cluster.close()
-    assert _anchor(h.core, h.cluster.workflow_id)
+    assert _anchor(h.core, h.cluster.workflow_id).metadata.name == (
+        f"sk8s-anchor-{h.cluster.workflow_id}"
+    )
+    assert len(h.core.configmaps) == 1
 
 
 def test_close_deletes_when_all_done(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -331,3 +329,72 @@ def test_resolved_before_future_set_does_not_race(tmp_path) -> None:  # type: ig
     assert not fut.done()
     h.cluster.close()
     assert len(h.core.configmaps) == 1
+
+
+def test_keep_results_survive_default_close(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import sk8s.worker as worker
+
+    core, batch = FakeCoreV1(), FakeBatchV1()
+    store = ConfigMapStore(NS, core)
+    cluster = Cluster(
+        Config(namespace=NS, image="x"), batch_api=batch, core_api=core, store=store,
+        watcher_events=lambda: iter(()),
+    )
+    monkeypatch.setattr(worker, "get_store", lambda *a, **k: store)
+    fut = cluster.submit(lambda: 7, keep_results=True)
+    job = batch.jobs[(NS, fut.job_name)]
+    env = {e.name: e.value for e in job.spec.template.spec.containers[0].env}
+    assert worker.main(env) == 0
+    cluster._on_terminal(fut.job_name, "succeeded")
+    assert fut.result(timeout=5) == 7
+    cluster.close()
+    assert (NS, f"sk8s-anchor-{cluster.workflow_id}") in core.configmaps
+    assert store.get(store.uri_for(f"{cluster.workflow_id}/{fut.job_name}/result"))
+    cluster.close(delete_workflow=True)  # explicit override still works
+    assert (NS, f"sk8s-anchor-{cluster.workflow_id}") not in core.configmaps
+
+
+def test_worker_result_configmap_carries_anchor_owner(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import sk8s.worker as worker
+
+    core, batch = FakeCoreV1(), FakeBatchV1()
+    store = ConfigMapStore(NS, core)
+    cluster = Cluster(
+        Config(namespace=NS, image="x"), batch_api=batch, core_api=core, store=store,
+        watcher_events=lambda: iter(()),
+    )
+    try:
+        monkeypatch.setattr(worker, "get_store", lambda *a, **k: store)
+        fut = cluster.submit(lambda: 1)
+        anchor = _anchor(core, cluster.workflow_id)
+        job = batch.jobs[(NS, fut.job_name)]
+        env = {e.name: e.value for e in job.spec.template.spec.containers[0].env}
+        assert env["SK8S_ANCHOR_NAME"] == anchor.metadata.name
+        assert env["SK8S_ANCHOR_UID"] == anchor.metadata.uid
+        assert worker.main(env) == 0
+        result_cm = core.configmaps[(NS, store.uri_for(f"{cluster.workflow_id}/{fut.job_name}/result").rsplit("/", 1)[1])]
+        refs = result_cm.metadata.owner_references
+        assert [(r.kind, r.uid, r.controller) for r in refs] == [("ConfigMap", anchor.metadata.uid, False)]
+    finally:
+        cluster.close(delete_workflow=False)
+
+
+def test_worker_without_anchor_env_has_no_owner(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import sk8s.worker as worker
+    from sk8s import serialize
+
+    core = FakeCoreV1()
+    store = ConfigMapStore(NS, core)
+    monkeypatch.setattr(worker, "get_store", lambda *a, **k: store)
+    uri = store.put("wf-x/j/payload", serialize.encode_payload(lambda: 1, (), {}))
+    assert worker.main({"SK8S_STORE": "k8s", "SK8S_PAYLOAD_URI": uri, "SK8S_RESULT_KEY": "wf-x/j/result"}) == 0
+    assert core.configmaps[(NS, store.uri_for("wf-x/j/result").rsplit("/", 1)[1])].metadata.owner_references is None
+
+
+def test_submit_after_workflow_deleted_raises(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    h.cluster.submit(lambda: 1)
+    h.cluster.close(delete_workflow=True)
+    with pytest.raises(RuntimeError, match="deleted"):
+        h.cluster.submit(lambda: 2)
+    assert not h.core.configmaps

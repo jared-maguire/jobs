@@ -27,9 +27,9 @@ def _close_clusters() -> Iterator[None]:
 class Harness:
     """Cluster wired to fakes; the test plays the role of the k8s control plane."""
 
-    def __init__(self, tmp_path, keep_results=False):  # type: ignore[no-untyped-def]
+    def __init__(self, tmp_path, keep_results=False, core=None):  # type: ignore[no-untyped-def]
         self.batch = FakeBatchV1()
-        self.core = FakeCoreV1()
+        self.core = core if core is not None else FakeCoreV1()
         self.store = LocalStore(tmp_path)
         self.events: "queue.Queue[JobEvent]" = queue.Queue()
         cfg = Config(namespace="ns1", image="sk8s:dev", keep_results=keep_results)

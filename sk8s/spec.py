@@ -36,6 +36,8 @@ def build_job(
     ttl: int,
     privileged: bool,
     owner: Any | None = None,
+    anchor_name: str | None = None,
+    anchor_uid: str | None = None,
 ) -> client.V1Job:
     labels = {"app.kubernetes.io/managed-by": MANAGED_BY, "sk8s/workflow-id": workflow_id}
     env = [
@@ -45,6 +47,9 @@ def build_job(
         client.V1EnvVar(name="SK8S_RESULT_KEY", value=result_key),
         client.V1EnvVar(name="SK8S_WORKFLOW_ID", value=workflow_id),
     ]
+    if anchor_name and anchor_uid:  # lets the worker own its result blob via the anchor
+        env.append(client.V1EnvVar(name="SK8S_ANCHOR_NAME", value=anchor_name))
+        env.append(client.V1EnvVar(name="SK8S_ANCHOR_UID", value=anchor_uid))
     resources = None
     if requests or limits:
         resources = client.V1ResourceRequirements(
