@@ -117,21 +117,66 @@ def _positive(name: str, value: int | None) -> None:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")
 
 
+class _ItemFuture(JobFuture):
+    """Per-item future of a batched job.
+
+    It resolves from the batch job's result. ``cancel()`` cancels the whole
+    batch job (the unit that actually runs), which in turn cancels every item.
+    """
+
+    _parent: JobFuture | None = None
+
+    def cancel(self) -> bool:
+        if self.done() or self._parent is None:
+            return False
+        return self._parent.cancel()
+
+
+def _unsubmitted(fut: JobFuture | None = None) -> JobFuture:
+    """A resolved future for an item that was never submitted (deadline hit)."""
+    fut = fut if fut is not None else JobFuture("unsubmitted", "unsubmitted", _NullBackend())
+    fut.set_exception(concurrent.futures.TimeoutError(
+        "not submitted before the map timeout: no max_concurrent slot freed up in time"
+    ))
+    return fut
+
+
 def _submit_many(
-    func: Callable[..., Any], iterable: Iterable[Any], star: bool, **opts: Any
+    func: Callable[..., Any],
+    iterable: Iterable[Any],
+    star: bool,
+    *,
+    deadline: float | None = None,
+    **opts: Any,
 ) -> list[JobFuture]:
+    """Shared body of the submit_map family.
+
+    ``deadline`` (a ``time.monotonic()`` value, set by ``map``/``starmap``) bounds
+    how long submission may block on ``max_concurrent``. Once it passes, no more
+    jobs are submitted and every remaining item gets an already-failed future
+    carrying ``concurrent.futures.TimeoutError``.
+    """
     batch_size: int = opts.pop("batch_size", 1)
     max_concurrent: int | None = opts.pop("max_concurrent", None)
     _positive("batch_size", batch_size)
     _positive("max_concurrent", max_concurrent)
     items = list(iterable)
     sem = threading.BoundedSemaphore(max_concurrent) if max_concurrent else None
+    expired = False
 
-    def submit_job(fn: Callable[..., Any], *args: Any, **kw: Any) -> JobFuture:
-        # Blocks while ``max_concurrent`` jobs are unresolved; the slot is freed
-        # when the job's future completes (result, error or cancel).
+    def submit_job(fn: Callable[..., Any], *args: Any, **kw: Any) -> JobFuture | None:
+        # Waits while ``max_concurrent`` jobs are unresolved; the slot is freed
+        # when the job's future completes (result, error or cancel). Returns None
+        # if ``deadline`` passes first.
+        nonlocal expired
+        if expired:
+            return None
         if sem is not None:
-            sem.acquire()
+            if deadline is None:
+                sem.acquire()
+            elif not sem.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                expired = True
+                return None
         try:
             fut = submit(fn, *args, **kw)
         except BaseException:
@@ -143,9 +188,11 @@ def _submit_many(
         return fut
 
     if batch_size == 1:
-        if star:
-            return [submit_job(func, *item, **opts) for item in items]
-        return [submit_job(func, item, **opts) for item in items]
+        out: list[JobFuture] = []
+        for item in items:
+            fut = submit_job(func, *item, **opts) if star else submit_job(func, item, **opts)
+            out.append(fut if fut is not None else _unsubmitted())
+        return out
 
     # Batched: one job per chunk; per-item futures are resolved from the chunk's
     # result. Names in JOB_OPTIONS configure the job; every other keyword goes to
@@ -154,22 +201,23 @@ def _submit_many(
 
     job_opts = {k: v for k, v in opts.items() if k in JOB_OPTIONS}
     func_kwargs = {k: v for k, v in opts.items() if k not in JOB_OPTIONS}
-    item_futures: list[JobFuture] = [
-        JobFuture("batched", "batched", backend=_NullBackend()) for _ in items
-    ]
+    item_futures: list[JobFuture] = []
     for start in range(0, len(items), batch_size):
         chunk = items[start:start + batch_size]
         parent = submit_job(_run_batch, func, chunk, star, func_kwargs, **job_opts)
-        group = item_futures[start:start + len(chunk)]
+        if parent is None:
+            item_futures.extend(_unsubmitted() for _ in chunk)
+            continue
+        group = [_ItemFuture(parent.job_name, parent.workflow_id, parent._backend)  # noqa: SLF001
+                 for _ in chunk]
         for fut in group:
-            fut.job_name = parent.job_name
-            fut.workflow_id = parent.workflow_id
-            fut._backend = parent._backend  # noqa: SLF001
+            fut._parent = parent  # noqa: SLF001
+        item_futures.extend(group)
         parent.add_done_callback(_make_unpack(group))
     return item_futures
 
 
-def _make_unpack(group: list[JobFuture]) -> Callable[[concurrent.futures.Future[Any]], None]:
+def _make_unpack(group: list[_ItemFuture]) -> Callable[[concurrent.futures.Future[Any]], None]:
     def settle(fut: JobFuture, *, result: Any = None, exc: BaseException | None = None) -> None:
         try:
             if exc is not None:
@@ -177,14 +225,31 @@ def _make_unpack(group: list[JobFuture]) -> Callable[[concurrent.futures.Future[
             else:
                 fut.set_result(result)
         except concurrent.futures.InvalidStateError:
-            pass  # already terminal (e.g. cancelled by the caller); keep that state
+            pass  # already terminal; keep that state
+
+    def cancel_item(fut: JobFuture) -> None:
+        # Bypass _ItemFuture.cancel (which delegates to the parent) and mark
+        # the item itself cancelled, waking any waiters.
+        if concurrent.futures.Future.cancel(fut):
+            fut.set_running_or_notify_cancel()
 
     def unpack(parent: concurrent.futures.Future[Any]) -> None:
+        if parent.cancelled():
+            for fut in group:
+                cancel_item(fut)
+            return
         try:
             outcomes = parent.result()
         except BaseException as exc:  # noqa: BLE001 — whole batch failed
             for fut in group:
                 settle(fut, exc=exc)
+            return
+        if len(outcomes) != len(group):
+            bad = RuntimeError(
+                f"batch job returned {len(outcomes)} outcomes for {len(group)} items"
+            )
+            for fut in group:
+                settle(fut, exc=bad)
             return
         for fut, (kind, value) in zip(group, outcomes):
             if kind == "ok":
@@ -196,7 +261,7 @@ def _make_unpack(group: list[JobFuture]) -> Callable[[concurrent.futures.Future[
 
 
 class _NullBackend:
-    """Placeholder backend for item futures until the parent job exists."""
+    """Backend for futures that never had a job (nothing to log or cancel)."""
 
     def logs(self, job_name: str) -> str:
         return ""
@@ -217,9 +282,11 @@ def submit_map(
     - ``batch_size`` (default 1): pack up to N items into each job. Each item
       still gets its own future, resolved from its job's result; an exception
       raised by one item fails only that item, while a failure of the whole job
-      fails every item in it. Cancelling an item future cancels its whole job.
+      fails every item in it. Cancelling an item future cancels its whole job, so
+      every item in that job ends up cancelled.
     - ``max_concurrent`` (default None): at most this many jobs may be unresolved
-      at once. Submission blocks the caller until a slot frees up.
+      at once. Submission blocks the caller until a slot frees up, with no
+      time limit (``map``/``starmap`` bound this wait by their ``timeout``).
     """
     return _submit_many(func, iterable, star=False, **opts)
 
@@ -235,15 +302,26 @@ def submit_starmap(
     return _submit_many(func, iterable, star=True, **opts)
 
 
-def _gather(futures: list[JobFuture], timeout: float | None) -> list[Any]:
+def _deadline(timeout: float | None) -> float | None:
+    return None if timeout is None else time.monotonic() + timeout
+
+
+def _gather(
+    futures: list[JobFuture], timeout: float | None, deadline: float | None = None
+) -> list[Any]:
     """Collect results in input order, waiting at most ``timeout`` in total.
 
+    ``deadline`` (a ``time.monotonic()`` value) is the overall cutoff; it
+    defaults to ``timeout`` from now. ``map`` passes the one it started
+    submission with, so submission and collection share a single budget.
+
     Every future is visited even after a failure. Items still pending when the
-    overall deadline passes are recorded as ``concurrent.futures.TimeoutError`` failures; items
-    already finished keep their results. ``KeyboardInterrupt`` and other
-    non-``Exception`` signals propagate immediately.
+    deadline passes are recorded as ``concurrent.futures.TimeoutError``
+    failures; items already finished keep their results. ``KeyboardInterrupt``
+    and other non-``Exception`` signals propagate immediately.
     """
-    deadline = None if timeout is None else time.monotonic() + timeout
+    if deadline is None:
+        deadline = _deadline(timeout)
     results: list[Any] = []
     failures: list[tuple[int, BaseException]] = []
     for i, fut in enumerate(futures):
@@ -267,15 +345,20 @@ def _gather(futures: list[JobFuture], timeout: float | None) -> list[Any]:
 def map(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[Any]:
     """Run ``func(item)`` for each item as jobs; return results in input order.
 
-    ``timeout`` (optional) is one overall deadline for the whole call. Other
+    ``timeout`` (optional) is one overall deadline for the whole call, covering
+    submission (including waiting on ``max_concurrent``) and collection. Other
     ``opts`` are split as in ``submit``. Every future is collected before
     returning; if any failed, raises ``MapFailed`` with the failing indices.
     """
     timeout = opts.pop("timeout", None)
-    return _gather(submit_map(func, iterable, **opts), timeout)
+    deadline = _deadline(timeout)
+    futures = _submit_many(func, iterable, False, deadline=deadline, **opts)
+    return _gather(futures, timeout, deadline)
 
 
 def starmap(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[Any]:
     """Like ``map``, but calls ``func(*item)`` for each item."""
     timeout = opts.pop("timeout", None)
-    return _gather(submit_starmap(func, iterable, **opts), timeout)
+    deadline = _deadline(timeout)
+    futures = _submit_many(func, iterable, True, deadline=deadline, **opts)
+    return _gather(futures, timeout, deadline)

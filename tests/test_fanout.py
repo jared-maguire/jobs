@@ -23,7 +23,7 @@ class RecordingBackend:
         return f"logs for {job_name}"
 
     def cancel(self, job_name: str) -> bool:
-        return False
+        return True
 
 
 class StubCluster:
@@ -252,3 +252,111 @@ def test_gather_does_not_mask_non_timeout_error_on_pending_future() -> None:
     (_, err), = exc_info.value.failures
     assert isinstance(err, RuntimeError)
     assert not isinstance(err, concurrent.futures.TimeoutError)
+
+
+# --- cancellation -------------------------------------------------------------
+
+def test_cancelling_one_item_cancels_whole_batch_job() -> None:
+    stub = StubCluster()
+    sk8s.configure(cluster=stub)
+    futs = sk8s.submit_map(lambda x: x, range(4), batch_size=2)
+    assert futs[1].cancel() is True
+    assert stub.futures[0].cancelled()
+    for f in futs[:2]:
+        assert f.done() and f.cancelled()
+        with pytest.raises(concurrent.futures.CancelledError):
+            f.result(timeout=1)
+    assert not futs[2].done() and not futs[3].done()  # other batch untouched
+    assert futs[0].cancel() is False  # already terminal
+
+
+def test_cancelled_batch_item_wakes_waiters() -> None:
+    stub = StubCluster()
+    sk8s.configure(cluster=stub)
+    futs = sk8s.submit_map(lambda x: x, range(2), batch_size=2)
+    futs[0].cancel()
+    done, not_done = concurrent.futures.wait(futs, timeout=1)
+    assert len(done) == 2 and not not_done
+
+
+def test_cancelling_batch_item_releases_max_concurrent_slot() -> None:
+    stub = StubCluster()
+    sk8s.configure(cluster=stub)
+    t = threading.Thread(
+        target=lambda: sk8s.submit_map(lambda x: x, range(4), batch_size=2, max_concurrent=1)
+    )
+    t.start()
+    assert _wait_for(lambda: stub.n_submitted() == 1)
+    time.sleep(0.2)
+    assert stub.n_submitted() == 1  # second chunk waits for the slot
+    # Item futures are not returned until submission finishes, so cancel the
+    # parent job the way an item's cancel() does: through the job future.
+    assert stub.futures[0].cancel()
+    assert _wait_for(lambda: stub.n_submitted() == 2)
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+
+def test_local_cancel_of_batch_item_cancels_siblings() -> None:
+    def slow(x: int) -> int:
+        import time as _time
+        _time.sleep(30)
+        return x
+
+    futs = sk8s.submit_map(slow, range(2), batch_size=2)
+    assert futs[1].cancel() is True
+    assert _wait_for(lambda: all(f.done() for f in futs))
+    assert all(f.cancelled() for f in futs)
+
+
+def test_short_outcome_list_fails_items_instead_of_hanging() -> None:
+    stub = StubCluster()
+    sk8s.configure(cluster=stub)
+    futs = sk8s.submit_map(lambda x: x, range(3), batch_size=3)
+    stub.futures[0].set_result([("ok", 0)])
+    for f in futs:
+        assert isinstance(f.exception(timeout=1), RuntimeError)
+
+
+# --- map timeout covers submission --------------------------------------------
+
+def test_map_timeout_bounds_blocking_on_max_concurrent() -> None:
+    stub = StubCluster()  # jobs never complete
+    sk8s.configure(cluster=stub)
+    start = time.monotonic()
+    with pytest.raises(MapFailed) as exc_info:
+        sk8s.map(lambda x: x, range(3), max_concurrent=1, timeout=0.5)
+    assert time.monotonic() - start < 1.5
+    assert stub.n_submitted() == 1  # later items were never submitted
+    failures = exc_info.value.failures
+    assert [i for i, _ in failures] == [0, 1, 2]
+    assert all(isinstance(e, concurrent.futures.TimeoutError) for _, e in failures)
+    assert "not submitted" in str(failures[1][1])
+
+
+def test_starmap_and_batched_map_timeout_bound_max_concurrent() -> None:
+    stub = StubCluster()
+    sk8s.configure(cluster=stub)
+    start = time.monotonic()
+    with pytest.raises(MapFailed) as exc_info:
+        sk8s.map(lambda x: x, range(6), batch_size=2, max_concurrent=1, timeout=0.5)
+    assert time.monotonic() - start < 1.5
+    assert stub.n_submitted() == 1
+    assert [i for i, _ in exc_info.value.failures] == [0, 1, 2, 3, 4, 5]
+    with pytest.raises(MapFailed):
+        sk8s.starmap(lambda a: a, [(1,), (2,)], max_concurrent=1, timeout=0.3)
+
+
+def test_batched_map_with_expiring_timeout() -> None:
+    def nap(seconds: float) -> float:
+        import time as _time
+        _time.sleep(seconds)
+        return seconds
+
+    start = time.monotonic()
+    with pytest.raises(MapFailed) as exc_info:
+        sk8s.map(nap, [3.0, 3.0, 3.0], batch_size=2, timeout=1.0)
+    assert time.monotonic() - start < 3.0
+    failures = exc_info.value.failures
+    assert [i for i, _ in failures] == [0, 1, 2]
+    assert all(isinstance(e, concurrent.futures.TimeoutError) for _, e in failures)
