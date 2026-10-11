@@ -7,4 +7,5 @@ FROM python:${PYTHON_VERSION}-slim
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY sk8s ./sk8s
-RUN pip install --no-cache-dir .
+# The s3 extra puts boto3 in the worker so s3:// stores work.
+RUN pip install --no-cache-dir ".[s3]"

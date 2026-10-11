@@ -85,6 +85,7 @@ class Cluster:
         *,
         batch_api: Any | None = None,
         core_api: Any | None = None,
+        apps_api: Any | None = None,
         store: BlobStore | None = None,
         watcher_events: Callable[[], Iterator[JobEvent]] | None = None,
         detached: bool = False,
@@ -98,11 +99,17 @@ class Cluster:
             self.config = dataclasses.replace(self.config, namespace=k8s.current_namespace())
         self._batch = batch_api
         self._core = core_api
+        self._apps = apps_api
         self._store = store
         # An explicit workflow_id (attach) or the pod's SK8S_WORKFLOW_ID adopts that
         # workflow: use its anchor, never delete it from this cluster.
         inherited = workflow_id or os.environ.get("SK8S_WORKFLOW_ID")
         self.workflow_id = inherited or new_workflow_id()
+        if self.workflow_id == "svc":
+            raise ValueError(
+                "workflow id 'svc' is reserved for service blobs (svc/<name>/...); "
+                "check SK8S_WORKFLOW_ID"
+            )
         self._adopted = bool(inherited)
         self.detached = detached
         self._anchor: Any | None = None  # created/adopted lazily on first submit
@@ -152,10 +159,20 @@ class Cluster:
         return self._core
 
     @property
+    def apps(self) -> Any:
+        if self._apps is None:
+            from sk8s import k8s
+            self._apps = k8s.apps_api()
+        return self._apps
+
+    @property
     def store(self) -> BlobStore:
         if self._store is None:
             self._store = get_store(
-                self.config.store, namespace=self.config.namespace, core_api=self._core
+                self.config.store,
+                namespace=self.config.namespace,
+                core_api=self._core,
+                endpoint=self.config.store_endpoint,
             )
         return self._store
 
@@ -347,6 +364,8 @@ class Cluster:
             payload_uri=payload_uri,
             result_key=result_key,
             store=self.config.store,
+            store_endpoint=self.config.store_endpoint,
+            store_env=self.config.store_env,
             service_account=opts.get("service_account", self.config.service_account),
             pull_policy=opts.get("pull_policy", self.config.pull_policy),
             requests=opts.get("requests", {}),

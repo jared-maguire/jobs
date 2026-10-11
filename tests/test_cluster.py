@@ -190,6 +190,12 @@ def test_workflow_id_from_environment(tmp_path, monkeypatch) -> None:  # type: i
     assert h.cluster.workflow_id == "wf-from-env"
 
 
+def test_workflow_id_svc_is_reserved(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("SK8S_WORKFLOW_ID", "svc")
+    with pytest.raises(ValueError, match="reserved"):
+        Harness(tmp_path)
+
+
 def test_default_image_fallback(tmp_path) -> None:  # type: ignore[no-untyped-def]
     import sys
 
@@ -658,3 +664,34 @@ def test_registered_snapshot_reflects_register_and_unregister(tmp_path) -> None:
     assert h.cluster._watcher.registered() == {fut.job_name}
     h.cluster.untrack_job(fut.job_name)
     assert h.cluster._watcher.registered() == set()
+
+
+def test_store_endpoint_flows_to_job_env_and_store_factory(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    seen: dict = {}  # type: ignore[type-arg]
+
+    def fake_get_store(store, **kw):  # type: ignore[no-untyped-def]
+        seen.update(kw)
+        return LocalStore(tmp_path)
+
+    monkeypatch.setattr("sk8s.cluster.get_store", fake_get_store)
+    batch = FakeBatchV1()
+    cfg = Config(namespace="ns1", image="sk8s:dev", store="s3://b/p/", store_endpoint="http://minio:9000")
+    cluster = Cluster(cfg, batch_api=batch, core_api=FakeCoreV1(), watcher_events=lambda: iter(()))
+    _OPEN.append(cluster)
+    fut = cluster.submit(lambda: 1)
+    env = {e.name: e.value for e in batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].env}
+    assert env["SK8S_S3_ENDPOINT"] == "http://minio:9000"
+    assert seen["endpoint"] == "http://minio:9000"
+
+
+def test_store_env_flows_to_job_env(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    batch = FakeBatchV1()
+    cfg = Config(namespace="ns1", image="sk8s:dev", store_env={"AWS_ACCESS_KEY_ID": "k"})
+    cluster = Cluster(
+        cfg, batch_api=batch, core_api=FakeCoreV1(),
+        store=LocalStore(tmp_path), watcher_events=lambda: iter(()),
+    )
+    _OPEN.append(cluster)
+    fut = cluster.submit(lambda: 1)
+    env = {e.name: e.value for e in batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].env}
+    assert env["AWS_ACCESS_KEY_ID"] == "k"

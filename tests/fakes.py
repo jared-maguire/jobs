@@ -13,6 +13,7 @@ class FakeCoreV1:
         self.configmaps: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1ConfigMap
         self.create_calls: list[str] = []  # every create attempt, 409s included
         self.delete_policies: dict[str, str | None] = {}  # configmap name -> propagation policy
+        self.services: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1Service
 
     def create_namespaced_config_map(self, namespace: str, body: Any) -> Any:
         self.create_calls.append(body.metadata.name)
@@ -57,6 +58,23 @@ class FakeCoreV1:
         ]
         return SimpleNamespace(items=items)
 
+    def create_namespaced_service(self, namespace: str, body: Any) -> Any:
+        if (namespace, body.metadata.name) in self.services:
+            raise ApiException(status=409, reason="Conflict")
+        self.services[(namespace, body.metadata.name)] = body
+        return body
+
+    def read_namespaced_service(self, name: str, namespace: str) -> Any:
+        try:
+            return self.services[(namespace, name)]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found")
+
+    def delete_namespaced_service(self, name: str, namespace: str) -> None:
+        if (namespace, name) not in self.services:
+            raise ApiException(status=404, reason="Not Found")
+        del self.services[(namespace, name)]
+
     def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
         class R:
             items: list[Any] = []
@@ -98,3 +116,34 @@ class FakeBatchV1:
             and all((j.metadata.labels or {}).get(k) == v for k, v in wanted.items())
         ]
         return SimpleNamespace(items=items, metadata=SimpleNamespace(resource_version="1"))
+
+
+class FakeAppsV1:
+    def __init__(self) -> None:
+        self.deployments: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1Deployment
+
+    def create_namespaced_deployment(self, namespace: str, body: Any) -> Any:
+        if (namespace, body.metadata.name) in self.deployments:
+            raise ApiException(status=409, reason="Conflict")
+        self.deployments[(namespace, body.metadata.name)] = body
+        return body
+
+    def read_namespaced_deployment(self, name: str, namespace: str) -> Any:
+        try:
+            return self.deployments[(namespace, name)]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found")
+
+    def patch_namespaced_deployment(self, name: str, namespace: str, body: Any) -> Any:
+        """Applies a merge-patch of the form {"spec": {"replicas": n}}."""
+        dep = self.read_namespaced_deployment(name, namespace)
+        for key, value in (body.get("spec") or {}).items():
+            setattr(dep.spec, key, value)
+        return dep
+
+    def delete_namespaced_deployment(
+        self, name: str, namespace: str, propagation_policy: str = "Background"
+    ) -> None:
+        if (namespace, name) not in self.deployments:
+            raise ApiException(status=404, reason="Not Found")
+        del self.deployments[(namespace, name)]

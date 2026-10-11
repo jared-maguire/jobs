@@ -12,12 +12,14 @@ from sk8s.errors import (  # noqa: E402
 )
 from sk8s.future import JobFuture  # noqa: E402
 from sk8s.local import LocalCluster  # noqa: E402
+from sk8s.services import Service, get_service, serve  # noqa: E402
 from sk8s.workflows import WorkflowHandle, attach, submit_workflow  # noqa: E402
 
 __all__ = [
     "__version__", "configure", "run", "submit", "map", "starmap",
     "submit_map", "submit_starmap", "clean", "Cluster", "Config", "load_config",
     "JobFuture", "LocalCluster", "submit_workflow", "attach", "WorkflowHandle",
+    "serve", "get_service", "Service",
     "Sk8sError", "StoreError", "BlobNotFound", "BlobTooLarge", "VersionMismatch",
     "JobTimeout", "PodFailed", "ImagePullError", "RemoteException",
     "RemoteTraceback", "MapFailed",
