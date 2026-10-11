@@ -56,7 +56,7 @@ def load_config(
 
     values: dict[str, Any] = {}
     if path.exists():
-        data = tomllib.loads(path.read_text())
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
         values.update({k: v for k, v in data.items() if k in _FIELDS})
     for name in _FIELDS:
         if name == "store_env":

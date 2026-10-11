@@ -71,3 +71,16 @@ def test_default_namespace_constant_is_dedicated_not_default() -> None:
     assert DEFAULT_NAMESPACE == "sk8s"
     # The config itself stays unresolved (None) so a kube-context namespace can still apply.
     assert load_config(path=Path("/nonexistent"), env={}).namespace is None
+
+
+def test_config_file_is_read_as_utf8(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    f = tmp_path / "config.toml"
+    f.write_bytes('image_prefix = "registry.example/caf\u00e9-\u00fcber/"\n'.encode("utf-8"))
+    # Make an implicit-encoding read_text() decode as ascii, as on a C/POSIX locale.
+    real_read_text = Path.read_text
+
+    def strict_default(self, encoding=None, errors=None):  # type: ignore[no-untyped-def]
+        return real_read_text(self, encoding=encoding or "ascii", errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", strict_default)
+    assert load_config(path=f, env={}).image_prefix == "registry.example/café-über/"

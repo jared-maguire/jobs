@@ -190,8 +190,9 @@ def test_workflow_id_from_environment(tmp_path, monkeypatch) -> None:  # type: i
     assert h.cluster.workflow_id == "wf-from-env"
 
 
-def test_workflow_id_svc_is_reserved(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv("SK8S_WORKFLOW_ID", "svc")
+@pytest.mark.parametrize("reserved", ["svc", "doctor"])
+def test_workflow_id_reserved(tmp_path, monkeypatch, reserved) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("SK8S_WORKFLOW_ID", reserved)
     with pytest.raises(ValueError, match="reserved"):
         Harness(tmp_path)
 
