@@ -46,6 +46,11 @@
    way as step 3 (`-t sk8s-dev-services:latest`); the existing suite can be
    pointed at any tag with `SK8S_TEST_IMAGE`.
 
+   The volumes suite (`tests/integration/test_volumes.py`) uses
+   `sk8s-dev-volumes:latest` (override with `SK8S_VOLUMES_TEST_IMAGE`) and needs
+   `persistentvolumeclaims` in the Role (already in the command above) plus a default
+   StorageClass (minikube's `standard`).
+
 ## S3 store integration tests (MinIO)
 
 `tests/integration/test_store_s3_minio.py` runs the S3 store against a MinIO

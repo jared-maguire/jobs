@@ -14,6 +14,8 @@ class FakeCoreV1:
         self.create_calls: list[str] = []  # every create attempt, 409s included
         self.delete_policies: dict[str, str | None] = {}  # configmap name -> propagation policy
         self.services: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1Service
+        self.pvcs: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1PersistentVolumeClaim
+        self.pvc_delete_policies: dict[str, str | None] = {}  # pvc name -> propagation policy
 
     def create_namespaced_config_map(self, namespace: str, body: Any) -> Any:
         self.create_calls.append(body.metadata.name)
@@ -74,6 +76,28 @@ class FakeCoreV1:
         if (namespace, name) not in self.services:
             raise ApiException(status=404, reason="Not Found")
         del self.services[(namespace, name)]
+
+    def create_namespaced_persistent_volume_claim(self, namespace: str, body: Any) -> Any:
+        if (namespace, body.metadata.name) in self.pvcs:
+            raise ApiException(status=409, reason="Conflict")
+        if not body.metadata.uid:
+            body.metadata.uid = uuid.uuid4().hex
+        self.pvcs[(namespace, body.metadata.name)] = body
+        return body
+
+    def read_namespaced_persistent_volume_claim(self, name: str, namespace: str) -> Any:
+        try:
+            return self.pvcs[(namespace, name)]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found")
+
+    def delete_namespaced_persistent_volume_claim(
+        self, name: str, namespace: str, propagation_policy: str | None = None
+    ) -> None:
+        if (namespace, name) not in self.pvcs:
+            raise ApiException(status=404, reason="Not Found")
+        self.pvc_delete_policies[name] = propagation_policy
+        del self.pvcs[(namespace, name)]
 
     def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
         class R:
