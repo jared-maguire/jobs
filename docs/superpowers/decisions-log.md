@@ -36,3 +36,7 @@ Plan 1 (foundation): its workspace was already retired; its rulings are recorded
 - Scope change (user, 2026-10-10): GKE/EKS tabled — Plan 8 drops the cloud CI matrix; Plan 7 ships local/generic adapters only.
 - Ruling: retention stays age-from-creation with liveness guard, conditional on C1 landing (hang becomes typed error); completed-at stamping filed as a real follow-up for Plan 8's list.
 
+
+## Post-CI follow-ups
+
+- First CI run exposed that a buildable-but-credential-less store lets delete_anchor remove the anchor while the best-effort delete_prefix fails silently, orphaning blobs; this is reviewed-and-accepted best-effort behavior, but it is a candidate for delete-prefix-before-anchor ordering in a future pass.

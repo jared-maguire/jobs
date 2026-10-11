@@ -417,7 +417,19 @@ def test_store_cached_per_distinct_annotation(tmp_path, monkeypatch) -> None:  #
     assert built == [f"local:{tmp_path}"]
 
 
-def test_unresolvable_store_skips_anchor_with_log(tmp_path, caplog) -> None:  # type: ignore[no-untyped-def]
+def test_unresolvable_store_skips_anchor_with_log(tmp_path, caplog, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import sk8s.store
+
+    real = sk8s.store.get_store
+
+    def get_store(name: str, **kw: Any) -> Any:
+        # Hermetic: force the s3 backend to be unbuildable regardless of ambient AWS
+        # region/credentials (boto3.client construction succeeds on CI runners).
+        if name.startswith("s3://"):
+            raise RuntimeError("s3 backend unavailable")
+        return real(name, **kw)
+
+    monkeypatch.setattr(sk8s.store, "get_store", get_store)
     core = FakeCoreV1()
     _make(core, "wf-s3", age_days=99, retention=1, store="s3://bkt/p")  # backend not available
     _make(core, "wf-ok", age_days=99, retention=1, store=f"local:{tmp_path}")
