@@ -20,6 +20,7 @@ class JobWatcher:
         resolve: Callable[[str, str], None],
         reconnect_delay: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
+        autostart: bool = True,
     ) -> None:
         self._events = events
         self._resolve = resolve
@@ -30,6 +31,12 @@ class JobWatcher:
         self._recent_terminal: dict[str, tuple[str, float]] = {}
         self._stopped = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name="sk8s-watch")
+        if autostart:
+            self.start()
+
+    def start(self) -> None:
+        """Start the stream thread. Owners whose ``events`` callback reads the watcher itself
+        (e.g. via ``self._watcher``) pass ``autostart=False`` and call this once it is assigned."""
         self._thread.start()
 
     def register(self, job_name: str) -> None:

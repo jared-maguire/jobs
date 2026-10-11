@@ -69,6 +69,12 @@ explicitly (they do not follow the `sk8s` default).
    way as step 3 (`-t sk8s-dev-services:latest`); the existing suite can be
    pointed at any tag with `SK8S_TEST_IMAGE`.
 
+   The config/doctor/CLI suite (`tests/integration/test_config_cli.py`) needs no
+   hand-made RBAC: it creates and deletes its own namespaces (`sk8s-it-cfg*`) with
+   `sk8s config`'s machinery, and runs the CLI with a temp `HOME` so your real
+   `~/.config/sk8s/config.toml` is untouched. Tag its image
+   `sk8s-dev-config:latest` (override with `SK8S_CONFIG_TEST_IMAGE`).
+
 ## S3 store integration tests (MinIO)
 
 `tests/integration/test_store_s3_minio.py` runs the S3 store against a MinIO

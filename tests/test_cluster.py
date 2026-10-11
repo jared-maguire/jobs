@@ -738,3 +738,28 @@ def test_namespace_context_without_namespace_is_sk8s_never_default(monkeypatch, 
     monkeypatch.setattr(k8s, "context_namespace", lambda: None)
     ns = _bare_cluster(monkeypatch, tmp_path).config.namespace
     assert ns == "sk8s" and ns != "default"
+
+
+def test_event_stream_never_runs_before_the_watcher_is_assigned() -> None:
+    """Regression: the stream thread used to start inside JobWatcher.__init__, before
+    ``Cluster._watcher`` existed, so ``_k8s_events`` could hit AttributeError on first connect."""
+    from unittest import mock
+
+    from sk8s.watch import JobWatcher
+
+    seen: list[bool] = []
+    real_start = JobWatcher.start
+
+    def spy(self: JobWatcher) -> None:
+        seen.append(hasattr(owner[0], "_watcher"))
+        real_start(self)
+
+    owner: list[Cluster] = []
+    cfg = Config(namespace="ns", image="img")
+    with mock.patch.object(JobWatcher, "start", spy):
+        c = Cluster.__new__(Cluster)
+        owner.append(c)
+        c.__init__(cfg, batch_api=FakeBatchV1(), core_api=FakeCoreV1(),  # type: ignore[misc]
+                   watcher_events=lambda: iter(()))
+    assert seen == [True]
+    c.close()

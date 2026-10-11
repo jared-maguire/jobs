@@ -125,7 +125,9 @@ class Cluster:
         self._watcher = JobWatcher(
             watcher_events if watcher_events is not None else self._k8s_events,
             self._on_terminal,
+            autostart=False,  # _k8s_events reads self._watcher: start only once it is assigned
         )
+        self._watcher.start()
 
     def bind_workflow(self, workflow_id: str, *, adopt: bool, detached: bool = False) -> None:
         """Re-point an unused cluster at ``workflow_id`` (used by submit_workflow/attach).
