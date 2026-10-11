@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import concurrent.futures
 import dataclasses
+import json
 import logging
 import os
 import sys
@@ -17,7 +18,9 @@ from kubernetes.client import ApiException
 import sk8s
 from sk8s import anchors, serialize, spec
 from sk8s.config import Config, load_config
-from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout, PodFailed, StoreError
+from sk8s.errors import (
+    BlobNotFound, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
+)
 from sk8s.future import JobFuture
 from sk8s.store import get_store
 from sk8s.store.base import BlobStore
@@ -42,7 +45,28 @@ _K8S_DEFAULT_BACKOFF_LIMIT = 6
 _ANCHOR_RECHECK_SECONDS = 60.0
 _JOB_DELETED_REASON = "job was deleted before completing (workflow killed or expired?)"
 
+# API statuses meaning "the cluster refused this Job" (admission denial, forbidden, invalid).
+_REJECTION_STATUSES = frozenset({400, 403, 422})
+
 log = logging.getLogger("sk8s.cluster")
+
+
+def _job_rejected(name: str, exc: ApiException, *, privileged: bool) -> JobRejected:
+    """Turn an API refusal into a typed error carrying the server's own message."""
+    message = ""
+    try:
+        body = json.loads(exc.body) if exc.body else {}
+        message = str(body.get("message") or "") if isinstance(body, dict) else ""
+    except (TypeError, ValueError):
+        pass
+    message = (message or str(exc.reason or "") or "rejected").strip()
+    hint = None
+    if privileged:
+        hint = (
+            "privileged=True was requested; managed clusters such as GKE Autopilot refuse "
+            "privileged containers. Drop privileged=True or use a cluster that allows it."
+        )
+    return JobRejected(name, exc.status, message, hint)
 
 
 def default_image(config: Config) -> str:
@@ -384,12 +408,14 @@ class Cluster:
         )
         try:
             self.batch.create_namespaced_job(namespace=namespace, body=job)
-        except BaseException:
+        except BaseException as exc:
             # No job will ever consume (or clean up) the payload: don't leak it.
             try:
                 self.store.delete(payload_uri)
             except Exception:  # noqa: BLE001 — best-effort; the create error is what matters
                 log.exception("could not delete payload blob %s after failed create", payload_key)
+            if isinstance(exc, ApiException) and exc.status in _REJECTION_STATUSES:
+                raise _job_rejected(name, exc, privileged=bool(opts.get("privileged"))) from exc
             raise
         fut = JobFuture(name, self.workflow_id, backend=self)
         keep = opts.get("keep_results", self.config.keep_results)

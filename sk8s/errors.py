@@ -47,6 +47,26 @@ class PodFailed(Sk8sError):
         super().__init__(f"job {job_name} failed: {reason}{tail}")
 
 
+class JobRejected(Sk8sError):
+    """The Kubernetes API refused to create the Job (admission denial, forbidden, invalid spec).
+
+    Typical cause: a policy the cluster enforces, e.g. GKE Autopilot's "privileged containers
+    are not allowed". ``message`` is the API server's own explanation, verbatim.
+    """
+
+    def __init__(
+        self, job_name: str, status: int | None, message: str, hint: str | None = None
+    ) -> None:
+        self.job_name = job_name
+        self.status = status
+        self.message = message
+        self.hint = hint
+        tail = f"\n{hint}" if hint else ""
+        super().__init__(
+            f"the cluster rejected job {job_name} (HTTP {status}): {message}{tail}"
+        )
+
+
 class ImagePullError(PodFailed):
     def __init__(self, job_name: str, image: str) -> None:
         super().__init__(job_name, reason=f"cannot pull image {image!r}")
