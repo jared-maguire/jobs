@@ -1,6 +1,6 @@
 import re
 
-from sk8s.spec import build_job, job_name
+from sk8s.spec import PodMount, build_job, job_name
 
 
 def make(**over):  # type: ignore[no-untyped-def]
@@ -9,7 +9,7 @@ def make(**over):  # type: ignore[no-untyped-def]
         payload_uri="k8s://ns1/sk8s-wf-x-job-abc123-payload",
         result_key="wf-x/job-abc123/result", store="k8s",
         service_account="sk8s", pull_policy="IfNotPresent",
-        requests={}, limits={}, volumes={}, backoff_limit=0, ttl=3600,
+        requests={}, limits={}, volumes=[], backoff_limit=0, ttl=3600,
         privileged=False,
     )
     args.update(over)
@@ -41,7 +41,7 @@ def test_basic_fields() -> None:
 
 def test_resources_and_volumes() -> None:
     job = make(requests={"cpu": "1"}, limits={"memory": "1Gi"},
-               volumes={"data": "/mnt/data"})
+               volumes=[PodMount("data", "data", "/mnt/data", False)])
     c = job.spec.template.spec.containers[0]
     assert c.resources.requests == {"cpu": "1"}
     assert c.resources.limits == {"memory": "1Gi"}

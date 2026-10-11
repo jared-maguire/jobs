@@ -16,7 +16,7 @@ from typing import Any, Callable, Iterator
 from kubernetes.client import ApiException
 
 import sk8s
-from sk8s import anchors, serialize, spec
+from sk8s import anchors, serialize, spec, volumes
 from sk8s.config import Config, load_config
 from sk8s.errors import (
     BlobNotFound, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
@@ -385,6 +385,10 @@ class Cluster:
                 f"{namespace!r}: per-job namespaces arrive in a later release"
             )
         image = opts.get("image") or default_image(self.config)
+        mounts = volumes.parse_mounts(opts.get("volumes"))  # ValueError before any side effect
+        pod_mounts = [
+            spec.PodMount(m.name, m.name, m.mountpoint, m.read_only) for m in mounts
+        ]
         payload_key = f"{self.workflow_id}/{name}/payload"
         result_key = f"{self.workflow_id}/{name}/result"
         anchor = self._ensure_anchor()
@@ -406,7 +410,7 @@ class Cluster:
             pull_policy=opts.get("pull_policy", self.config.pull_policy),
             requests=opts.get("requests", {}),
             limits=opts.get("limits", {}),
-            volumes=self._normalize_volumes(opts.get("volumes", {})),
+            volumes=pod_mounts,
             backoff_limit=opts.get("backoff_limit", 0),
             ttl=self.config.ttl_seconds_after_finished,
             privileged=opts.get("privileged", False),
@@ -458,14 +462,6 @@ class Cluster:
         """Resolve a tracked job now from a phase observed by polling rather than the watch."""
         self._watcher.unregister(name)
         self._on_terminal(name, phase)
-
-    @staticmethod
-    def _normalize_volumes(volumes: Any) -> dict[str, str]:
-        if isinstance(volumes, str):
-            return {volumes: f"/mnt/{volumes}"}
-        if isinstance(volumes, (list, tuple)):
-            return {v: f"/mnt/{v}" for v in volumes}
-        return dict(volumes)
 
     def run(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         timeout = kwargs.pop("timeout", None)

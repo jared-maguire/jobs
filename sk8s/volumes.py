@@ -1,7 +1,19 @@
 """Persistent volumes: ``create_volume``, ``delete_volume`` and ``scratch_volume``.
 
-A volume is a PersistentVolumeClaim. Mount it in a job with ``volumes=<name>``
-(mounted at ``/mnt/<name>``), or ``volumes={name: path}``.
+A volume is a PersistentVolumeClaim. Mount it in a job with ``volumes=``, where each
+mount picks its own access mode and **defaults to read-only**:
+
+- ``volumes="data"``: one read-only mount at ``/mnt/data``;
+- ``volumes=["a", "b"]``: several read-only mounts, each at ``/mnt/<name>``;
+- ``volumes={"data": {"access_mode": "rw", "mountpoint": "/work"}}``: per-volume
+  choice. ``access_mode`` is ``"rw"`` or ``"ro"`` (default ``"ro"``) and ``mountpoint``
+  an absolute path (default ``/mnt/<name>``); both keys are optional, so
+  ``{"data": {}}`` is the same as ``"data"``.
+
+A job that writes must therefore say so (``"access_mode": "rw"``); a read-only mount sets
+``readOnly: true`` on both the pod volume and the volume mount, so a write fails in the job
+with ``Read-only file system``. The pre-2.0 ``{name: path}`` form is rejected with a
+``ValueError`` that shows the replacement.
 
 Lifecycle, chosen at creation:
 
@@ -26,7 +38,8 @@ import logging
 import re
 import secrets
 import string
-from typing import Any, Iterator, Sequence
+from dataclasses import dataclass
+from typing import Any, Iterator, Mapping, Sequence
 
 from kubernetes import client
 from kubernetes.client import ApiException
@@ -46,6 +59,99 @@ _NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")  # DNS-1123 label
 _MAX_NAME = 63
 _ALPHABET = string.ascii_lowercase + string.digits
 _NAME_ATTEMPTS = 5
+
+
+RW = "rw"
+RO = "ro"
+_ACCESS_MODES = (RW, RO)
+_MOUNT_KEYS = ("access_mode", "mountpoint")
+
+
+@dataclass(frozen=True)
+class Mount:
+    """One requested mount: a volume, how it is accessed, and where it appears in the pod."""
+
+    name: str
+    access_mode: str
+    mountpoint: str
+
+    @property
+    def read_only(self) -> bool:
+        return self.access_mode == RO
+
+
+def _mount(name: Any, inner: Mapping[str, Any]) -> Mount:
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"volume names must be non-empty strings, got {name!r}")
+    unknown = sorted(str(k) for k in inner if k not in _MOUNT_KEYS)
+    if unknown:
+        raise ValueError(
+            f"volumes[{name!r}]: unknown key(s) {', '.join(repr(k) for k in unknown)}; "
+            f"the allowed keys are 'access_mode' (\"rw\" or \"ro\") and 'mountpoint'"
+        )
+    mode = inner.get("access_mode", RO)
+    if not isinstance(mode, str) or mode not in _ACCESS_MODES:
+        raise ValueError(
+            f"volumes[{name!r}]['access_mode'] must be 'rw' or 'ro' (default 'ro'), got {mode!r}"
+        )
+    mountpoint = inner.get("mountpoint", f"/mnt/{name}")
+    if not isinstance(mountpoint, str) or not mountpoint.startswith("/"):
+        raise ValueError(
+            f"volumes[{name!r}]['mountpoint'] must be an absolute path such as '/mnt/{name}', "
+            f"got {mountpoint!r}"
+        )
+    return Mount(name, mode, mountpoint)
+
+
+def parse_mounts(volumes: Any) -> list[Mount]:
+    """Normalize a ``volumes=`` argument into :class:`Mount` objects (``ValueError`` if invalid).
+
+    ``None``/empty means no mounts; a ``str`` is one read-only mount; a list or tuple of
+    names is many read-only mounts; a dict maps each name to
+    ``{"access_mode": "rw"|"ro", "mountpoint": path}`` with both keys optional.
+    """
+    if volumes is None:
+        return []
+    if isinstance(volumes, str):
+        names: list[Any] = [volumes]
+        mounts = [_mount(volumes, {})]
+    elif isinstance(volumes, (list, tuple)):
+        names = list(volumes)
+        mounts = [_mount(n, {}) for n in names]
+    elif isinstance(volumes, Mapping):
+        names = list(volumes)
+        mounts = []
+        for name, inner in volumes.items():
+            if isinstance(inner, str):
+                raise ValueError(
+                    f"volumes[{name!r}] = {inner!r}: the {{name: path}} form was replaced. Use "
+                    f"{{{name!r}: {{\"mountpoint\": {inner!r}}}}} for a read-only mount (the new "
+                    f"default is read-only), or add \"access_mode\": \"rw\" if the job writes"
+                )
+            if not isinstance(inner, Mapping):
+                raise ValueError(
+                    f"volumes[{name!r}] must be a dict like "
+                    f"{{\"access_mode\": \"rw\", \"mountpoint\": \"/mnt/{name}\"}} "
+                    f"(both keys optional), got {inner!r}"
+                )
+            mounts.append(_mount(name, inner))
+    else:
+        raise ValueError(
+            "volumes must be a volume name, a list of names, or a dict of "
+            f"{{name: {{\"access_mode\": ..., \"mountpoint\": ...}}}}, got {volumes!r}"
+        )
+    seen_names: set[str] = set()
+    seen_points: set[str] = set()
+    for m in mounts:
+        if m.name in seen_names:
+            raise ValueError(f"volume {m.name!r} is listed more than once in volumes=")
+        if m.mountpoint in seen_points:
+            raise ValueError(
+                f"two volumes share the mountpoint {m.mountpoint!r}; give each its own 'mountpoint'"
+            )
+        seen_names.add(m.name)
+        seen_points.add(m.mountpoint)
+    return mounts
 
 
 def _validate_name(name: str) -> None:
@@ -183,7 +289,13 @@ def delete_volume(name: str, cluster: Any | None = None) -> None:
 
 @contextlib.contextmanager
 def scratch_volume(size: str, cluster: Any | None = None) -> Iterator[str]:
-    """Create a volume, yield its name, and delete it on exit (also on exceptions)."""
+    """Create a volume, yield its name, and delete it on exit (also on exceptions).
+
+    Mounts default to read-only, so a job that fills the scratch space must ask to write::
+
+        with sk8s.scratch_volume("10Gi") as vol:
+            sk8s.run(work, volumes={vol: {"access_mode": "rw"}})
+    """
     name = create_volume(size, cluster=cluster)
     try:
         yield name

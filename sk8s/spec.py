@@ -4,12 +4,29 @@ from __future__ import annotations
 import random
 import re
 import string
-
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Sequence
 
 from kubernetes import client
 
 MANAGED_BY = "sk8s"
+
+
+@dataclass(frozen=True)
+class PodMount:
+    """One PVC mount in a job's pod, after ``sk8s.volumes`` has resolved the claim.
+
+    ``name`` is the logical volume name (used for the pod volume, so it stays a valid DNS
+    label even when ``claim`` is a longer hidden clone name); ``claim`` is the PVC actually
+    claimed. ``read_only`` sets ``readOnly: true`` on BOTH the pod volume and the volume
+    mount (the GKE documentation asks for both); a read-write mount sets neither, which
+    leaves the built Job exactly as it was before mounts had modes.
+    """
+
+    name: str
+    claim: str
+    mountpoint: str
+    read_only: bool
 
 
 def job_name(prefix: str) -> str:
@@ -31,7 +48,7 @@ def build_job(
     pull_policy: str,
     requests: dict[str, str],
     limits: dict[str, str],
-    volumes: dict[str, str],
+    volumes: Sequence[PodMount] = (),
     backoff_limit: int,
     ttl: int,
     privileged: bool,
@@ -80,8 +97,10 @@ def build_job(
             client.V1SecurityContext(privileged=True) if privileged else None
         ),
         volume_mounts=[
-            client.V1VolumeMount(name=pvc, mount_path=path)
-            for pvc, path in volumes.items()
+            client.V1VolumeMount(
+                name=m.name, mount_path=m.mountpoint, read_only=True if m.read_only else None
+            )
+            for m in volumes
         ] or None,
     )
     pod_spec = client.V1PodSpec(
@@ -90,12 +109,12 @@ def build_job(
         containers=[container],
         volumes=[
             client.V1Volume(
-                name=pvc,
+                name=m.name,
                 persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                    claim_name=pvc
+                    claim_name=m.claim, read_only=True if m.read_only else None
                 ),
             )
-            for pvc in volumes
+            for m in volumes
         ] or None,
     )
     return client.V1Job(

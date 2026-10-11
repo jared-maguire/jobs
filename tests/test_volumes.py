@@ -252,9 +252,9 @@ def test_scratch_volume_body_already_deleted_is_fine(h: Harness) -> None:
     assert not h.core.pvcs
 
 
-def test_mount_name_feeds_cluster_volume_normalization(h: Harness) -> None:
+def test_created_name_mounts_read_only_at_mnt_name_by_default(h: Harness) -> None:
     name = sk8s.create_volume("1Gi", cluster=h.cluster)
-    assert Cluster._normalize_volumes(name) == {name: f"/mnt/{name}"}
+    assert volumes.parse_mounts(name) == [volumes.Mount(name, "ro", f"/mnt/{name}")]
 
 
 def test_default_cluster_used_when_none_given(h: Harness) -> None:

@@ -115,6 +115,11 @@ def _wait_pvc_gone(c: Cluster, name: str) -> None:
         raise AssertionError(f"{e}; timeline: {timeline}") from None
 
 
+def _rw(vol: str) -> dict[str, dict[str, str]]:
+    """Mounts are read-only by default; a job that writes must say so."""
+    return {vol: {"access_mode": "rw"}}
+
+
 def _write(path: str, text: str) -> Callable[[], str]:
     # Built from a nested function so cloudpickle ships it by value (the worker
     # image does not contain the ``tests`` package).
@@ -141,7 +146,7 @@ def test_roundtrip(vol_cluster: Cluster) -> None:
     assert _pvc_exists(vol_cluster, vol)
     try:
         path = f"/mnt/{vol}/hello.txt"
-        assert vol_cluster.run(_write(path, "hello volume"), volumes=vol, timeout=240) == "written"
+        assert vol_cluster.run(_write(path, "hello volume"), volumes=_rw(vol), timeout=240) == "written"
         assert vol_cluster.run(_read(path), volumes=vol, timeout=240) == "hello volume"
     finally:
         delete_volume(vol, cluster=vol_cluster)
@@ -160,7 +165,7 @@ def test_kept_volume_survives_cascade(vol_cluster: Cluster) -> None:
     try:
         # An anchor exists for this workflow once a job has run.
         path = f"/mnt/{vol}/keep.txt"
-        assert vol_cluster.run(_write(path, "kept"), volumes=vol, timeout=240) == "written"
+        assert vol_cluster.run(_write(path, "kept"), volumes=_rw(vol), timeout=240) == "written"
         vol_cluster.close(delete_workflow=True)  # anchor cascade
 
         # Survives a stable 5s window (a cascade would have removed it by now).
@@ -184,7 +189,7 @@ def test_scratch_volume(vol_cluster: Cluster) -> None:
     with scratch_volume("100Mi", cluster=vol_cluster) as vol:
         assert _pvc_exists(vol_cluster, vol)
         path = f"/mnt/{vol}/scratch.txt"
-        assert vol_cluster.run(_write(path, "scratch"), volumes=vol, timeout=240) == "written"
+        assert vol_cluster.run(_write(path, "scratch"), volumes=_rw(vol), timeout=240) == "written"
         assert vol_cluster.run(_read(path), volumes=vol, timeout=240) == "scratch"
     _wait_pvc_gone(vol_cluster, vol)
 
@@ -210,8 +215,8 @@ def test_rwx_volume_shared_between_jobs(vol_cluster: Cluster) -> None:
         )
         assert pvc.spec.access_modes == ["ReadWriteMany"]
         # Two jobs at once on the same volume: ReadWriteMany is what lets them share it.
-        w1 = vol_cluster.submit(_write(f"/mnt/{vol}/one.txt", "one"), volumes=vol)
-        w2 = vol_cluster.submit(_write(f"/mnt/{vol}/two.txt", "two"), volumes=vol)
+        w1 = vol_cluster.submit(_write(f"/mnt/{vol}/one.txt", "one"), volumes=_rw(vol))
+        w2 = vol_cluster.submit(_write(f"/mnt/{vol}/two.txt", "two"), volumes=_rw(vol))
         assert w1.result(timeout=1500) == "written"  # first pod pays Filestore provisioning
         assert w2.result(timeout=300) == "written"
         assert vol_cluster.run(_read(f"/mnt/{vol}/one.txt"), volumes=vol, timeout=300) == "one"
