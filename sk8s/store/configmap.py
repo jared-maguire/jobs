@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import base64
+import re
+from typing import Any
+
+from kubernetes import client
+from kubernetes.client import ApiException
+
+from sk8s.errors import BlobNotFound, BlobTooLarge
+from sk8s.store.base import BlobStore
+
+MAX_CONFIGMAP_BLOB = 950_000
+MANAGED_BY = {"app.kubernetes.io/managed-by": "sk8s"}
+
+
+def _sanitize(key: str) -> str:
+    name = "sk8s-" + re.sub(r"[^a-z0-9-]+", "-", key.lower()).strip("-")
+    return name[:253]
+
+
+class ConfigMapStore(BlobStore):
+    """Zero-setup default store. One ConfigMap per blob. URI: k8s://<ns>/<name>."""
+
+    def __init__(self, namespace: str, core_api: Any) -> None:
+        self.namespace = namespace
+        self.core_api = core_api
+
+    def uri_for(self, key: str) -> str:
+        return f"k8s://{self.namespace}/{_sanitize(key)}"
+
+    def put(self, key: str, data: bytes, owner: Any | None = None) -> str:
+        if len(data) > MAX_CONFIGMAP_BLOB:
+            raise BlobTooLarge(
+                f"blob for {key!r} is {len(data)} bytes; the ConfigMap store caps at "
+                f"{MAX_CONFIGMAP_BLOB}. Configure an object store (s3:// or gs://) — "
+                f"see `sk8s config --store`."
+            )
+        workflow_id = key.split("/", 1)[0]
+        meta = client.V1ObjectMeta(
+            name=_sanitize(key),
+            labels={**MANAGED_BY, "sk8s/workflow-id": workflow_id},
+            owner_references=[owner] if owner is not None else None,
+        )
+        body = client.V1ConfigMap(
+            metadata=meta, binary_data={"blob": base64.b64encode(data).decode()}
+        )
+        try:
+            self.core_api.create_namespaced_config_map(namespace=self.namespace, body=body)
+        except ApiException as e:
+            if e.status == 409:  # retried worker overwrites its previous attempt
+                self.core_api.delete_namespaced_config_map(
+                    name=meta.name, namespace=self.namespace
+                )
+                self.core_api.create_namespaced_config_map(
+                    namespace=self.namespace, body=body
+                )
+            else:
+                raise
+        return self.uri_for(key)
+
+    def _split(self, uri: str) -> tuple[str, str]:
+        assert uri.startswith("k8s://"), uri
+        ns, name = uri[len("k8s://"):].split("/", 1)
+        return ns, name
+
+    def get(self, uri: str) -> bytes:
+        ns, name = self._split(uri)
+        try:
+            cm = self.core_api.read_namespaced_config_map(name=name, namespace=ns)
+        except ApiException as e:
+            if e.status == 404:
+                raise BlobNotFound(uri) from None
+            raise
+        return base64.b64decode(cm.binary_data["blob"])
+
+    def delete(self, uri: str) -> None:
+        ns, name = self._split(uri)
+        try:
+            self.core_api.delete_namespaced_config_map(name=name, namespace=ns)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+
+    def delete_prefix(self, prefix: str) -> None:
+        name_prefix = _sanitize(prefix)
+        cms = self.core_api.list_namespaced_config_map(
+            namespace=self.namespace, label_selector="app.kubernetes.io/managed-by=sk8s"
+        )
+        for cm in cms.items:
+            if cm.metadata.name.startswith(name_prefix):
+                self.delete(f"k8s://{self.namespace}/{cm.metadata.name}")
