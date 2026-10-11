@@ -115,7 +115,7 @@ def test_missing_namespace_fails_with_config_hint() -> None:
     _, rbac = _converged()
     checks = _run(_profile(), FakeCoreV1(), rbac, MemStore())
     assert not checks["namespace exists"].ok
-    assert "sk8s config" in checks["namespace exists"].fix_hint
+    assert "run: sk8s config" in checks["namespace exists"].fix_hint
     assert "team-a" in checks["namespace exists"].fix_hint
     assert checks["cluster reachable"].ok  # others unaffected
 
@@ -125,7 +125,7 @@ def test_missing_service_account_fails_but_others_still_run() -> None:
     del core.service_accounts[("team-a", "sk8s")]
     checks = _run(_profile(), core, rbac, MemStore())
     assert not checks["service account exists"].ok
-    assert "sk8s config" in checks["service account exists"].fix_hint
+    assert "run: sk8s config" in checks["service account exists"].fix_hint
     assert checks["namespace exists"].ok
     assert checks["role permissions"].ok
     assert checks["store writable"].ok

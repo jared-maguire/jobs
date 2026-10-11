@@ -20,7 +20,7 @@ PORT = 8080
 
 def _new_cluster() -> Cluster:
     return Cluster(
-        load_config(image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=30)
+        load_config(namespace="default", image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=30)
     )
 
 

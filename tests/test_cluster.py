@@ -695,3 +695,46 @@ def test_store_env_flows_to_job_env(tmp_path) -> None:  # type: ignore[no-untype
     fut = cluster.submit(lambda: 1)
     env = {e.name: e.value for e in batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].env}
     assert env["AWS_ACCESS_KEY_ID"] == "k"
+
+
+# --- namespace resolution: explicit > kube-context namespace (if set) > "sk8s" -----------------
+
+
+def _bare_cluster(monkeypatch: pytest.MonkeyPatch, tmp_path, config=None, **kw):  # type: ignore[no-untyped-def]
+    c = Cluster(
+        config if config is not None else Config(image="sk8s:dev"),
+        batch_api=FakeBatchV1(), core_api=FakeCoreV1(), store=LocalStore(tmp_path), **kw,
+    )
+    _OPEN.append(c)
+    return c
+
+
+def test_namespace_explicit_config_beats_context(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from sk8s import k8s
+
+    monkeypatch.setattr(k8s, "context_namespace", lambda: "ctx-ns")
+    c = _bare_cluster(monkeypatch, tmp_path, Config(namespace="explicit", image="x"))
+    assert c.config.namespace == "explicit"
+
+
+def test_namespace_explicit_kwarg_beats_context(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from sk8s import k8s
+
+    monkeypatch.setattr(k8s, "context_namespace", lambda: "ctx-ns")
+    c = _bare_cluster(monkeypatch, tmp_path, namespace="kw")
+    assert c.config.namespace == "kw"
+
+
+def test_namespace_context_beats_default(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from sk8s import k8s
+
+    monkeypatch.setattr(k8s, "context_namespace", lambda: "ctx-ns")
+    assert _bare_cluster(monkeypatch, tmp_path).config.namespace == "ctx-ns"
+
+
+def test_namespace_context_without_namespace_is_sk8s_never_default(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from sk8s import k8s
+
+    monkeypatch.setattr(k8s, "context_namespace", lambda: None)
+    ns = _bare_cluster(monkeypatch, tmp_path).config.namespace
+    assert ns == "sk8s" and ns != "default"

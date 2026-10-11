@@ -35,7 +35,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
             monkeypatch.delenv(key)
     path = tmp_path / "cfg" / "config.toml"
     monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", path)
-    monkeypatch.setattr(k8s, "current_namespace", lambda: "ctx-ns")
+    monkeypatch.setattr(k8s, "context_namespace", lambda: "ctx-ns")
     monkeypatch.setattr(profile_mod, "detect_provider", lambda context=None: "local")
     return path
 
@@ -270,13 +270,51 @@ def test_config_second_run_converges(monkeypatch: pytest.MonkeyPatch, env: Path)
     assert env.read_text() == first
 
 
-def test_config_defaults_namespace_from_context_and_store_from_config(
+def test_config_defaults_namespace_to_sk8s_ignoring_context_and_reads_store_from_config(
     monkeypatch: pytest.MonkeyPatch, env: Path
 ) -> None:
     _fakes(monkeypatch)
+    cli.run(["config"])  # the kube context says 'ctx-ns'; config still targets the dedicated ns
+    data = tomllib.loads(env.read_text())
+    assert data["namespace"] == "sk8s" and data["store"] == "k8s"
+
+
+def test_config_dry_run_without_namespace_plans_sk8s_namespace(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], env: Path
+) -> None:
+    core, _, rbac = _fakes(monkeypatch)
+    assert cli.run(["config", "--dry-run"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "ensure Namespace sk8s"
+    assert "default" not in out[0] and "ctx-ns" not in "".join(out)
+    assert core.actions == [] and rbac.actions == [] and not env.exists()
+
+
+def test_config_reuses_already_configured_namespace(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    _fakes(monkeypatch)
+    env.parent.mkdir(parents=True)
+    env.write_text('namespace = "team-b"\n')
     cli.run(["config"])
-    assert tomllib.loads(env.read_text())["namespace"] == "ctx-ns"
-    assert tomllib.loads(env.read_text())["store"] == "k8s"
+    assert tomllib.loads(env.read_text())["namespace"] == "team-b"
+
+
+def test_config_help_documents_sk8s_default(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.run(["config", "--help"])
+    assert "default: sk8s" in " ".join(capsys.readouterr().out.split())
+
+
+def test_doctor_without_config_uses_context_namespace_then_sk8s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _doctor_with(monkeypatch, [Check("x", True)])
+    cli.run(["doctor"])
+    assert seen[-1].namespace == "ctx-ns"  # context explicitly sets one
+    monkeypatch.setattr(k8s, "context_namespace", lambda: None)
+    cli.run(["doctor"])
+    assert seen[-1].namespace == "sk8s"  # never "default"
 
 
 def test_config_provider_wiring(monkeypatch: pytest.MonkeyPatch) -> None:

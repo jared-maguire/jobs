@@ -1,8 +1,31 @@
 # Developer setup (minikube)
 
+## Namespace
+
+sk8s runs in a dedicated namespace, **`sk8s`**, and never falls back to
+`default`. When nothing names a namespace, it is resolved as: explicit setting
+(config file, `SK8S_NAMESPACE`, or a kwarg) > the active kube context's
+namespace, when that context explicitly sets one > `sk8s`. Inside a worker pod
+the pod's own namespace always wins.
+
+`sk8s config` creates the namespace (plus the ServiceAccount, Role and
+RoleBinding) and records it in `~/.config/sk8s/config.toml`; `--namespace`
+defaults to `sk8s` (or the namespace you already configured). `sk8s doctor`
+tells you to run `sk8s config` if any of that is missing:
+
+```
+sk8s config --dry-run   # show the plan
+sk8s config             # apply it and write the client config
+sk8s doctor
+```
+
+The manual setup below predates `sk8s config` and provisions the **`default`**
+namespace instead, so the integration suites pin `namespace="default"`
+explicitly (they do not follow the `sk8s` default).
+
 1. `minikube start`
-2. Service account + RBAC (temporary until `sk8s config` lands in the
-   cluster-config feature). Make sure `kubectl config current-context` is
+2. Service account + RBAC (legacy default-namespace setup for the integration
+   suites; for everything else use `sk8s config`). Make sure `kubectl config current-context` is
    `minikube` first:
 
    ```
@@ -50,7 +73,7 @@
 
 `tests/integration/test_store_s3_minio.py` runs the S3 store against a MinIO
 deployed in the cluster by `tests/integration/minio.py` (Deployment + Service
-`minio` in the current namespace, default `minioadmin` credentials; created on
+`minio` in the `default` namespace, default `minioadmin` credentials; created on
 first use and reused afterwards, never torn down automatically). The client
 reaches it through a `kubectl port-forward svc/minio` that the fixture starts and
 stops; worker pods reach it via `minio.default.svc.cluster.local:9000` and get

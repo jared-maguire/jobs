@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sk8s.config import Config, load_config
+from sk8s.config import DEFAULT_NAMESPACE, Config, load_config
 
 
 def test_defaults() -> None:
@@ -65,3 +65,9 @@ def test_store_env_default_is_independent_and_file_settable(tmp_path: Path) -> N
 def test_store_env_not_read_from_environment() -> None:
     cfg = load_config(path=Path("/nonexistent"), env={"SK8S_STORE_ENV": "junk"})
     assert cfg.store_env == {}
+
+
+def test_default_namespace_constant_is_dedicated_not_default() -> None:
+    assert DEFAULT_NAMESPACE == "sk8s"
+    # The config itself stays unresolved (None) so a kube-context namespace can still apply.
+    assert load_config(path=Path("/nonexistent"), env={}).namespace is None

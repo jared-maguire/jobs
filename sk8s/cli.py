@@ -55,7 +55,7 @@ def _load_cfg() -> Config:
 
 
 def _namespace(explicit: str | None = None, cfg: Config | None = None) -> str:
-    """--namespace, else the configured namespace, else the kube context's."""
+    """--namespace, else the configured namespace, else the kube context's (if it sets one), else "sk8s"."""
     if explicit:
         return explicit
     ns = (cfg if cfg is not None else _load_cfg()).namespace
@@ -158,7 +158,9 @@ def write_config(path: Path, updates: dict[str, str]) -> None:
 
 def _cmd_config(args: argparse.Namespace) -> int:
     cfg = _load_cfg()
-    namespace = _namespace(args.namespace, cfg)
+    # Unlike the other commands, config never infers the namespace from the kube context: it
+    # creates one, so the default is the dedicated "sk8s" namespace unless told otherwise.
+    namespace = args.namespace or cfg.namespace or config_mod.DEFAULT_NAMESPACE
     store = args.store or cfg.store
     provider = args.provider or profile_mod.detect_provider()
     try:
@@ -417,7 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
 
     p = sub.add_parser("config", help="prepare a namespace for sk8s and write the client config")
-    p.add_argument("--namespace", help="target namespace (default: configured / current context)")
+    p.add_argument("--namespace", help="namespace to create and configure (default: sk8s, or the namespace already configured)")
     p.add_argument("--store", help="blob store (default: configured, else 'k8s')")
     p.add_argument("--provider", help="local | generic (default: detected from the kube context)")
     p.add_argument("--dry-run", action="store_true", help="print the plan; apply nothing")
