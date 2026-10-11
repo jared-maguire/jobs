@@ -109,7 +109,10 @@ class Cluster:
     def store(self) -> BlobStore:
         if self._store is None:
             self._store = get_store(
-                self.config.store, namespace=self.config.namespace, core_api=self._core
+                self.config.store,
+                namespace=self.config.namespace,
+                core_api=self._core,
+                endpoint=self.config.store_endpoint,
             )
         return self._store
 
@@ -199,6 +202,7 @@ class Cluster:
             payload_uri=payload_uri,
             result_key=result_key,
             store=self.config.store,
+            store_endpoint=self.config.store_endpoint,
             service_account=opts.get("service_account", self.config.service_account),
             pull_policy=opts.get("pull_policy", self.config.pull_policy),
             requests=opts.get("requests", {}),

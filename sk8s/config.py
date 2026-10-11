@@ -24,6 +24,7 @@ class Config:
     pull_policy: str = "IfNotPresent"
     service_account: str = "sk8s"
     store: str = "k8s"                  # "k8s" | "local:<dir>" | "s3://..." | "gs://..."
+    store_endpoint: str | None = None   # S3-compatible endpoint URL; env SK8S_S3_ENDPOINT wins
     ttl_seconds_after_finished: int = 3600
     retention_days: int = 7
     keep_results: bool = False

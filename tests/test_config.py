@@ -43,3 +43,12 @@ def test_frozen() -> None:
     except Exception:
         raised = True
     assert raised
+
+
+def test_store_endpoint_layers(tmp_path: Path) -> None:
+    assert load_config(path=Path("/nonexistent"), env={}).store_endpoint is None
+    f = tmp_path / "config.toml"
+    f.write_text('store_endpoint = "http://file:9000"\n')
+    assert load_config(path=f, env={}).store_endpoint == "http://file:9000"
+    cfg = load_config(path=f, env={"SK8S_STORE_ENDPOINT": "http://env:9000"})
+    assert cfg.store_endpoint == "http://env:9000"

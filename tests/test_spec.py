@@ -56,3 +56,13 @@ def test_job_name_valid_and_random() -> None:
     assert n1 != n2
     assert re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", n1)
     assert len(job_name("x" * 100)) <= 63
+
+
+def _env(job) -> dict:  # type: ignore[no-untyped-def]
+    return {e.name: e.value for e in job.spec.template.spec.containers[0].env}
+
+
+def test_s3_endpoint_exported_only_when_configured() -> None:
+    assert "SK8S_S3_ENDPOINT" not in _env(make())
+    assert "SK8S_S3_ENDPOINT" not in _env(make(store_endpoint=None))
+    assert _env(make(store_endpoint="http://minio:9000"))["SK8S_S3_ENDPOINT"] == "http://minio:9000"
