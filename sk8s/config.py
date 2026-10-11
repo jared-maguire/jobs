@@ -33,6 +33,9 @@ class Config:
     service_account: str = "sk8s"
     store: str = "k8s"                  # "k8s" | "local:<dir>" | "s3://..." | "gs://..."
     store_endpoint: str | None = None   # S3-compatible endpoint URL; env SK8S_S3_ENDPOINT wins
+    # StorageClass for ReadWriteMany volumes; written by ``sk8s config`` from the cluster profile.
+    # None -> RWX volumes need an explicit ``storage_class=`` (create_volume says so).
+    rwx_storage_class: str | None = None
     ttl_seconds_after_finished: int = 3600
     retention_days: int = 7
     keep_results: bool = False

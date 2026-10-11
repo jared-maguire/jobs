@@ -287,6 +287,17 @@ class FakeRbacV1:
 class FakeStorageV1:
     def __init__(self, classes: tuple[str, ...] = ()) -> None:
         self.classes = set(classes)
+        self.created: dict[str, Any] = {}  # name -> V1StorageClass body, as created
+        self.actions: list[tuple[str, str, str]] = []  # (verb, kind, name); 409s included
+
+    def create_storage_class(self, body: Any) -> Any:
+        name = body.metadata.name
+        self.actions.append(("create", "StorageClass", name))
+        if name in self.classes:
+            raise ApiException(status=409, reason="Conflict")
+        self.classes.add(name)
+        self.created[name] = body
+        return body
 
     def read_storage_class(self, name: str) -> Any:
         if name not in self.classes:

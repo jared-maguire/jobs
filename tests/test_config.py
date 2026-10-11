@@ -57,6 +57,16 @@ def test_store_endpoint_layers(tmp_path: Path) -> None:
     assert cfg.store_endpoint == "http://env:9000"
 
 
+def test_rwx_storage_class_layers(tmp_path: Path) -> None:
+    assert load_config(path=Path("/nonexistent"), env={}).rwx_storage_class is None
+    f = tmp_path / "config.toml"
+    f.write_text('rwx_storage_class = "file-rwx"\n')
+    assert load_config(path=f, env={}).rwx_storage_class == "file-rwx"
+    cfg = load_config(path=f, env={"SK8S_RWX_STORAGE_CLASS": "env-rwx"})
+    assert cfg.rwx_storage_class == "env-rwx"
+    assert load_config(path=f, env={}, rwx_storage_class="kw-rwx").rwx_storage_class == "kw-rwx"
+
+
 def test_store_env_default_is_independent_and_file_settable(tmp_path: Path) -> None:
     a, b = Config(), Config()
     assert a.store_env == {} and a.store_env is not b.store_env

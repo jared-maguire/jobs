@@ -6,7 +6,8 @@ from kubernetes.client import ApiException
 
 from sk8s import profile as prof
 from sk8s.profile import ClusterProfile, apply, detect_provider, plan, profile_for
-from tests.fakes import FakeCoreV1, FakeRbacV1
+from sk8s import k8s
+from tests.fakes import FakeCoreV1, FakeRbacV1, FakeStorageV1
 
 VERBS = ("get", "list", "watch", "create", "delete", "patch")
 
@@ -474,3 +475,99 @@ def test_service_account_create_409_race_still_converges_annotations() -> None:
     assert ("create", "ServiceAccount", "sk8s") in core.actions
     assert ("patch", "ServiceAccount", "sk8s") in core.actions
     assert core.service_accounts[("team-a", "sk8s")].metadata.annotations == {WI: GSA}
+
+
+# --- ensure-StorageClass (generic only, plan-first) ---------------------------------------------
+
+PROVISIONER = "example.com/nfs"
+
+
+def _nfs(**kw: object) -> ClusterProfile:
+    return profile_for(
+        "generic", namespace="n", store="k8s",
+        rwx_storage_class="nfs", rwx_provisioner=PROVISIONER, **kw,  # type: ignore[arg-type]
+    )
+
+
+def _apply_sc(p: ClusterProfile, storage: FakeStorageV1) -> list[str]:
+    return apply(
+        p, core_api=FakeCoreV1(), rbac_api=FakeRbacV1(), storage_api=storage  # type: ignore[arg-type]
+    )
+
+
+def test_generic_adapter_carries_the_provisioner() -> None:
+    assert _nfs().rwx_provisioner == PROVISIONER
+    assert _profile().rwx_provisioner is None
+
+
+@pytest.mark.parametrize(
+    "provider, kw",
+    [
+        ("generic", {}),  # a provisioner with no class to create
+        ("local", {"rwx_storage_class": "nfs"}),
+        ("gke", {"project": "p", "region": "r"}),
+    ],
+)
+def test_rwx_provisioner_is_rejected_where_it_makes_no_sense(
+    provider: str, kw: dict[str, str]
+) -> None:
+    with pytest.raises(ValueError):
+        profile_for(provider, namespace="n", store="k8s", rwx_provisioner=PROVISIONER, **kw)
+
+
+def test_plan_lists_the_storage_class_step_only_when_there_is_something_to_create() -> None:
+    assert f"ensure StorageClass nfs (provisioner {PROVISIONER})" in plan(_nfs())
+    for p in (
+        _profile(),
+        _gke(),
+        profile_for("generic", namespace="n", store="k8s", rwx_storage_class="nfs"),
+    ):
+        assert not any("StorageClass" in line for line in plan(p))
+
+
+def test_apply_creates_the_missing_storage_class_and_a_second_apply_converges() -> None:
+    storage = FakeStorageV1()
+    out = _apply_sc(_nfs(), storage)
+    sc = storage.created["nfs"]
+    assert (sc.metadata.name, sc.provisioner) == ("nfs", PROVISIONER)
+    assert sc.metadata.labels == prof.MANAGED_BY
+    assert "StorageClass nfs: created" in out
+    before = list(storage.actions)
+    out = _apply_sc(_nfs(), storage)
+    assert storage.actions == before  # zero creates the second time
+    assert "StorageClass nfs: exists" in out
+
+
+def test_an_existing_storage_class_is_never_touched() -> None:
+    storage = FakeStorageV1(classes=("nfs",))
+    out = _apply_sc(_nfs(), storage)
+    assert storage.actions == [] and "StorageClass nfs: exists" in out
+
+
+def test_storage_class_create_409_race_counts_as_exists() -> None:
+    class Racy(FakeStorageV1):
+        def read_storage_class(self, name: str) -> object:
+            if not self.actions:  # not there on the read...
+                raise ApiException(status=404, reason="Not Found")
+            return super().read_storage_class(name)
+
+    storage = Racy(classes=("nfs",))  # ...but present by the time we create
+    assert "StorageClass nfs: exists" in _apply_sc(_nfs(), storage)
+
+
+def test_apply_propagates_non_404_storage_class_read_errors() -> None:
+    class Denied(FakeStorageV1):
+        def read_storage_class(self, name: str) -> object:
+            raise ApiException(status=403, reason="Forbidden")
+
+    with pytest.raises(ApiException):
+        _apply_sc(_nfs(), Denied())
+
+
+def test_apply_never_builds_a_storage_client_without_a_class_to_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(k8s, "storage_api", lambda: pytest.fail("storage client built"))
+    for p in (_profile(), _gke(), profile_for("generic", namespace="n", store="k8s",
+                                              rwx_storage_class="nfs")):
+        _apply(p, FakeCoreV1(), FakeRbacV1())
