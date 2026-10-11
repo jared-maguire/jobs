@@ -187,6 +187,7 @@ class Cluster:
         self._atexit_hook: Callable[[], None] | None = None
         self._futures: dict[str, tuple[JobFuture, bool, str]] = {}  # name -> (future, keep_results, image)
         self._mount_plans: dict[str, _MountPlan] = {}  # job name -> clone-backed volume bookkeeping
+        self._read_volumes: set[str] = set()  # clone-backed volumes this client mounted read-only
         self._diagnoses: dict[str, PodFailed] = {}  # job name -> the typed error for a "volume-stuck" job
         self._attach_blocked_since: dict[str, float] = {}  # pod name -> when its attach block was first seen
         self._provision_failing_since: dict[str, float] = {}  # clone claim -> first ProvisioningFailed sighting
@@ -744,6 +745,7 @@ class Cluster:
                 assert mgr is not None
                 claim = mgr.resolve_read_only(m.name, pvcs[m.name])
                 plan.readers.append(m.name)
+                self._read_volumes.add(m.name)
             pod_mounts.append(spec.PodMount(m.name, claim, m.mountpoint, m.read_only))
         return pod_mounts
 
@@ -965,6 +967,21 @@ class Cluster:
             log.exception("post-cancel cleanup of job %s failed", job_name)
         return True
 
+    def _sweep_read_volumes(self) -> None:
+        """Last chance to remove clones a young-age floor kept alive at reader end: nothing
+        retries a skipped sweep, so close() does (floor 0; see sk8s.clones). Never raises."""
+        if not self._read_volumes:
+            return
+        try:
+            mgr = self._clone_manager()
+            for volume in sorted(self._read_volumes):
+                try:
+                    mgr.sweep_stale(volume, min_age=0.0)
+                except Exception:  # noqa: BLE001
+                    log.exception("could not sweep superseded clones of volume %s", volume)
+        except Exception:  # noqa: BLE001 — close() runs at interpreter exit
+            log.exception("could not sweep superseded clones on close")
+
     def close(self, delete_workflow: bool | None = None) -> None:
         """Stop watching and (maybe) delete the workflow's anchor.
 
@@ -983,6 +1000,7 @@ class Cluster:
             self._watcher.stop()
             if self._atexit_hook is not None:
                 atexit.unregister(self._atexit_hook)
+            self._sweep_read_volumes()
         with self._anchor_lock:
             if self._anchor is None or self._anchor_deleted:
                 return

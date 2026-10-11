@@ -57,8 +57,19 @@ Races and how they are closed (Plan 10 fix round 1):
 - The generation never moves backward: a late settle of an older writer is compared by Job
   completion time and skipped if a newer writer is already the generation.
 
+Retrying the sweep: a superseded clone younger than ``CLONE_MIN_AGE`` is skipped, and
+there is no timer to retry it. It is removed by the next sweep on the volume (any later
+read-only submit or reader end), and finally by ``Cluster.close()``, which sweeps every
+volume this client read with the floor set to 0. Closing may therefore delete a superseded
+clone a *different* client resolved moments ago and has not yet attached a Job to; that
+client's post-create check fails loudly ("submit again") rather than hanging, and a Job
+that already exists is protected by the active-Job guard regardless of age.
+
 What is still true (by design, not bugs):
 
+- A reader submit that creates a clone and then fails (or dies) leaves a Pending clone that
+  holds writers back for up to ``CLONE_MIN_AGE`` seconds after its last use. Intended: the
+  floor is what protects submits that are still in flight.
 - A clone is cut from the *live primary*. If a writer failed, or was cancelled, before the
   next reader, whatever it had already written to the primary is captured by that reader's clone
   even though that writer never became the generation.
@@ -402,16 +413,18 @@ class CloneManager:
             )
         except ApiException as e:
             if not _is_404(e):
-                raise
+                raise self._clone_error(
+                    clone.metadata.name, clone.metadata.labels.get(CLONE_OF_LABEL, "?"), "stamp", e
+                ) from e
 
-    def recently_used(self, clone: Any) -> bool:
-        """True if the clone was created, or adopted by a read-only mount, within CLONE_MIN_AGE."""
+    def recently_used(self, clone: Any, min_age: float = CLONE_MIN_AGE) -> bool:
+        """True if the clone was created, or adopted by a read-only mount, within ``min_age``."""
         for stamp in (
             clone.metadata.creation_timestamp,
             (clone.metadata.annotations or {}).get(CLONE_LAST_USED_ANNOTATION),
         ):
             age = self._age(stamp)
-            if age is not None and age < CLONE_MIN_AGE:
+            if age is not None and age < min_age:
                 return True
         return False
 
@@ -503,10 +516,13 @@ class CloneManager:
         )
         return list(listing.items)
 
-    def sweep_stale(self, volume: str, *, current: str | None = None) -> list[str]:
+    def sweep_stale(
+        self, volume: str, *, current: str | None = None, min_age: float = CLONE_MIN_AGE
+    ) -> list[str]:
         """Delete clones of ``volume`` other than ``current`` that no active Job references.
 
-        ``current`` defaults to the clone of the volume's present generation. A superseded
+        ``current`` defaults to the clone of the volume's present generation. ``min_age`` is the
+        floor described in the module docstring; ``Cluster.close`` passes 0 (see there). A superseded
         clone still referenced by an unfinished Job is left for a later sweep: deleting it
         would strand that Job's pending (or retried) pod on a vanished claim. Returns the names
         whose delete was issued.
@@ -522,7 +538,7 @@ class CloneManager:
             name = clone.metadata.name
             if name == current or clone.metadata.deletion_timestamp is not None:
                 continue
-            if self.recently_used(clone):  # a reader may be between resolving it and its Job
+            if self.recently_used(clone, min_age):  # a reader may be between resolving it and its Job
                 continue
             if self.active_jobs_using(name):
                 continue

@@ -407,14 +407,15 @@ def test_clone_lifecycle_point_in_time_and_supersede(vol_cluster: Cluster) -> No
         # a later writer: readers keep seeing v1 until it COMPLETES, then a new clone shows v2
         assert vol_cluster.run(_write(path, "v2"), volumes=_rw(vol), timeout=300) == "written"
         assert vol_cluster.run(_read(path), volumes=vol, timeout=300) == "v2"
-        # a superseded clone is swept only once it is older than CLONE_MIN_AGE (a reader may be
-        # about to use it); keep sweeping until then
-        mgr = vol_cluster._clone_manager()
+        # The library's own sweeps must remove the superseded clone: it was too young to sweep at
+        # the reader's end (CLONE_MIN_AGE), so the next read-only mount on the volume does it once
+        # the floor has passed. This test never sweeps by hand.
+        time.sleep(clones.CLONE_MIN_AGE + 5)
+        assert vol_cluster.run(_read(path), volumes=vol, timeout=300) == "v2"
         _poll(
-            lambda: mgr.sweep_stale(vol) is not None
-            and [c.metadata.name for c in _clone_pvcs(vol_cluster, vol)] != [first.metadata.name]
+            lambda: [c.metadata.name for c in _clone_pvcs(vol_cluster, vol)] != [first.metadata.name]
             and len(_clone_pvcs(vol_cluster, vol)) == 1,
-            clones.CLONE_MIN_AGE + GONE_TIMEOUT, "the superseded clone to be deleted", interval=5,
+            GONE_TIMEOUT, "the library to delete the superseded clone",
         )
 
         # concurrent readers share the one clone

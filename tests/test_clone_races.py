@@ -397,3 +397,62 @@ def test_6a_the_error_names_the_volume_whose_pv_the_event_is_about(tmp_path: Any
         assert err.volume == "second" and err.claim == "second-claim"
     finally:
         d.cluster.close()
+
+
+# --- Fix round 2: nothing else retries a sweep the age floor skipped, so close() does ------------------------
+
+
+def _fast_write_read_write_read(h: H) -> tuple[str, str]:
+    h.volume()
+    h.populate()
+    h.end(h.reader())
+    (first,) = h.clone_names()
+    h.populate()
+    h.end(h.reader())  # all within CLONE_MIN_AGE: the reader-end sweep skips the first clone
+    return first, [n for n in h.clone_names() if n != first][0]
+
+
+def test_close_removes_the_superseded_clone_a_fast_sequence_left_behind(h: H) -> None:
+    first, current = _fast_write_read_write_read(h)
+    assert h.clone_names() == sorted([first, current])  # the floor kept it so far
+    h.cluster.close()
+    assert h.clone_names() == [current]
+    assert first in h.core.pvc_deleted
+
+
+def test_close_leaves_a_clone_an_active_job_still_uses(h: H) -> None:
+    h.volume()
+    h.populate()
+    h.reader()  # still running
+    (first,) = h.clone_names()
+    h.populate()
+    h.end(h.reader())
+    h.cluster.close()
+    assert first in h.clone_names()  # the active-Job guard outranks the age floor
+
+
+def test_close_sweep_never_raises_and_skips_clients_that_read_nothing(h: H) -> None:
+    h.cluster.close()  # nothing read: no API calls at all
+    assert not h.core.pvc_deleted
+    h.cluster._read_volumes.add("gone-volume")
+
+    def boom(**_: Any) -> Any:
+        raise ApiException(status=500, reason="boom")
+
+    h.core.list_namespaced_persistent_volume_claim = boom  # type: ignore[method-assign]
+    h.cluster._closed = False
+    h.cluster.close()  # a failing sweep is logged, not raised
+
+
+def test_a_failing_adoption_stamp_is_typed(h: H) -> None:
+    h.volume()
+    h.populate()
+    h.reader()
+    h.age(clones.CLONE_MIN_AGE + 1)
+
+    def deny(name: str, namespace: str, body: Any) -> Any:
+        raise ApiException(status=500, reason="boom")
+
+    h.core.patch_namespaced_persistent_volume_claim = deny  # type: ignore[method-assign]
+    with pytest.raises(VolumeError, match="could not stamp"):
+        h.reader()
