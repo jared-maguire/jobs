@@ -10,10 +10,10 @@ class JobBackend(Protocol):
 
 
 class JobFuture(concurrent.futures.Future):  # type: ignore[type-arg]
-    """A real Future resolved by the owning cluster's watcher.
+    """A real Future resolved by its owning cluster (backend-agnostic).
 
-    cancel() is stronger than stdlib semantics: it deletes the Kubernetes Job
-    even if it has already started running.
+    cancel() is stronger than stdlib semantics: it asks the backend to stop the
+    job even if it has already started running.
     """
 
     def __init__(self, job_name: str, workflow_id: str, backend: JobBackend) -> None:
