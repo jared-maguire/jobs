@@ -34,6 +34,16 @@ def test_remote_exception_carries_traceback() -> None:
     assert e.tb_text.startswith("Traceback")
 
 
+def test_remote_exception_survives_pickle_roundtrip() -> None:
+    import pickle
+
+    e = RemoteException("mylib.CustomError", "boom", "Traceback (most recent...)")
+    back = pickle.loads(pickle.dumps(e))
+    assert isinstance(back, RemoteException)
+    assert (back.type_name, back.message, back.tb_text) == (e.type_name, e.message, e.tb_text)
+    assert str(back) == str(e)
+
+
 def test_map_failed_summary() -> None:
     failures = [(3, ValueError("bad")), (7, KeyError("k"))]
     e = MapFailed(failures, total=10)

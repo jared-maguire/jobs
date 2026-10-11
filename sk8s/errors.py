@@ -1,6 +1,8 @@
 """Typed exceptions. Infra failures get specific classes with actionable text."""
 from __future__ import annotations
 
+from typing import Any
+
 
 class Sk8sError(Exception):
     pass
@@ -63,6 +65,11 @@ class RemoteException(Sk8sError):
         self.message = message
         self.tb_text = tb_text
         super().__init__(f"{type_name}: {message}")
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # Exception's default reduce replays only ``args`` (the formatted message),
+        # which does not match this three-argument __init__.
+        return (type(self), (self.type_name, self.message, self.tb_text))
 
 
 class MapFailed(Sk8sError):
