@@ -102,6 +102,41 @@ def test_image_build_wiring(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
     assert "me/img:1" in capsys.readouterr().out
 
 
+def test_image_build_base_parses_and_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    ns = cli.build_parser().parse_args(
+        ["image", "build", "--tag", "t:1", "--base", "sk8s:dev", "--pip", "pysam"]
+    )
+    assert ns.base == "sk8s:dev"
+    assert cli.build_parser().parse_args(["image", "build", "--tag", "t", "--pip", "x"]).base is None
+
+    seen: dict[str, Any] = {}
+
+    def fake_minikube(tag: str, *, dockerfile: str | None = None, **kw: Any) -> str:
+        seen["dockerfile"] = dockerfile
+        return tag
+
+    monkeypatch.setattr(images, "build_in_minikube", fake_minikube)
+    assert cli.run(
+        ["image", "build", "--tag", "t:1", "--base", "sk8s:dev", "--pip", "pysam", "--minikube"]
+    ) == 0
+    assert seen["dockerfile"].startswith("FROM sk8s:dev\n")
+
+    built: list[dict[str, Any]] = []
+    monkeypatch.setattr(images, "build", lambda tag, **kw: built.append(kw) or tag)
+    assert cli.run(["image", "build", "--tag", "t:1", "--base", "b:1", "--pip", "x"]) == 0
+    assert built[0]["base"] == "b:1"
+
+
+def test_image_build_base_with_conda_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("docker ran"))
+    for extra in ([], ["--minikube"]):
+        rc = cli.run(["image", "build", "--tag", "t:1", "--base", "b:1", "--conda", "x", *extra])
+        assert rc == 1
+        assert "base cannot be combined with conda" in capsys.readouterr().err
+
+
 def test_image_build_minikube_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, str | None]] = []
 
