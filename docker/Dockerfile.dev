@@ -1,0 +1,10 @@
+# The worker's Python minor version MUST match the client's (the serialize
+# version handshake rejects mismatches). Override with
+#   --build-arg PYTHON_VERSION=3.12
+# to match a different local interpreter.
+ARG PYTHON_VERSION=3.14
+FROM python:${PYTHON_VERSION}-slim
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE ./
+COPY sk8s ./sk8s
+RUN pip install --no-cache-dir .
