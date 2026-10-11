@@ -231,3 +231,80 @@ def test_apply_uses_custom_service_account_name() -> None:
     _apply(p, core, rbac)
     assert ("team-a", "runner") in core.service_accounts
     assert rbac.role_bindings[("team-a", "runner")].subjects[0].name == "runner"
+
+
+# --- rule normalization (drift detection) ------------------------------------------------------
+
+
+def _shuffled_role(role: client.V1Role) -> client.V1Role:
+    return client.V1Role(
+        metadata=role.metadata,
+        rules=[
+            client.V1PolicyRule(
+                api_groups=list(reversed(r.api_groups or [])),
+                resources=list(reversed(r.resources or [])),
+                verbs=list(reversed(r.verbs or [])),
+            )
+            for r in reversed(role.rules or [])
+        ],
+    )
+
+
+def test_reordered_but_equal_role_is_not_drift() -> None:
+    core, rbac = FakeCoreV1(), FakeRbacV1()
+    _apply(_profile(), core, rbac)
+    rbac.roles[("team-a", "sk8s")] = _shuffled_role(rbac.roles[("team-a", "sk8s")])
+    rbac.actions.clear()
+    out = _apply(_profile(), core, rbac)
+    assert rbac.actions == []  # zero writes
+    assert "Role sk8s: unchanged" in out
+
+
+def _add_verb(role: client.V1Role) -> None:
+    assert role.rules
+    role.rules[0].verbs.append("escalate")
+
+
+def _add_rule(role: client.V1Role) -> None:
+    assert role.rules is not None
+    role.rules.append(client.V1PolicyRule(api_groups=[""], resources=["secrets"], verbs=["get"]))
+
+
+def test_extra_verb_or_extra_rule_replaces_the_role() -> None:
+    for mutate in (_add_verb, _add_rule):
+        core, rbac = FakeCoreV1(), FakeRbacV1()
+        _apply(_profile(), core, rbac)
+        mutate(rbac.roles[("team-a", "sk8s")])
+        rbac.actions.clear()
+        _apply(_profile(), core, rbac)
+        assert ("replace", "Role", "sk8s") in rbac.actions
+        assert prof.normalized_rules(rbac.roles[("team-a", "sk8s")]) == prof.normalized_rules(
+            prof.desired_role(_profile())
+        )
+
+
+def test_name_narrowed_rule_registers_as_drift() -> None:
+    core, rbac = FakeCoreV1(), FakeRbacV1()
+    _apply(_profile(), core, rbac)
+    rbac.roles[("team-a", "sk8s")].rules[0].resource_names = ["only-this"]
+    rbac.actions.clear()
+    _apply(_profile(), core, rbac)
+    assert ("replace", "Role", "sk8s") in rbac.actions
+    assert not rbac.roles[("team-a", "sk8s")].rules[0].resource_names
+
+
+def test_missing_permissions_is_subset_based() -> None:
+    want = prof.desired_role(_profile())
+    assert prof.missing_permissions(want, want) == []
+    wild = client.V1Role(
+        rules=[client.V1PolicyRule(api_groups=["*"], resources=["*"], verbs=["*"])]
+    )
+    assert prof.missing_permissions(want, wild) == []
+    narrowed = client.V1Role(
+        rules=[
+            client.V1PolicyRule(
+                api_groups=["batch"], resources=["jobs"], verbs=list(VERBS), resource_names=["x"]
+            )
+        ]
+    )
+    assert ("batch", "jobs", "get") in prof.missing_permissions(want, narrowed)

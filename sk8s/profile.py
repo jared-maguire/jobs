@@ -148,19 +148,59 @@ def _meta(name: str, namespace: str | None = None) -> client.V1ObjectMeta:
     return client.V1ObjectMeta(name=name, namespace=namespace, labels=dict(MANAGED_BY))
 
 
-def _rule_key(
-    api_groups: list[str] | tuple[str, ...] | None,
-    resources: list[str] | tuple[str, ...] | None,
-    verbs: list[str] | tuple[str, ...] | None,
-) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    return (
-        tuple(sorted(api_groups or ())),
-        tuple(sorted(resources or ())),
-        tuple(sorted(verbs or ())),
+RuleKey = tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]
+
+
+def normalized_rules(role: client.V1Role) -> frozenset[RuleKey]:
+    """Order-insensitive form of a Role's rules: (api_groups, resources, verbs, resource_names).
+
+    Each field is sorted, so reordering rules/resources/verbs is not drift, while a changed
+    verb, an extra rule, or a name-narrowed rule (``resource_names``) is. Shared by apply
+    (drift detection) and doctor (permission checks).
+    """
+    return frozenset(
+        (
+            tuple(sorted(r.api_groups or ())),
+            tuple(sorted(r.resources or ())),
+            tuple(sorted(r.verbs or ())),
+            tuple(sorted(r.resource_names or ())),
+        )
+        for r in (role.rules or [])
     )
 
 
-def _desired_role(profile: ClusterProfile) -> client.V1Role:
+def missing_permissions(want: client.V1Role, have: client.V1Role) -> list[tuple[str, str, str]]:
+    """(api_group, resource, verb) triples ``want`` requires that ``have`` does not grant.
+
+    Subset semantics: extra grants in ``have`` are fine, differently-grouped rules are fine, and
+    ``*`` wildcards in ``have`` count. A rule narrowed by ``resource_names`` grants nothing for
+    an unrestricted requirement, so it is ignored here.
+    """
+
+    def expand(role: client.V1Role) -> set[tuple[str, str, str]]:
+        return {
+            (g, res, v)
+            for groups, resources, verbs, names in normalized_rules(role)
+            if not names
+            for g in groups
+            for res in resources
+            for v in verbs
+        }
+
+    granted = expand(have)
+
+    def covered(g: str, res: str, v: str) -> bool:
+        return any(
+            (gg, rr, vv) in granted
+            for gg in (g, "*")
+            for rr in (res, "*")
+            for vv in (v, "*")
+        )
+
+    return sorted(t for t in expand(want) if not covered(*t))
+
+
+def desired_role(profile: ClusterProfile) -> client.V1Role:
     return client.V1Role(
         metadata=_meta(profile.role_name, profile.namespace),
         rules=[
@@ -184,10 +224,6 @@ def _desired_binding(profile: ClusterProfile) -> client.V1RoleBinding:
             )
         ],
     )
-
-
-def _role_rules(role: client.V1Role) -> set[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]:
-    return {_rule_key(r.api_groups, r.resources, r.verbs) for r in (role.rules or [])}
 
 
 def _binding_subjects(b: client.V1RoleBinding) -> set[tuple[str, str, str]]:
@@ -249,7 +285,7 @@ def apply(
             out.append(f"ServiceAccount {sa}: unchanged")
 
     # Role: replace when the rule set has drifted (e.g. a verb was removed).
-    want_role = _desired_role(profile)
+    want_role = desired_role(profile)
     try:
         have_role = rbac.read_namespaced_role(name=role, namespace=ns)
     except ApiException as e:
@@ -265,7 +301,7 @@ def apply(
                 raise
             rbac.replace_namespaced_role(name=role, namespace=ns, body=want_role)
             out.append(f"Role {role}: replaced")
-    elif _role_rules(have_role) != _role_rules(want_role):
+    elif normalized_rules(have_role) != normalized_rules(want_role):
         rbac.replace_namespaced_role(name=role, namespace=ns, body=want_role)
         out.append(f"Role {role}: replaced")
     else:
