@@ -26,6 +26,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       # Version lock: the tag must match the package about to be baked into the image.
+      # Pre-release tag spelling must match __version__ exactly (v2.0.0rc1 <-> 2.0.0rc1).
+      # Full `pip install .` (not --no-deps): `import sk8s` needs its runtime deps.
       - name: Guard - package version must equal tag version
         run: |
           pip install .
@@ -52,7 +54,10 @@ jobs:
           push: true
           tags: ghcr.io/jared-maguire/sk8s:${{ env.VERSION }}-py${{ matrix.python-version }}
 
+  # Expects this PyPI trusted-publisher entry: owner jared-maguire, repo jobs,
+  # workflow release.yml, environment pypi.
   publish-pypi:
+    needs: publish-images
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

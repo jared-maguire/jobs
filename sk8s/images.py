@@ -62,7 +62,7 @@ def generate_dockerfile(
     ]) + "\n"
 
 
-_STDERR_TAIL_LINES = 50
+_ERROR_TAIL_LINES = 50
 
 
 def _text(value: Any) -> str:
@@ -72,13 +72,13 @@ def _text(value: Any) -> str:
 
 
 def _output_tail(stderr: Any, stdout: Any) -> str:
-    """One tail of at most ``_STDERR_TAIL_LINES`` lines: stderr first, then stdout.
+    """One tail of at most ``_ERROR_TAIL_LINES`` lines: stderr first, then stdout.
 
     Stdout lines only fill whatever room stderr leaves, so a legacy builder
     that prints pip's error on stdout still surfaces it.
     """
-    err = _text(stderr).splitlines()[-_STDERR_TAIL_LINES:]
-    room = _STDERR_TAIL_LINES - len(err)
+    err = _text(stderr).splitlines()[-_ERROR_TAIL_LINES:]
+    room = _ERROR_TAIL_LINES - len(err)
     out = _text(stdout).splitlines()[-room:] if room > 0 else []
     return "\n".join([*err, *out])
 
@@ -95,7 +95,7 @@ def _run(runner: Callable[..., Any] | None, argv: list[str], what: str, **kwargs
 
 
 def push(tag: str, *, runner: Callable[..., Any] | None = None) -> None:
-    """``docker push`` the tag; raises Sk8sError with the stderr tail on failure."""
+    """``docker push`` the tag; raises Sk8sError with the combined stderr/stdout tail on failure."""
     _run(runner, ["docker", "push", tag], f"docker push {tag}")
 
 
