@@ -23,11 +23,11 @@ independently mergeable software.
 | 1 | Foundation: data plane, worker, futures, core API | `feat/core` | — | **Merged** (PR #70) |
 | 2 | Workflows: anchors, detached submit/attach, retention GC | `feat/workflows` | 1 | **Merged** (PR #74) |
 | 3 | Cloud stores: S3 + GCS backends, MinIO tests | `feat/stores-cloud` | 1 | **Merged** (PR #72) |
-| 4 | Volumes: PVCs, anchor ownership, scratch_volume | `feat/volumes` | 1, 2 | **In progress** (`...plan-4-volumes.md`) |
+| 4 | Volumes: PVCs, anchor ownership, scratch_volume | `feat/volumes` | 1, 2 | **Merged** (PR #75) |
 | 5 | Services: serve(), Service handle, get_service | `feat/services` | 1 | **Merged** (PR #73) |
 | 6 | Images: published base images, builders, release CI | `feat/images` | 1 | **Merged** (PR #71) |
-| 7 | Cluster config: ClusterProfile, `sk8s config`/`doctor`, CLI (local/generic only) | `feat/cluster-config` | 1, 2 | **In progress** (`...plan-7-cluster-config.md`) |
-| 8 | CI & docs: minikube per-PR workflow, docs site, migration guide (GKE/EKS TABLED per Jared 2026-10-10) | `feat/ci-docs` | 3, 6, 7 | wave 3 |
+| 7 | Cluster config: ClusterProfile, `sk8s config`/`doctor`, CLI (local/generic only) | `feat/cluster-config` | 1, 2 | **Merged** (PR #76) |
+| 8 | CI & docs: minikube per-PR workflow, stress test, docs site, migration guide (GKE/EKS TABLED) | `feat/ci-docs` | 3, 6, 7 | **In progress** (`...plan-8-ci-docs.md`) |
 
 Execution notes (2026-10-10): Jared waived plan-review gates ("get it all done").
 Integration suites share one minikube → integration tasks run serially across
