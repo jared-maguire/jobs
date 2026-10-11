@@ -86,6 +86,11 @@ class Cluster:
         self._apps = apps_api
         self._store = store
         self.workflow_id = os.environ.get("SK8S_WORKFLOW_ID") or "wf-" + spec.job_name("x").rsplit("-", 1)[1]
+        if self.workflow_id == "svc":
+            raise ValueError(
+                "workflow id 'svc' is reserved for service blobs (svc/<name>/...); "
+                "check SK8S_WORKFLOW_ID"
+            )
         self._futures: dict[str, tuple[JobFuture, bool, str]] = {}  # name -> (future, keep_results, image)
         self._watcher = JobWatcher(
             watcher_events if watcher_events is not None else self._k8s_events,
