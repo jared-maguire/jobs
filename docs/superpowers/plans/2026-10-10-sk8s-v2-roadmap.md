@@ -44,3 +44,5 @@ feature clone, a reviewer agent checks each task, and the finished branch gets
 a whole-branch review before its PR into `version-2`.
 
 **2026-10-10: ALL 8 PLANS MERGED. The v2 rebuild on `version-2` is complete** (GKE/EKS adapters + cloud CI tabled; release checklist in plan-8 history and docs/superpowers/decisions-log.md).
+
+**2026-10-11: GKE un-tabled (Google first).** Plan 9 (`2026-10-11-sk8s-v2-plan-9-gke.md`): gke adapter + WI + AR + live verification on `autopilot-cluster-1`; recurring cloud CI stays parked pending cost opt-in. EKS remains tabled.
