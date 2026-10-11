@@ -1,6 +1,7 @@
 """Local backend: same pipeline as the k8s cluster, workers run as subprocesses."""
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sk8s import serialize, spec
-from sk8s.errors import BlobNotFound, PodFailed
+from sk8s.errors import BlobNotFound, JobTimeout, PodFailed
 from sk8s.future import JobFuture
 from sk8s.store.local import LocalStore
 
@@ -115,4 +116,8 @@ class LocalCluster:
 
     def run(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         timeout = kwargs.pop("timeout", None)
-        return self.submit(func, *args, **kwargs).result(timeout)
+        fut = self.submit(func, *args, **kwargs)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise JobTimeout(fut.job_name, timeout or 0.0) from None

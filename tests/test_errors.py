@@ -14,6 +14,8 @@ def test_hierarchy() -> None:
     assert issubclass(VersionMismatch, Sk8sError)
     assert issubclass(PodFailed, Sk8sError)
     assert issubclass(ImagePullError, PodFailed)
+    assert issubclass(JobTimeout, TimeoutError)
+    assert issubclass(JobTimeout, Sk8sError)
 
 
 def test_job_timeout_message() -> None:

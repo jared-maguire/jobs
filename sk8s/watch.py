@@ -42,6 +42,10 @@ class JobWatcher:
             phase = hit[0]
         self._safe_resolve(job_name, phase)
 
+    def unregister(self, job_name: str) -> None:
+        with self._lock:
+            self._registered.discard(job_name)
+
     def stop(self) -> None:
         self._stopped.set()
 

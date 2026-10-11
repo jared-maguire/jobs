@@ -208,7 +208,15 @@ class Cluster:
             ttl=self.config.ttl_seconds_after_finished,
             privileged=opts.get("privileged", False),
         )
-        self.batch.create_namespaced_job(namespace=namespace, body=job)
+        try:
+            self.batch.create_namespaced_job(namespace=namespace, body=job)
+        except BaseException:
+            # No job will ever consume (or clean up) the payload: don't leak it.
+            try:
+                self.store.delete(payload_uri)
+            except Exception:  # noqa: BLE001 — best-effort; the create error is what matters
+                log.exception("could not delete payload blob %s after failed create", payload_key)
+            raise
         fut = JobFuture(name, self.workflow_id, backend=self)
         keep = opts.get("keep_results", self.config.keep_results)
         self._futures[name] = (fut, keep, image)
@@ -353,7 +361,13 @@ class Cluster:
             )
         except Exception:  # noqa: BLE001
             return False
-        self._futures.pop(job_name, None)
+        entry = self._futures.pop(job_name, None)
+        try:
+            self._watcher.unregister(job_name)
+            keep = entry[1] if entry is not None else self.config.keep_results
+            self._cleanup(job_name, keep)
+        except Exception:  # noqa: BLE001 — the job is already deleted; never raise from cancel
+            log.exception("post-cancel cleanup of job %s failed", job_name)
         return True
 
     def close(self) -> None:

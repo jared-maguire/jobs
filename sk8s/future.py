@@ -33,5 +33,8 @@ class JobFuture(concurrent.futures.Future):  # type: ignore[type-arg]
             return False
         if not super().cancel():
             # already marked running; force a terminal state
-            self.set_exception(concurrent.futures.CancelledError())
+            try:
+                self.set_exception(concurrent.futures.CancelledError())
+            except concurrent.futures.InvalidStateError:
+                return False  # a watcher resolved the future first
         return True

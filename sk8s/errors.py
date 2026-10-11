@@ -24,7 +24,7 @@ class VersionMismatch(Sk8sError):
     pass
 
 
-class JobTimeout(Sk8sError):
+class JobTimeout(Sk8sError, TimeoutError):
     def __init__(self, job_name: str, timeout: float) -> None:
         self.job_name = job_name
         self.timeout = timeout

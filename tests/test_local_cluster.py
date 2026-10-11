@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from sk8s.errors import RemoteTraceback
+from sk8s.errors import JobTimeout, RemoteTraceback
 from sk8s.future import JobFuture
 from sk8s.local import LocalCluster
 
@@ -133,9 +133,11 @@ def test_run_timeout_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
         _time.sleep(30)
 
-    # concurrent.futures.TimeoutError is not the builtin on every supported Python.
-    with pytest.raises(concurrent.futures.TimeoutError):
+    with pytest.raises(JobTimeout) as excinfo:
         lc.run(sleeper, timeout=0.5)
+    # Same type as Cluster.run, and catchable as the builtin TimeoutError.
+    assert isinstance(excinfo.value, TimeoutError)
+    assert excinfo.value.job_name == submitted[0].job_name
 
     # Clean up the still-running job so the test does not leave a 30s worker behind.
     assert submitted[0].cancel() is True

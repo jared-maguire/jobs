@@ -127,6 +127,67 @@ def test_cancel_deletes_job(tmp_path) -> None:  # type: ignore[no-untyped-def]
     assert fut.done()
 
 
+def test_cancel_cleans_blobs(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 1)
+    wf, name = h.cluster.workflow_id, fut.job_name
+    payload_uri = h.store.uri_for(f"{wf}/{name}/payload")
+    result_uri = h.store.uri_for(f"{wf}/{name}/result")
+    # A result written just before cancellation must not be left behind either.
+    h.store.put(f"{wf}/{name}/result", b"late")
+    assert h.store.get(payload_uri)
+    with h.cluster._watcher._lock:
+        assert name in h.cluster._watcher._registered
+    assert fut.cancel() is True
+    for uri in (payload_uri, result_uri):
+        with pytest.raises(BlobNotFound):
+            h.store.get(uri)
+    with h.cluster._watcher._lock:
+        assert name not in h.cluster._watcher._registered
+    assert name not in h.cluster._futures
+
+
+def test_cancel_keeps_result_blob_when_keep_results(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path, keep_results=True)
+    fut = h.cluster.submit(lambda: 1)
+    wf, name = h.cluster.workflow_id, fut.job_name
+    h.store.put(f"{wf}/{name}/result", b"keep me")
+    assert fut.cancel() is True
+    with pytest.raises(BlobNotFound):
+        h.store.get(h.store.uri_for(f"{wf}/{name}/payload"))
+    assert h.store.get(h.store.uri_for(f"{wf}/{name}/result")) == b"keep me"
+
+
+def test_cancel_never_raises_when_cleanup_fails(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 1)
+
+    def broken(uri: str) -> None:
+        raise OSError("store down")
+
+    monkeypatch.setattr(h.store, "delete", broken)
+    assert fut.cancel() is True
+
+
+def test_submit_failure_does_not_leak_payload_blob(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+
+    def failing_create(namespace: str, body: Any) -> Any:
+        raise ApiException(status=403, reason="Forbidden")
+
+    h.batch.create_namespaced_job = failing_create  # type: ignore[method-assign]
+    with pytest.raises(ApiException):
+        h.cluster.submit(lambda: 1)
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()], "payload blob leaked"
+    assert not h.cluster._futures
+
+
+def test_workflow_id_from_environment(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("SK8S_WORKFLOW_ID", "wf-from-env")
+    h = Harness(tmp_path)
+    assert h.cluster.workflow_id == "wf-from-env"
+
+
 def test_default_image_fallback(tmp_path) -> None:  # type: ignore[no-untyped-def]
     import sys
 
