@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import sk8s
 from sk8s import images
 from sk8s.cluster import default_image
 from sk8s.config import Config
+from sk8s.errors import Sk8sError
 
 REPO = Path(__file__).resolve().parent.parent
 PY = f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -39,7 +41,7 @@ def test_pip_only_uses_default_base_when_none(monkeypatch):
 
 def test_conda_output():
     out = images.generate_dockerfile(
-        base="ignored:1", pip=["requests"], conda=["samtools", "bwa=0.7"],
+        pip=["requests"], conda=["samtools", "bwa=0.7"],
         channels=["bioconda", "conda-forge"],
     )
     lines = out.splitlines()
@@ -49,17 +51,21 @@ def test_conda_output():
         " && conda clean -afy"
     ) in lines
     assert (
-        f"RUN pip install --no-cache-dir sk8s=={sk8s.__version__} requests"
+        f"RUN pip install --no-cache-dir 'sk8s[s3,gcs]=={sk8s.__version__}' requests"
     ) in lines
-    assert "ignored:1" not in out
+
+
+def test_base_with_conda_raises():
+    with pytest.raises(ValueError, match="base cannot be combined with conda deps"):
+        images.generate_dockerfile(base="b:1", conda=["samtools"])
 
 
 def test_conda_without_channels_or_pip():
     out = images.generate_dockerfile(conda=["samtools"])
     assert "-c " not in out
     assert f"conda install -y python={PY} samtools" in out
-    assert f"pip install --no-cache-dir sk8s=={sk8s.__version__}" in out
-    assert out.rstrip().splitlines()[-1].endswith(f"sk8s=={sk8s.__version__}")
+    assert f"pip install --no-cache-dir 'sk8s[s3,gcs]=={sk8s.__version__}'" in out
+    assert out.rstrip().splitlines()[-1].endswith(f"sk8s[s3,gcs]=={sk8s.__version__}'")
 
 
 def test_conda_spec_with_shell_metacharacters_is_quoted():
@@ -82,3 +88,116 @@ def test_dockerfile_worker_definition():
     assert "FROM python:${PYTHON_VERSION}-slim" in lines
     assert 'RUN pip install --no-cache-dir ".[s3,gcs]"' in lines
     assert "COPY sk8s ./sk8s" in lines
+
+
+class FakeRunner:
+    def __init__(self, returncode=0, stderr=""):
+        self.calls = []
+        self.returncode = returncode
+        self.stderr = stderr
+        self.minikube_file_text = None
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if argv[0] == "minikube":
+            self.minikube_file_text = Path(argv[argv.index("-f") + 1]).read_text()
+        return subprocess.CompletedProcess(argv, self.returncode, "", self.stderr)
+
+
+def test_build_exact_argv_and_dockerfile_via_input():
+    r = FakeRunner()
+    out = images.build("my:tag", dockerfile="FROM x\n", path="ctx", runner=r)
+    assert out == "my:tag"
+    assert len(r.calls) == 1
+    argv, kw = r.calls[0]
+    assert argv == ["docker", "build", "-t", "my:tag", "-f", "-", "ctx"]
+    assert kw["input"] == "FROM x\n"
+    assert kw["capture_output"] is True
+    assert kw["text"] is True
+    assert not kw.get("shell")
+
+
+def test_build_generates_dockerfile_from_deps():
+    r = FakeRunner()
+    images.build("t:1", pip=["requests"], runner=r)
+    (argv, kw), = r.calls
+    assert kw["input"] == images.generate_dockerfile(pip=["requests"])
+    assert argv[-1] == "."
+
+
+def test_build_hostile_tag_is_one_literal_argv_element():
+    r = FakeRunner()
+    images.build("$(evil)", dockerfile="FROM x\n", runner=r)
+    argv, kw = r.calls[0]
+    assert argv[3] == "$(evil)"
+    assert argv.count("$(evil)") == 1
+    assert not kw.get("shell")
+
+
+def test_build_failure_raises_with_stderr_tail_capped_at_50_lines():
+    stderr = "\n".join(f"line{i}" for i in range(200)) + "\nMARKER-BOOM"
+    r = FakeRunner(returncode=1, stderr=stderr)
+    with pytest.raises(Sk8sError) as ei:
+        images.build("t:1", dockerfile="FROM x\n", runner=r)
+    msg = str(ei.value)
+    assert "MARKER-BOOM" in msg
+    assert "line199" in msg
+    assert "line100" not in msg
+    assert msg.count("line") <= 50
+
+
+def test_build_without_push_runs_only_build():
+    r = FakeRunner()
+    images.build("t:1", dockerfile="FROM x\n", runner=r)
+    assert [c[0][1] for c in r.calls] == ["build"]
+
+
+def test_build_with_push_pushes_after_build():
+    r = FakeRunner()
+    images.build("t:1", dockerfile="FROM x\n", push=True, runner=r)
+    assert [c[0][:2] for c in r.calls] == [["docker", "build"], ["docker", "push"]]
+    assert r.calls[1][0] == ["docker", "push", "t:1"]
+
+
+def test_build_failure_does_not_push():
+    r = FakeRunner(returncode=1, stderr="nope")
+    with pytest.raises(Sk8sError):
+        images.build("t:1", dockerfile="FROM x\n", push=True, runner=r)
+    assert len(r.calls) == 1
+
+
+def test_push_argv_and_failure():
+    r = FakeRunner()
+    images.push("$(evil)", runner=r)
+    assert r.calls[0][0] == ["docker", "push", "$(evil)"]
+    bad = FakeRunner(returncode=1, stderr="denied: MARKER-PUSH")
+    with pytest.raises(Sk8sError, match="MARKER-PUSH"):
+        images.push("t:1", runner=bad)
+
+
+def test_build_in_minikube_uses_tempfile_and_cleans_up():
+    r = FakeRunner()
+    out = images.build_in_minikube("$(evil)", dockerfile="FROM y\n", path="ctx", runner=r)
+    assert out == "$(evil)"
+    argv, kw = r.calls[0]
+    assert argv[:4] == ["minikube", "image", "build", "-t"]
+    assert argv[4] == "$(evil)"
+    assert argv[5] == "-f"
+    assert argv[7] == "ctx"
+    assert len(argv) == 8
+    assert "input" not in kw
+    assert r.minikube_file_text == "FROM y\n"
+    assert not Path(argv[6]).exists()
+
+
+def test_build_in_minikube_failure_raises_and_cleans_up():
+    r = FakeRunner(returncode=2, stderr="MARKER-MK")
+    with pytest.raises(Sk8sError, match="MARKER-MK"):
+        images.build_in_minikube("t:1", dockerfile="FROM y\n", runner=r)
+    assert not Path(r.calls[0][0][6]).exists()
+
+
+def test_build_in_minikube_requires_dockerfile_or_deps_default():
+    r = FakeRunner()
+    with pytest.raises(ValueError):
+        images.build_in_minikube("t:1", runner=r)
