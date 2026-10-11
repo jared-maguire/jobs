@@ -1,5 +1,16 @@
 # Developer setup (minikube)
 
+This page is for people hacking on sk8s itself: running the integration suites,
+building worker images, and testing against MinIO. If you just want to *use*
+sk8s on minikube, the [README quickstart](../README.md#quickstart) is shorter.
+See also: [migration guide](migration-v1-to-v2.md) and
+[conventions reference](conventions.md) (labels, workflow ids, blob keys).
+
+Contents: [Namespace](#namespace) - [Cluster and image](#cluster-and-image) -
+[Legacy default-namespace RBAC](#legacy-default-namespace-rbac) -
+[Running the suites](#running-the-suites) -
+[S3 store tests (MinIO)](#s3-store-integration-tests-minio)
+
 ## Namespace
 
 sk8s runs in a dedicated namespace, **`sk8s`**, and never falls back to
@@ -19,32 +30,11 @@ sk8s config             # apply it and write the client config
 sk8s doctor
 ```
 
-The manual setup below predates `sk8s config` and provisions the **`default`**
-namespace instead, so the integration suites pin `namespace="default"`
-explicitly (they do not follow the `sk8s` default).
+## Cluster and image
 
-1. `minikube start`
-2. Service account + RBAC (legacy default-namespace setup for the integration
-   suites; for everything else use `sk8s config`). Make sure `kubectl config current-context` is
-   `minikube` first:
-
-   ```
-   kubectl create serviceaccount sk8s
-   kubectl create role sk8s --verb=get,list,watch,create,delete,patch \
-     --resource=jobs,pods,pods/log,configmaps,persistentvolumeclaims,deployments.apps,services
-   kubectl create rolebinding sk8s --role=sk8s --serviceaccount=default:sk8s
-   ```
-
-   `deployments.apps` and `services` (and the `patch` verb, used by
-   `Service.scale()`) are needed by `sk8s.serve()`. If your cluster already has
-   the older role, re-apply it:
-
-   ```
-   kubectl create role sk8s --verb=get,list,watch,create,delete,patch \
-     --resource=jobs,pods,pods/log,configmaps,persistentvolumeclaims,deployments.apps,services \
-     --dry-run=client -o yaml | kubectl replace -f -
-   ```
-3. Build the dev worker image inside minikube. The worker's Python minor
+1. `minikube start`. Make sure `kubectl config current-context` is `minikube`
+   before running anything below.
+2. Build the dev worker image inside minikube. The worker's Python minor
    version must match your local interpreter (the serialize handshake rejects
    mismatches); the Dockerfile defaults to 3.14 and takes a build arg:
 
@@ -52,35 +42,62 @@ explicitly (they do not follow the `sk8s` default).
    minikube image build -t sk8s-dev:latest -f docker/Dockerfile.dev .
    # other Python: minikube image build --build-opt=build-arg=PYTHON_VERSION=3.12 ...
    ```
-4. Run the suite:
 
-   ```
-   SK8S_INTEGRATION=1 pytest tests/integration -v
-   ```
+## Legacy default-namespace RBAC
 
-   The workflow suite (`tests/integration/test_workflows.py`) has jobs submit
-   jobs, so the in-pod worker must run *this* branch's code. Tag that build
-   `sk8s-dev-workflows:latest` (override with `SK8S_WORKFLOW_TEST_IMAGE`) and run
-   the older suite against it with `SK8S_TEST_IMAGE=sk8s-dev-workflows:latest`.
-   Workflows use the same `sk8s` ServiceAccount RBAC as above (jobs and
-   configmaps: get/list/watch/create/delete/patch).
+The integration suites predate `sk8s config` and provision the **`default`**
+namespace by hand, so they pin `namespace="default"` explicitly (they do not
+follow the `sk8s` default). For everything else use `sk8s config`.
 
-   The services suite uses its own feature-specific image tag, built the same
-   way as step 3 (`-t sk8s-dev-services:latest`); the existing suite can be
-   pointed at any tag with `SK8S_TEST_IMAGE`.
+```
+kubectl create serviceaccount sk8s
+kubectl create role sk8s --verb=get,list,watch,create,delete,patch \
+  --resource=jobs,pods,pods/log,configmaps,persistentvolumeclaims,deployments.apps,services
+kubectl create rolebinding sk8s --role=sk8s --serviceaccount=default:sk8s
+```
 
-<<<<<<< HEAD
-   The config/doctor/CLI suite (`tests/integration/test_config_cli.py`) needs no
-   hand-made RBAC: it creates and deletes its own namespaces (`sk8s-it-cfg*`) with
-   `sk8s config`'s machinery, and runs the CLI with a temp `HOME` so your real
-   `~/.config/sk8s/config.toml` is untouched. Tag its image
-   `sk8s-dev-config:latest` (override with `SK8S_CONFIG_TEST_IMAGE`).
-=======
-   The volumes suite (`tests/integration/test_volumes.py`) uses
-   `sk8s-dev-volumes:latest` (override with `SK8S_VOLUMES_TEST_IMAGE`) and needs
-   `persistentvolumeclaims` in the Role (already in the command above) plus a default
-   StorageClass (minikube's `standard`).
->>>>>>> origin/version-2
+`deployments.apps` and `services` (and the `patch` verb, used by
+`Service.scale()`) are needed by `sk8s.serve()`; `persistentvolumeclaims` by
+volumes. If your cluster already has an older role, re-apply it:
+
+```
+kubectl create role sk8s --verb=get,list,watch,create,delete,patch \
+  --resource=jobs,pods,pods/log,configmaps,persistentvolumeclaims,deployments.apps,services \
+  --dry-run=client -o yaml | kubectl replace -f -
+```
+
+## Running the suites
+
+```
+SK8S_INTEGRATION=1 pytest tests/integration -v
+```
+
+Most suites default to their own feature-specific image tag (built the same
+way as above, with a different `-t`) and have an environment override:
+
+| Suite | Default image tag | Override |
+|---|---|---|
+| `test_minikube.py` (core run/map) | `sk8s-dev:latest` | `SK8S_TEST_IMAGE` |
+| `test_workflows.py` | `sk8s-dev-workflows:latest` | `SK8S_WORKFLOW_TEST_IMAGE` |
+| `test_services.py` | `sk8s-dev-services:latest` | (hardcoded) |
+| `test_volumes.py` | `sk8s-dev-volumes:latest` | `SK8S_VOLUMES_TEST_IMAGE` |
+| `test_config_cli.py` | `sk8s-dev-config:latest` | `SK8S_CONFIG_TEST_IMAGE` |
+| `test_store_s3_minio.py` | `sk8s-dev-stores:latest` | `SK8S_TEST_IMAGE` |
+
+Suite notes:
+
+- **Workflows.** The workflow suite has jobs submit jobs, so the in-pod worker
+  must run *this* branch's code (tag that build `sk8s-dev-workflows:latest`). It
+  uses the same `sk8s` ServiceAccount RBAC as above (jobs and configmaps:
+  get/list/watch/create/delete/patch).
+- **Services.** Uses its own tag, built the same way as the dev image.
+- **Volumes.** Needs `persistentvolumeclaims` in the Role (already in the
+  command above) plus a default StorageClass (minikube's `standard`).
+- **Config / doctor / CLI.** Needs no hand-made RBAC: it creates and deletes its
+  own namespaces (`sk8s-it-cfg*`) with `sk8s config`'s machinery, and runs the
+  CLI with a temp `HOME` so your real `~/.config/sk8s/config.toml` is untouched.
+- **Stress.** `tests/integration/test_stress.py` is marked `stress` as well as
+  `integration`; CI excludes it (`-m "integration and not stress"`).
 
 ## S3 store integration tests (MinIO)
 
