@@ -39,8 +39,11 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[gcs]"
 ```
 
-The commands below use these variables. Edit the first line if your project is not the
-`gcloud` default; everything else is a name you choose:
+The commands below use these variables, and the later `gcloud` commands follow your
+`gcloud` default project rather than passing `--project` each time. To target a different
+project, run `gcloud config set project <id>` first instead of editing `PROJECT` — editing
+only the variable would point sk8s at one project while `gcloud` creates the repository
+and bucket in another. Everything else is a name you choose:
 
 ```bash
 export PROJECT=$(gcloud config get project 2>/dev/null)
@@ -188,15 +191,20 @@ us-central1-docker.pkg.dev/my-project/sk8s/ghcr.io/jared-maguire/sk8s:2.0.0a0-py
 ```
 
 `Dockerfile.worker` installs sk8s with the `s3` and `gcs` extras, so the worker can reach
-a `gs://` store. If you rebuild after changing sk8s, push under the same tag only if no
-node still has the old one cached: nodes use the default `IfNotPresent` pull policy.
-Autopilot nodes are short-lived, so this rarely bites, but a new tag (or `pull_policy=`)
-always works.
+a `gs://` store. If you rebuild after changing sk8s, remember an Artifact Registry tag is
+**mutable and shared**: re-pushing it changes what everyone pulling that tag gets, while a
+node that already cached the old digest keeps running it (nodes use the default
+`IfNotPresent` pull policy). Autopilot nodes are short-lived, so this rarely bites, but
+the clean route is a fresh tag — push as `...:<version>-r2` and point sk8s at it with
+`image = "..."` in your config file (or `SK8S_IMAGE`); `pull_policy="Always"` is the blunt
+alternative.
 
-Nodes pull from the repository with the cluster's default node service account, which has
-`roles/artifactregistry.reader` on same-project repositories. For a repository in another
-project, `sk8s config` prints the exact `gcloud artifacts repositories add-iam-policy-binding`
-you need.
+Nodes pull from the repository with the cluster's node service account — by default the
+project's default compute service account, whose standard grants can read same-project
+repositories (this worked out of the box in the runs for this guide, but an org policy
+that trims those grants can change it). If pulls are denied, or for a repository in
+another project, `sk8s config` prints the exact
+`gcloud artifacts repositories add-iam-policy-binding` you need.
 
 ## 3. Bucket, identity and `sk8s config`
 
@@ -343,6 +351,9 @@ then keyword arguments.
 
 ## 4. `sk8s doctor`
 
+On a brand-new setup this first run may be **red** for a minute or two while IAM catches
+up; see [IAM takes a minute](#iam-takes-a-minute) before you debug anything.
+
 ```bash
 sk8s doctor
 ```
@@ -359,18 +370,15 @@ PASS  worker identity (in-cluster store probe)
 
 The first six checks run from your machine. The last one is the one that matters on GKE,
 and it is the only check that cannot be done from your laptop: doctor runs a tiny **job in
-the cluster**, as the `sk8s` ServiceAccount, with your worker image, and that pod reads a
-blob from your store. A pass proves the whole chain at once: the image pulled from
-Artifact Registry, the pod got the GSA's credentials through Workload Identity, and the
-GSA can read and write the bucket. (It will also create the probe's objects under
-`doctor/` in the store and delete them again.)
-
-On a brand-new setup this first run may be **red** for a minute or two while IAM catches
-up; see [IAM takes a minute](#iam-takes-a-minute) before you debug anything.
+the cluster**, as the `sk8s` ServiceAccount, with your worker image, and that pod writes a
+probe object to your store, reads it back, and deletes it. A pass proves the whole chain
+at once: the image pulled from Artifact Registry, the pod got the GSA's credentials
+through Workload Identity, and the GSA can read **and write** the bucket. (The probe's
+objects live under `doctor/` in the store and are removed again.)
 
 Because it starts a pod, it can take a while the first time: on a quiet Autopilot cluster
-the first pod waits for a node to be provisioned and the image pulled. In the runs for
-this guide that was up to about two minutes for the very first pod after idle, and
+the first pod waits for a node to be provisioned and the image pulled. In live runs during
+this project's GKE bring-up that was up to about two minutes for the very first pod after idle, and
 15 to 30 seconds when nodes were warm.
 
 ### What failure looks like
@@ -560,7 +568,7 @@ gs://my-project-sk8s/:
 Autopilot manages the nodes, so a few things differ from minikube.
 
 **Cold starts.** Autopilot scales nodes with demand and can scale them to nothing. A job
-submitted to a quiet cluster waits for a node to be provisioned and the 90 MB image to
+submitted to a quiet cluster waits for a node to be provisioned and the ~95 MB image to
 be pulled onto it: plan for **one to two minutes** on the first job after idle, and
 roughly 10 to 20 seconds for jobs after that. sk8s waits for as long as you let it: with
 no `timeout`, `run(...)` and `future.result()` wait indefinitely, so if you do pass one,
@@ -798,6 +806,11 @@ gcloud storage ls -r gs://$BUCKET/ 2>/dev/null
 gcloud filestore instances list
 ```
 
+Note that `sk8s clean` keeps a safety floor: anchors younger than five minutes are left
+alone, and so is any workflow that still has active jobs — so right after a crash it can
+print `nothing to clean` while the anchors are still there. Wait out the floor and re-run,
+or remove a specific workflow immediately with `sk8s kill <id>`.
+
 Anything left in the namespace besides `kube-root-ca.crt` and the default ServiceAccount
 is yours to look at; a workflow still running is deleted by `sk8s kill <id>`.
 
@@ -811,7 +824,7 @@ kubectl delete namespace $NAMESPACE
 gcloud iam service-accounts delete $GSA@$PROJECT.iam.gserviceaccount.com --project $PROJECT --quiet
 gcloud storage rm -r gs://$BUCKET
 gcloud artifacts repositories delete $AR_REPO --location $REGION --project $PROJECT --quiet
-rm -f "$KUBECONFIG" "$SK8S_CONFIG"
+rm -f "$PWD/.kubeconfig-gke" "$PWD/.sk8s-gke.toml"  # the guide's two local files — skip if you used your global files
 ```
 
 Deleting the GSA also drops the Workload Identity bindings on it. To retire just one
