@@ -119,6 +119,8 @@ def test_plan_lists_every_object_without_touching_a_cluster() -> None:
     for kind in ("ServiceAccount sk8s", "Role sk8s", "RoleBinding sk8s"):
         assert kind in text
     assert "team-a" in text and "jobs" in text and "pods/log" in text and "patch" in text
+    assert "ensure ServiceAccount sk8s in team-a" in lines  # ensure-only, never replaced
+    assert "create-or-replace ServiceAccount" not in text
 
 
 # --- apply -------------------------------------------------------------------------------------

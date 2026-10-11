@@ -113,11 +113,13 @@ def doctor(
     batch_api: client.BatchV1Api | None = None,
     store: BlobStore | None = None,
     storage_api: client.StorageV1Api | None = None,
+    store_endpoint: str | None = None,
 ) -> list[Check]:
     """Run every check for ``profile``; never raises, one failure never hides the rest.
 
     ``batch_api`` is accepted for symmetry with the other injected clients; no current check needs
-    it. ``storage_api`` backs the storage-class check, which only runs when the profile names one.
+    it. ``store_endpoint`` is the S3-compatible endpoint used when the store has to be built here
+    (an injected ``store`` is used as-is). ``storage_api`` backs the storage-class check, which only runs when the profile names one.
     """
     ns, sa = profile.namespace, profile.service_account
     core, core_err = _resolve(core_api, k8s.core_api)
@@ -211,20 +213,22 @@ def doctor(
 
     # 5. store writable. Only a cluster-backed store depends on the cluster being reachable.
     def store_check() -> Check:
+        if not reachable and profile.store == "k8s":
+            return _fail("store writable", _UNREACHABLE)  # would only time out through put/get/delete
         try:
             s = store
             if s is None:
                 from sk8s.store import get_store
 
-                s = get_store(profile.store, namespace=ns, core_api=core)
+                s = get_store(
+                    profile.store, namespace=ns, core_api=core, endpoint=store_endpoint
+                )
             _probe_store(s)
             return _ok("store writable")
         except StoreProbeError as e:
             hint = f"store {profile.store!r}: {e}; check its credentials/permissions or run: sk8s config --store"
         except Exception as e:
             hint = f"store {profile.store!r} is unusable ({_describe(e)}); check the store setting"
-        if not reachable and profile.store == "k8s":
-            hint = _UNREACHABLE
         return _fail("store writable", hint)
 
     checks.append(store_check())

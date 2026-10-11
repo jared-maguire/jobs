@@ -441,6 +441,36 @@ def test_doctor_uses_configured_namespace_and_store(monkeypatch: pytest.MonkeyPa
     assert (seen[0].namespace, seen[0].store, seen[0].image_prefix) == ("cfg-ns", "local:/s", "reg/")
 
 
+def test_doctor_builds_store_with_configured_endpoint_and_injects_it(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    _fakes(monkeypatch)
+    env.parent.mkdir(parents=True)
+    env.write_text(
+        'namespace = "cfg-ns"\nstore = "s3://bkt/pfx"\nstore_endpoint = "http://minio:9000"\n'
+    )
+    sentinel = object()
+    built: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_get_store(store: str, **kw: Any) -> Any:
+        built.append((store, kw))
+        return sentinel
+
+    monkeypatch.setattr(cli, "get_store", fake_get_store)
+    injected: list[dict[str, Any]] = []
+
+    def fake_doctor(profile: Any, **kw: Any) -> list[Check]:
+        injected.append(kw)
+        return [Check("x", True)]
+
+    monkeypatch.setattr(doctor_mod, "doctor", fake_doctor)
+    assert cli.run(["doctor"]) == 0
+    ((store, kw),) = built
+    assert store == "s3://bkt/pfx"
+    assert kw["endpoint"] == "http://minio:9000" and kw["namespace"] == "cfg-ns"
+    assert injected[0]["store"] is sentinel
+
+
 def test_doctor_real_checks_against_converged_fakes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, env: Path
 ) -> None:
@@ -453,6 +483,23 @@ def test_doctor_real_checks_against_converged_fakes(
     capsys.readouterr()
     assert cli.run(["doctor"]) == 0
     assert "FAIL" not in capsys.readouterr().out
+
+
+def test_namespace_failure_hint_does_not_mention_a_namespace_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kubernetes.config import ConfigException
+
+    from sk8s.config import Config
+
+    def boom() -> str:
+        raise ConfigException("no kubeconfig")
+
+    monkeypatch.setattr(k8s, "current_namespace", boom)
+    with pytest.raises(Sk8sError) as e:
+        cli._namespace(None, Config())
+    assert "--namespace" not in str(e.value)
+    assert "sk8s config" in str(e.value) and "SK8S_NAMESPACE" in str(e.value)
 
 
 # --- workflows / logs ----------------------------------------------------------------------------
@@ -582,10 +629,23 @@ def test_shell_creates_job_waits_then_execs_kubectl(monkeypatch: pytest.MonkeyPa
     assert ns == "ctx-ns" and name.startswith("sk8s-shell-")
     container = job.spec.template.spec.containers[0]
     assert container.image == "me/img:2"
-    assert container.command[:2] == ["python", "-c"] and "time.sleep" in container.command[2]
+    assert container.command[:2] == ["sh", "-c"]  # no python needed in the image
+    assert "sleep" in container.command[2] and "trap" in container.command[2]  # SIGTERM is honoured
     assert job.spec.active_deadline_seconds and job.spec.ttl_seconds_after_finished is not None
     assert execs == [["kubectl", "kubectl", "exec", "-it", "-n", "ctx-ns", "shell-pod", "--", "sh"]]
     assert batch.deleted == []  # kept for the session
+
+
+def test_shell_prints_progress_and_early_cleanup_hint(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    batch, _ = _shell_env(monkeypatch, [_pod("Pending"), _pod("Running")])
+    assert cli.run(["shell"]) == 0
+    ((_, name),) = batch.jobs
+    lines = capsys.readouterr().out.splitlines()
+    starting = f"starting shell pod (job {name}) in namespace ctx-ns..."
+    hint = f"job {name} is removed after 4h; delete earlier with: kubectl delete job {name} -n ctx-ns"
+    assert lines == [starting, hint]
 
 
 def test_shell_default_image_is_worker_image(monkeypatch: pytest.MonkeyPatch) -> None:

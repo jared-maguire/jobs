@@ -29,6 +29,7 @@ from sk8s import profile as profile_mod
 from sk8s.cluster import default_image, job_phase
 from sk8s.config import Config, load_config
 from sk8s.errors import Sk8sError
+from sk8s.store import get_store
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -37,7 +38,11 @@ else:
 
 SHELL_DEADLINE_SECONDS = 4 * 3600  # a shell job outlives its exec (we exec away), so bound it
 SHELL_READY_TIMEOUT = 120.0
-_SHELL_HANG = "import time\nwhile True:\n    time.sleep(3600)\n"
+# Keep the shell pod alive with plain POSIX sh so any image works (no python needed). `sleep
+# infinity` is GNU-only, so use a huge number of seconds. PID 1 ignores SIGTERM without a handler,
+# so trap it and `wait` on the backgrounded sleep: the pod then terminates promptly, not after the
+# 30s grace period.
+_SHELL_HANG = "trap 'exit 0' TERM INT; sleep 2147483647 & wait"
 _POD_FATAL_WAITING = {
     "ImagePullBackOff", "ErrImagePull", "InvalidImageName",
     "CreateContainerConfigError", "CrashLoopBackOff",
@@ -55,7 +60,7 @@ def _load_cfg() -> Config:
 
 
 def _namespace(explicit: str | None = None, cfg: Config | None = None) -> str:
-    """--namespace, else the configured namespace, else the kube context's (if it sets one), else "sk8s"."""
+    """The configured namespace (``sk8s config`` / SK8S_NAMESPACE), else the kube context's (if it sets one), else "sk8s"."""
     if explicit:
         return explicit
     ns = (cfg if cfg is not None else _load_cfg()).namespace
@@ -65,7 +70,7 @@ def _namespace(explicit: str | None = None, cfg: Config | None = None) -> str:
         return k8s.current_namespace()
     except ConfigException as e:
         raise Sk8sError(
-            f"cannot determine the namespace ({e}); pass --namespace or run 'sk8s config'"
+            f"cannot determine the namespace ({e}); set the namespace via 'sk8s config' or SK8S_NAMESPACE"
         ) from e
 
 
@@ -189,7 +194,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         store=cfg.store,
         image_prefix=cfg.image_prefix,
     )
-    checks = doctor_mod.doctor(prof)
+    # Build the store here so a configured endpoint (MinIO etc.) is honoured; if it cannot be built
+    # (or no client can be), leave it to doctor, which reports that as a failed check.
+    store = None
+    try:
+        store = get_store(
+            cfg.store,
+            namespace=prof.namespace,
+            core_api=k8s.core_api(),
+            endpoint=cfg.store_endpoint,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    checks = doctor_mod.doctor(prof, store=store, store_endpoint=cfg.store_endpoint)
     width = max((len(c.name) for c in checks), default=0)
     for c in checks:
         print(f"{'PASS' if c.ok else 'FAIL'}  {c.name:<{width}}".rstrip())
@@ -333,7 +350,7 @@ def _shell_job(name: str, namespace: str, image: str, cfg: Config) -> client.V1J
                             name="shell",
                             image=image,
                             image_pull_policy=cfg.pull_policy,
-                            command=["python", "-c", _SHELL_HANG],
+                            command=["sh", "-c", _SHELL_HANG],
                         )
                     ],
                 ),
@@ -392,8 +409,14 @@ def _cmd_shell(args: argparse.Namespace) -> int:
     core: Any = k8s.core_api()
     name = spec.job_name("sk8s-shell")
     batch.create_namespaced_job(namespace=namespace, body=_shell_job(name, namespace, image, cfg))
+    print(f"starting shell pod (job {name}) in namespace {namespace}...", flush=True)
     try:
         pod = _wait_for_pod(core, namespace, name, timeout=SHELL_READY_TIMEOUT)
+        print(
+            f"job {name} is removed after {SHELL_DEADLINE_SECONDS // 3600}h; "
+            f"delete earlier with: kubectl delete job {name} -n {namespace}",
+            flush=True,
+        )
         sys.stdout.flush()
         sys.stderr.flush()
         # The ruled exception: interactive exec needs a TTY, so hand the process to kubectl.

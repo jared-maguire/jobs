@@ -121,7 +121,7 @@ def plan(profile: ClusterProfile) -> list[str]:
     ns, sa = profile.namespace, profile.service_account
     lines = [
         f"ensure Namespace {ns}",
-        f"create-or-replace ServiceAccount {sa} in {ns}",
+        f"ensure ServiceAccount {sa} in {ns}",
     ]
     for r in profile.rules:
         groups = ",".join(g or "core" for g in r.api_groups)

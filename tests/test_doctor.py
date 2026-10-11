@@ -229,6 +229,27 @@ def test_unreachable_cluster_with_k8s_store_reports_unreachable() -> None:
     assert "cluster unreachable" in checks["store writable"].fix_hint
 
 
+def test_unreachable_cluster_with_k8s_store_skips_the_probe() -> None:
+    calls: list[str] = []
+
+    class SpyStore(MemStore):
+        def put(self, key: str, data: bytes, owner: Any | None = None) -> str:
+            calls.append("put")
+            return super().put(key, data, owner)
+
+        def get(self, uri: str) -> bytes:
+            calls.append("get")
+            return super().get(uri)
+
+        def delete(self, uri: str) -> None:
+            calls.append("delete")
+            super().delete(uri)
+
+    c = _run(_profile(), _Down(), _Down(), SpyStore())["store writable"]
+    assert not c.ok and "cluster unreachable" in c.fix_hint
+    assert calls == []
+
+
 def test_default_clients_failing_to_build_is_reported_not_raised(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -332,6 +353,39 @@ def test_store_is_built_from_the_profile_when_not_injected(
     core, rbac = _converged()
     p = profile_for("generic", namespace="team-a", store=f"local:{tmp_path}")
     checks = doctor(p, core_api=core, rbac_api=rbac, batch_api=FakeBatchV1())  # type: ignore[arg-type]
+    assert {c.name: c for c in checks}["store writable"].ok
+
+
+def test_store_endpoint_is_passed_to_the_fallback_store_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sk8s.store as store_mod
+
+    core, rbac = _converged()
+    seen: list[dict[str, Any]] = []
+
+    def fake_get_store(store: str, **kw: Any) -> BlobStore:
+        seen.append(kw)
+        return MemStore()
+
+    monkeypatch.setattr(store_mod, "get_store", fake_get_store)
+    p = profile_for("generic", namespace="team-a", store="s3://bkt/p")
+    doctor(p, core_api=core, rbac_api=rbac, batch_api=FakeBatchV1(),  # type: ignore[arg-type]
+           store_endpoint="http://minio:9000")
+    assert seen[0]["endpoint"] == "http://minio:9000"
+
+
+def test_injected_store_is_used_as_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sk8s.store as store_mod
+
+    def forbidden(*a: Any, **kw: Any) -> BlobStore:
+        raise AssertionError("must not construct a store when one is injected")
+
+    monkeypatch.setattr(store_mod, "get_store", forbidden)
+    core, rbac = _converged()
+    p = profile_for("generic", namespace="team-a", store="s3://bkt/p")
+    checks = doctor(p, core_api=core, rbac_api=rbac, batch_api=FakeBatchV1(),  # type: ignore[arg-type]
+                    store=MemStore(), store_endpoint="http://minio:9000")
     assert {c.name: c for c in checks}["store writable"].ok
 
 
