@@ -37,6 +37,9 @@ class Config:
     # None -> RWX volumes need an explicit ``storage_class=`` (create_volume says so).
     rwx_storage_class: str | None = None
     ttl_seconds_after_finished: int = 3600
+    # How long a read-only mount waits for a running rw job to finish before it can be served
+    # (a clone must never be taken under a live writer); VolumeWaitTimeout when it runs out.
+    volume_wait_seconds: float = 300.0
     retention_days: int = 7
     keep_results: bool = False
     # Extra env vars exported to worker pods (e.g. AWS_* creds for an S3-compatible store).
@@ -50,6 +53,8 @@ _FIELDS = {f.name: f.type for f in dataclasses.fields(Config)}
 def _coerce(name: str, raw: str) -> Any:
     if name in ("ttl_seconds_after_finished", "retention_days"):
         return int(raw)
+    if name == "volume_wait_seconds":
+        return float(raw)
     if name == "keep_results":
         return raw.strip().lower() in ("1", "true", "yes")
     return raw

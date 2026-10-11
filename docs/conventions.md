@@ -41,6 +41,7 @@ blob of some workflow" carry no `sk8s/kind`, only `sk8s/workflow-id`.
 | `service` | The Deployment, Service and pods of `serve()`, and the service's payload ConfigMap | `sk8s/service=<name>` | `Service.delete()` only |
 | `volume` | A PVC created inside a workflow (`create_volume(..., keep=False)`) | `sk8s/workflow-id=<wf-id>` | Its workflow's anchor (ownerReference), or `delete_volume` |
 | `volume-keep` | A PVC created with `keep=True` | none | `delete_volume` only |
+| `volume-clone` | The hidden read-only clone of a `ReadOnlyMany` volume (see [Annotations](#annotations)) | `sk8s/clone-of=<volume>`; plus `sk8s/workflow-id=<wf-id>` when the volume is workflow-owned | Its volume's anchor (ownerReference, same anchor as the volume), `delete_volume` of the volume, or the library when a newer clone supersedes it |
 | `shell` | The Job behind `sk8s shell` | none | Its own 4-hour deadline plus the Job TTL, or `kubectl delete job` |
 
 `sk8s/workflow-id=<wf-id>` appears on: the anchor, the workflow's Jobs and their pods, its
@@ -70,6 +71,17 @@ On an anchor:
 | `sk8s/store` | The store setting in force (`k8s`, `s3://...`, ...); `clean` opens this store to delete the workflow's blobs |
 | `sk8s/store-prefix` | Key prefix of the workflow's blobs (its workflow id) |
 
+On a volume created with `access_modes` including both `ReadWriteOnce` and `ReadOnlyMany`
+(the volume's PVC itself is `ReadWriteOnce`; its read-only mounts are served from a clone):
+
+| Annotation | Meaning |
+|---|---|
+| `sk8s/access-modes` | The modes the user declared, e.g. `ReadWriteOnce,ReadOnlyMany` |
+| `sk8s/writer-generation` | Name of the last read-write job that completed; a clone is re-taken when it changes |
+| `writers.sk8s/<job>` | One per read-write job in flight (value: start time); set before the Job is created, removed when it ends. A clone is never taken while one exists |
+
+On a clone PVC: `sk8s/clone-generation` holds the `sk8s/writer-generation` it was taken at.
+
 On a blob ConfigMap: `sk8s/key` holds the original blob key, because the ConfigMap *name*
 is a lossy sanitization of it.
 
@@ -82,6 +94,7 @@ is a lossy sanitization of it.
 | Job | `<name_prefix>-<six random characters>`; the prefix defaults to `job`, and detached drivers use `wfdriver` |
 | Blob ConfigMap | `sk8s-` plus the lowercased key with every run of characters outside `a-z0-9-` replaced by `-` (for example `sk8s-wf-k3x9ab-job-q1w2e3-payload`) |
 | Generated volume | `vol-` plus six random characters; explicit names must be DNS-1123 labels |
+| Read-only clone of a volume | `<volume>-ro-<8 hex>` (a hash of the writer generation it was taken at) |
 | Service | your `name`; a DNS-1123 label that starts with a letter, at most 63 characters |
 | ServiceAccount, Role, RoleBinding | `sk8s` (the ServiceAccount name is the `service_account` setting) |
 
@@ -126,15 +139,15 @@ segment>` (so a doctor probe is briefly labeled `sk8s/workflow-id=doctor`).
 ## Ownership and retention
 
 **Owned by the workflow anchor** (ownerReference, so they die with it): the workflow's Jobs
-(controller reference), its blob ConfigMaps (`k8s` store only), and PVCs created with
-`keep=False`. Object-store blobs cannot carry owner references; instead the anchor records
+(controller reference), its blob ConfigMaps (`k8s` store only), PVCs created with
+`keep=False`, and those volumes' read-only clones. Object-store blobs cannot carry owner references; instead the anchor records
 `sk8s/store` and `sk8s/store-prefix`, and every sk8s code path that deletes an anchor also
 deletes that prefix from the store. Deleting an anchor by hand (`kubectl delete configmap`)
 is not an sk8s code path, so in an object store its blobs stay behind until you remove them
 (see [GKE guide](gke.md#8-known-behavior-deleting-an-anchor-by-hand)).
 
-**Owned by nothing**: services (Deployment, Service, pod, payload blob) and `keep=True`
-volumes. No workflow label, no ownerReference, never selected by `clean`. They go away only
+**Owned by nothing**: services (Deployment, Service, pod, payload blob), `keep=True`
+volumes and their read-only clones. No workflow label, no ownerReference, never selected by `clean`. They go away only
 through `Service.delete()` and `delete_volume()`.
 
 **When a workflow goes away:**

@@ -20,6 +20,10 @@ class FakeCoreV1:
         self.actions: list[tuple[str, str, str]] = []
         self.pvcs: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1PersistentVolumeClaim
         self.pvc_delete_policies: dict[str, str | None] = {}  # pvc name -> propagation policy
+        self.pvc_deleted: list[str] = []  # every PVC delete that was issued, in order
+        self.pvc_patches: list[tuple[str, dict[str, Any]]] = []  # (name, body), in order
+        self.pods: dict[tuple[str, str], Any] = {}  # (ns, name) -> pod-like object
+        self.events: list[Any] = []  # event-like objects served by list_namespaced_event
 
     def create_namespaced_config_map(self, namespace: str, body: Any) -> Any:
         self.create_calls.append(body.metadata.name)
@@ -146,13 +150,65 @@ class FakeCoreV1:
         if (namespace, name) not in self.pvcs:
             raise ApiException(status=404, reason="Not Found")
         self.pvc_delete_policies[name] = propagation_policy
+        self.pvc_deleted.append(name)
         del self.pvcs[(namespace, name)]
 
-    def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
-        class R:
-            items: list[Any] = []
+    def patch_namespaced_persistent_volume_claim(self, name: str, namespace: str, body: Any) -> Any:
+        """JSON merge-patch of metadata.annotations / metadata.labels; a None value deletes a key."""
+        self.pvc_patches.append((name, body))
+        pvc = self.read_namespaced_persistent_volume_claim(name=name, namespace=namespace)
+        for field in ("annotations", "labels"):
+            patch = (body.get("metadata") or {}).get(field)
+            if patch:
+                merged = dict(getattr(pvc.metadata, field) or {})
+                for key, value in patch.items():
+                    if value is None:
+                        merged.pop(key, None)
+                    else:
+                        merged[key] = value
+                setattr(pvc.metadata, field, merged)
+        return pvc
 
-        return R()
+    def list_namespaced_persistent_volume_claim(self, namespace: str, label_selector: str = "") -> Any:
+        wanted = dict(p.split("=", 1) for p in label_selector.split(",") if p)
+        items = [
+            v
+            for (ns, _), v in self.pvcs.items()
+            if ns == namespace
+            and all((v.metadata.labels or {}).get(k) == val for k, val in wanted.items())
+        ]
+        return SimpleNamespace(items=items)
+
+    def read_namespaced_pod(self, name: str, namespace: str) -> Any:
+        try:
+            return self.pods[(namespace, name)]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found")
+
+    def list_namespaced_event(self, namespace: str, field_selector: str = "") -> Any:
+        """Honors `a.b=v[,...]` field selectors over the event-like objects in ``self.events``."""
+        wanted = dict(p.split("=", 1) for p in field_selector.split(",") if p)
+
+        def get(ev: Any, path: str) -> Any:
+            cur = ev
+            for part in path.split("."):
+                if part == "involvedObject":
+                    part = "involved_object"
+                cur = getattr(cur, part, None)
+            return cur
+
+        items = [e for e in self.events if all(get(e, k) == v for k, v in wanted.items())]
+        return SimpleNamespace(items=items)
+
+    def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
+        wanted = dict(p.split("=", 1) for p in label_selector.split(",") if p)
+        items = [
+            p
+            for (ns, _), p in self.pods.items()
+            if ns == namespace
+            and all(((p.metadata.labels or {}) if p.metadata else {}).get(k) == v for k, v in wanted.items())
+        ]
+        return SimpleNamespace(items=items)
 
     def read_namespaced_pod_log(self, name: str, namespace: str) -> str:
         return ""

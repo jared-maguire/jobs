@@ -16,7 +16,7 @@ from typing import Any, Callable, Iterator
 from kubernetes.client import ApiException
 
 import sk8s
-from sk8s import anchors, serialize, spec, volumes
+from sk8s import anchors, clones, serialize, spec, volumes
 from sk8s.config import Config, load_config
 from sk8s.errors import (
     BlobNotFound, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
@@ -49,6 +49,19 @@ _JOB_DELETED_REASON = "job was deleted before completing (workflow killed or exp
 _REJECTION_STATUSES = frozenset({400, 403, 422})
 
 log = logging.getLogger("sk8s.cluster")
+
+
+@dataclasses.dataclass
+class _MountPlan:
+    """What a submitted job needs done when it ends, for its clone-backed volumes.
+
+    ``writers``: volumes it mounts read-write (each carries a writer marker until the job is
+    over). ``readers``: volumes it mounts read-only through a clone (superseded clones are
+    swept when it ends).
+    """
+
+    writers: list[str] = dataclasses.field(default_factory=list)
+    readers: list[str] = dataclasses.field(default_factory=list)
 
 
 def _job_rejected(name: str, exc: ApiException, *, privileged: bool) -> JobRejected:
@@ -156,6 +169,8 @@ class Cluster:
         self._pending: set[JobFuture] = set()  # unresolved futures (unlike _futures, which empties before resolve)
         self._atexit_hook: Callable[[], None] | None = None
         self._futures: dict[str, tuple[JobFuture, bool, str]] = {}  # name -> (future, keep_results, image)
+        self._mount_plans: dict[str, _MountPlan] = {}  # job name -> clone-backed volume bookkeeping
+        self._sleep: Callable[[float], None] = time.sleep
         self._watcher = JobWatcher(
             watcher_events if watcher_events is not None else self._k8s_events,
             self._on_terminal,
@@ -386,9 +401,9 @@ class Cluster:
             )
         image = opts.get("image") or default_image(self.config)
         mounts = volumes.parse_mounts(opts.get("volumes"))  # ValueError before any side effect
-        pod_mounts = [
-            spec.PodMount(m.name, m.name, m.mountpoint, m.read_only) for m in mounts
-        ]
+        # Resolves read-only mounts of clone-backed volumes (may wait for a running writer),
+        # so it runs before the payload is stored: a failure here leaks nothing.
+        pod_mounts, plan = self._resolve_mounts(mounts)
         payload_key = f"{self.workflow_id}/{name}/payload"
         result_key = f"{self.workflow_id}/{name}/result"
         anchor = self._ensure_anchor()
@@ -419,8 +434,10 @@ class Cluster:
             anchor_uid=anchor.metadata.uid,
         )
         try:
+            self._mark_writers(plan, name)
             self.batch.create_namespaced_job(namespace=namespace, body=job)
         except BaseException as exc:
+            self._settle_writers(plan, name, wrote=False)  # the job never existed: nothing written
             # No job will ever consume (or clean up) the payload: don't leak it.
             try:
                 self.store.delete(payload_uri)
@@ -433,6 +450,8 @@ class Cluster:
         keep = opts.get("keep_results", self.config.keep_results)
         if keep:
             self._keep_any = True
+        if plan.writers or plan.readers:
+            self._mount_plans[name] = plan
         self._futures[name] = (fut, keep, image)
         with self._anchor_lock:
             self._pending.add(fut)
@@ -463,6 +482,110 @@ class Cluster:
         self._watcher.unregister(name)
         self._on_terminal(name, phase)
 
+    # --- volumes: mode resolution and the hidden read-only clones ---------------------
+    def _clone_manager(self) -> clones.CloneManager:
+        namespace = self.config.namespace
+        assert namespace is not None
+        return clones.CloneManager(
+            self.core, self.batch, namespace,
+            writer_state=self._writer_state,
+            job_active=lambda job: job_phase(job) == "active",
+            wait_seconds=self.config.volume_wait_seconds,
+            clock=self._clock, sleep=self._sleep,
+        )
+
+    def _writer_state(self, job_name: str) -> str:
+        """running | succeeded | failed | gone, for an rw job named in a volume's writer marker."""
+        phase = None
+        try:
+            job = self.batch.read_namespaced_job(name=job_name, namespace=self.config.namespace)
+            phase = job_phase(job)
+        except ApiException as exc:
+            if exc.status != 404:
+                log.warning("cannot read job %s to settle its volume: %s", job_name, exc)
+                return clones.RUNNING  # unknown: never clone under a writer we cannot rule out
+        if phase == "active":
+            return clones.RUNNING
+        try:  # a finished or deleted job's pods can linger (terminating) and still write
+            pods = self.core.list_namespaced_pod(
+                namespace=self.config.namespace, label_selector=f"job-name={job_name}"
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("cannot list pods of job %s to settle its volume", job_name, exc_info=True)
+            return clones.RUNNING
+        if any(getattr(p.status, "phase", None) in ("Pending", "Running") for p in pods.items):
+            return clones.RUNNING
+        return {"succeeded": clones.SUCCEEDED, "failed": clones.FAILED}.get(phase or "", clones.GONE)
+
+    def _resolve_mounts(
+        self, mounts: list[volumes.Mount]
+    ) -> tuple[list[spec.PodMount], _MountPlan]:
+        """Pick the claim for each mount: the volume itself, or, for a read-only mount of a
+        clone-backed volume, its current clone."""
+        plan = _MountPlan()
+        pod_mounts: list[spec.PodMount] = []
+        if not mounts:
+            return pod_mounts, plan
+        mgr = self._clone_manager()
+        for m in mounts:
+            claim = m.name
+            try:
+                pvc = mgr.read_volume(m.name)  # VolumeNotFound: fail now, not as a Pending pod
+            except ApiException as exc:
+                # Cannot tell (no PVC read permission?): behave as before, mount the volume.
+                log.warning("cannot read volume %s (%s); mounting it as is", m.name, exc)
+                pvc = None
+            if pvc is not None and clones.is_clone_backed(pvc):
+                if m.read_only:
+                    claim = mgr.resolve_read_only(m.name, pvc)
+                    plan.readers.append(m.name)
+                else:
+                    mgr.guard_writer_start(m.name, pvc)
+                    plan.writers.append(m.name)
+            pod_mounts.append(spec.PodMount(m.name, claim, m.mountpoint, m.read_only))
+        return pod_mounts, plan
+
+    def _mark_writers(self, plan: _MountPlan, job_name: str) -> None:
+        if plan.writers:
+            mgr = self._clone_manager()
+            for volume in plan.writers:
+                mgr.mark_writer(volume, job_name)
+
+    def _settle_writers(self, plan: _MountPlan, job_name: str, *, wrote: bool) -> None:
+        """Best effort: a leftover marker is reconciled by the next read-only mount anyway."""
+        if not plan.writers:
+            return
+        try:
+            mgr = self._clone_manager()
+            for volume in plan.writers:
+                mgr.settle_writer(volume, job_name, wrote=wrote)
+        except Exception:  # noqa: BLE001
+            log.exception("could not settle writer marker of job %s", job_name)
+
+    def _finish_mounts(self, name: str, phase: str) -> None:
+        """A job ended: make a completed writer the volume's new generation and sweep clones."""
+        plan = self._mount_plans.pop(name, None)
+        if plan is None:
+            return
+        try:
+            if plan.writers:
+                if phase == "succeeded":
+                    state = clones.SUCCEEDED
+                elif phase == "failed":
+                    state = self._writer_state(name)  # a reaped (DELETED) job may have succeeded
+                else:  # imagepull / volume-stuck: it never ran
+                    state = clones.FAILED
+                if state != clones.RUNNING:  # (running: the marker stays; a reader reconciles it)
+                    self._settle_writers(
+                        plan, name, wrote=state in (clones.SUCCEEDED, clones.GONE)
+                    )
+            if plan.readers:
+                mgr = self._clone_manager()
+                for volume in plan.readers:
+                    mgr.sweep_stale(volume)
+        except Exception:  # noqa: BLE001 — a future must resolve whatever happens here
+            log.exception("could not finish volume bookkeeping of job %s", name)
+
     def run(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         timeout = kwargs.pop("timeout", None)
         fut = self.submit(func, *args, **kwargs)
@@ -490,8 +613,10 @@ class Cluster:
             error = StoreError(f"could not resolve job {name}: {exc!r}")
         if phase == "imagepull":
             self._delete_stuck_job(name)
-        # Clean up before resolving so a caller woken by the future sees a clean store.
+        # Clean up before resolving so a caller woken by the future sees a clean store (and a
+        # writer's volume already carries its new generation).
         self._cleanup(name, keep)
+        self._finish_mounts(name, phase)
         try:
             if error is not None:
                 fut.set_exception(error)
@@ -605,6 +730,9 @@ class Cluster:
         except Exception:  # noqa: BLE001
             return False
         entry = self._futures.pop(job_name, None)
+        # A cancelled writer's marker is left for the next read-only mount to reconcile: the
+        # Job is deleted in the foreground, so it only reads as "gone" once its pods are.
+        self._mount_plans.pop(job_name, None)
         try:
             self._watcher.unregister(job_name)
             keep = entry[1] if entry is not None else self.config.keep_results

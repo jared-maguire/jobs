@@ -73,6 +73,52 @@ class ImagePullError(PodFailed):
         self.image = image
 
 
+class VolumeError(Sk8sError):
+    """Something is wrong with a volume the job asked to mount (base of the volume errors)."""
+
+
+class VolumeNotFound(VolumeError):
+    """``volumes=`` names a PersistentVolumeClaim that does not exist in the namespace."""
+
+    def __init__(self, volume: str, namespace: str) -> None:
+        self.volume = volume
+        self.namespace = namespace
+        super().__init__(
+            f"volume {volume!r} does not exist in namespace {namespace!r}; create it first "
+            f"(create_volume({volume!r}, ...)) or check the name"
+        )
+
+
+class VolumeNotPopulated(VolumeError):
+    """A read-only mount of a ReadOnlyMany-capable volume that no rw job has completed on yet.
+
+    A read-only mount is served from a hidden clone taken after a writer completes; before
+    that there is nothing (not even a filesystem) to clone.
+    """
+
+    def __init__(self, volume: str) -> None:
+        self.volume = volume
+        super().__init__(
+            f"volume {volume!r} has not been written by any completed job yet, so there is "
+            f"nothing to mount read-only. Populate it first with a read-write mount "
+            f"(volumes={{{volume!r}: {{\"access_mode\": \"rw\"}}}}) and wait for that job to "
+            f"finish; read-only mounts see the volume as of the last completed writer."
+        )
+
+
+class VolumeWaitTimeout(VolumeError, TimeoutError):
+    """A bounded wait on a volume ran out (a writer that is still running, or a clone being made)."""
+
+    def __init__(self, volume: str, waiting_on: str, timeout: float, hint: str) -> None:
+        self.volume = volume
+        self.waiting_on = waiting_on
+        self.timeout = timeout
+        self.hint = hint
+        super().__init__(
+            f"volume {volume!r}: still waiting on {waiting_on} after {timeout:g}s. {hint}"
+        )
+
+
 class RemoteTraceback(Exception):
     """Chained as __cause__ of re-raised remote exceptions; str() is the remote tb."""
 

@@ -26,6 +26,34 @@ Lifecycle, chosen at creation:
   anchor cascade nor a retention sweep can reach it (``clean()`` only ever
   selects ``sk8s/kind: anchor`` ConfigMaps); only ``delete_volume`` removes it.
 
+ReadOnlyMany and point-in-time reads
+-----------------------------------
+
+A volume is *logical*: ``create_volume(..., access_modes=["ReadWriteOnce", "ReadOnlyMany"])``
+declares which modes mounts may use, and each job mount picks one (see above). Cloud block
+storage cannot be written and read by many nodes at once (GKE's PD CSI driver refuses a
+ReadOnlyMany claim with no content source and a dual-mode claim outright), so sk8s backs the
+volume with a plain ReadWriteOnce PVC and serves read-only mounts from a hidden *clone* of it
+(see :mod:`sk8s.clones` for the mechanism):
+
+- ``rw`` mounts use the volume itself (one node at a time, as for any ReadWriteOnce disk).
+- ``ro`` mounts use the volume's current clone, which any number of jobs on any number of
+  nodes can mount at once. **Read-only mounts see a point-in-time view: the volume as of the
+  last writer that completed.** A write that is still in flight, or lands after the clone was
+  taken, is invisible to readers until the writing job finishes and a later read-only mount
+  re-clones.
+- The clone is taken lazily by the first read-only mount, and again by the first read-only
+  mount after another ``rw`` job has completed. A read-only mount never clones under a running
+  writer: it waits for the writer, up to ``Config.volume_wait_seconds`` (``VolumeWaitTimeout``).
+  Superseded clones are deleted; pods still using one keep it alive until they finish.
+- Clones are cut from the primary at its size and storage class, labeled
+  ``sk8s/kind: volume-clone`` and owned like the volume (same anchor; none for ``keep=True``,
+  where ``delete_volume`` removes them with the volume).
+
+A volume without ``ReadOnlyMany`` in its modes has no clone: a ``ro`` mount mounts the volume
+itself read-only, with ReadWriteOnce's one-node-at-a-time limit (a second node's pod waits
+for the first; sk8s reports that as ``VolumeAttachBlocked`` instead of hanging).
+
 Deleting a PVC that a running pod still mounts blocks on Kubernetes' PVC
 protection finalizer. ``delete_volume`` never waits for that: it issues a plain
 delete (default propagation) and returns; the PVC vanishes once the pods that
@@ -44,7 +72,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from kubernetes import client
 from kubernetes.client import ApiException
 
-from sk8s import anchors
+from sk8s import anchors, clones
 from sk8s.errors import Sk8sError
 from sk8s.spec import MANAGED_BY
 
@@ -195,6 +223,14 @@ def create_volume(
     ``name`` defaults to a generated ``vol-<rand6>``; an explicit name must be a
     DNS-1123 label (``ValueError``) and unused (``Sk8sError``).
 
+    A volume declared with both ``"ReadWriteOnce"`` and ``"ReadOnlyMany"`` (and not
+    ``"ReadWriteMany"``) is *logical*: the PVC itself is created ReadWriteOnce, because the
+    PD CSI driver cannot provision a dual-mode or content-less ReadOnlyMany claim, and the
+    declared modes are recorded in the ``sk8s/access-modes`` annotation. Read-only mounts of
+    it are then served from a hidden clone and see the volume as of the last completed
+    ``rw`` job (see the module docstring). Every other mode set goes to the PVC spec
+    verbatim.
+
     ``storage_class`` always wins when given. Otherwise it is resolved from the access
     modes, as in v1: ``ReadWriteMany`` selects the class ``sk8s config`` recorded for this
     cluster (``Sk8sError`` with a ``sk8s config`` hint if none is recorded, rather than a
@@ -222,6 +258,12 @@ def create_volume(
                 "SK8S_RWX_STORAGE_CLASS, or pass storage_class= explicitly"
             )
 
+    pvc_modes = modes
+    annotations = None
+    if clones.wants_clone(modes):
+        pvc_modes = [m for m in modes if m != clones.READ_ONLY_MANY]
+        annotations = {clones.ACCESS_MODES_ANNOTATION: ",".join(modes)}
+
     labels = {_MANAGED_BY_LABEL: MANAGED_BY}
     owner_references = None
     if keep:
@@ -238,10 +280,10 @@ def create_volume(
         body = client.V1PersistentVolumeClaim(
             metadata=client.V1ObjectMeta(
                 name=pvc_name, namespace=namespace, labels=dict(labels),
-                owner_references=owner_references,
+                owner_references=owner_references, annotations=annotations,
             ),
             spec=client.V1PersistentVolumeClaimSpec(
-                access_modes=modes,
+                access_modes=pvc_modes,
                 resources=client.V1VolumeResourceRequirements(requests={"storage": size}),
                 storage_class_name=storage_class,
             ),
@@ -265,7 +307,8 @@ def delete_volume(name: str, cluster: Any | None = None) -> None:
     """Delete the PVC ``name``; a no-op if it does not exist.
 
     Does not wait: a PVC still mounted by a running pod stays in ``Terminating``
-    (PVC protection finalizer) and disappears when those pods release it.
+    (PVC protection finalizer) and disappears when those pods release it. The volume's
+    hidden read-only clones (``ReadOnlyMany`` volumes) are deleted with it, the same way.
     Raises ``Sk8sError`` for a PVC that sk8s did not create.
     """
     c = _resolve(cluster)
@@ -275,11 +318,14 @@ def delete_volume(name: str, cluster: Any | None = None) -> None:
         pvc = core.read_namespaced_persistent_volume_claim(name=name, namespace=namespace)
     except ApiException as e:
         if e.status == 404:
+            c._clone_manager().delete_all(name)  # a leftover clone of a volume already gone
             return
         raise
     if ((pvc.metadata.labels or {}).get(_MANAGED_BY_LABEL)) != MANAGED_BY:
         # Never destroy someone else's data through this helper.
         raise Sk8sError(f"volume {name!r} is not managed by sk8s; refusing to delete it")
+    # Clones first: if deleting one fails the volume is still there and the call can be repeated.
+    c._clone_manager().delete_all(name)
     try:
         core.delete_namespaced_persistent_volume_claim(name=name, namespace=namespace)
     except ApiException as e:
