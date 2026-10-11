@@ -476,3 +476,21 @@ def test_workflow_force_path_ignores_age_floor(tmp_path) -> None:  # type: ignor
     core, store = FakeCoreV1(), LocalStore(tmp_path)
     _make(core, "wf-young", age_days=10 / 86400, retention=0)
     assert clean(NS, workflow="wf-young", core_api=core, store=store) == ["wf-young"]
+
+
+def _pvc(core: FakeCoreV1, name: str, labels: dict[str, str]) -> None:
+    core.pvcs[(NS, name)] = client.V1PersistentVolumeClaim(
+        metadata=client.V1ObjectMeta(name=name, namespace=NS, labels=labels)
+    )
+
+
+def test_kept_volume_is_never_touched(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """clean() only selects anchor ConfigMaps; a kept volume has no workflow-id label."""
+    core, store = FakeCoreV1(), LocalStore(tmp_path)
+    _pvc(core, "keepme", {"app.kubernetes.io/managed-by": "sk8s", "sk8s/kind": "volume-keep"})
+    _make(core, "wf-old", age_days=50)
+    assert _clean(NS, older_than_days=0, core_api=core, store=store) == ["wf-old"]
+    assert (NS, "keepme") in core.pvcs
+    # an explicit workflow= can neither reach it nor be pointed at it
+    assert _clean(NS, workflow="keepme", core_api=core, store=store) == []
+    assert (NS, "keepme") in core.pvcs

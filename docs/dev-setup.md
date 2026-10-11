@@ -69,11 +69,18 @@ explicitly (they do not follow the `sk8s` default).
    way as step 3 (`-t sk8s-dev-services:latest`); the existing suite can be
    pointed at any tag with `SK8S_TEST_IMAGE`.
 
+<<<<<<< HEAD
    The config/doctor/CLI suite (`tests/integration/test_config_cli.py`) needs no
    hand-made RBAC: it creates and deletes its own namespaces (`sk8s-it-cfg*`) with
    `sk8s config`'s machinery, and runs the CLI with a temp `HOME` so your real
    `~/.config/sk8s/config.toml` is untouched. Tag its image
    `sk8s-dev-config:latest` (override with `SK8S_CONFIG_TEST_IMAGE`).
+=======
+   The volumes suite (`tests/integration/test_volumes.py`) uses
+   `sk8s-dev-volumes:latest` (override with `SK8S_VOLUMES_TEST_IMAGE`) and needs
+   `persistentvolumeclaims` in the Role (already in the command above) plus a default
+   StorageClass (minikube's `standard`).
+>>>>>>> origin/version-2
 
 ## S3 store integration tests (MinIO)
 
