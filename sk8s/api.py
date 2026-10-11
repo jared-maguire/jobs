@@ -52,6 +52,14 @@ def _cluster() -> Any:
         return _default_cluster
 
 
+def _new_cluster(**extra: Any) -> Any:
+    """A new, unshared Cluster built from the configure() overrides (one per workflow)."""
+    from sk8s.cluster import Cluster
+    with _lock:
+        overrides = {**_config_overrides, **extra}
+    return Cluster(**overrides)
+
+
 def run(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
     """Run ``func`` as a job and return its result.
 

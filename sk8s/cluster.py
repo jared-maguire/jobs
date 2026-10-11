@@ -67,6 +67,10 @@ def job_phase(job: Any) -> str:
     return "active"
 
 
+def new_workflow_id() -> str:
+    return "wf-" + spec.job_name("x").rsplit("-", 1)[1]
+
+
 class Cluster:
     def __init__(
         self,
@@ -77,6 +81,7 @@ class Cluster:
         store: BlobStore | None = None,
         watcher_events: Callable[[], Iterator[JobEvent]] | None = None,
         detached: bool = False,
+        workflow_id: str | None = None,
         **overrides: Any,
     ) -> None:
         base = config if config is not None else load_config()
@@ -87,9 +92,10 @@ class Cluster:
         self._batch = batch_api
         self._core = core_api
         self._store = store
-        inherited = os.environ.get("SK8S_WORKFLOW_ID")
-        self.workflow_id = inherited or "wf-" + spec.job_name("x").rsplit("-", 1)[1]
-        # In a worker pod the driver owns the workflow: adopt its anchor, never delete it.
+        # An explicit workflow_id (attach) or the pod's SK8S_WORKFLOW_ID adopts that
+        # workflow: use its anchor, never delete it from this cluster.
+        inherited = workflow_id or os.environ.get("SK8S_WORKFLOW_ID")
+        self.workflow_id = inherited or new_workflow_id()
         self._adopted = bool(inherited)
         self.detached = detached
         self._anchor: Any | None = None  # created/adopted lazily on first submit
@@ -104,6 +110,22 @@ class Cluster:
             watcher_events if watcher_events is not None else self._k8s_events,
             self._on_terminal,
         )
+
+    def bind_workflow(self, workflow_id: str, *, adopt: bool, detached: bool = False) -> None:
+        """Re-point an unused cluster at ``workflow_id`` (used by submit_workflow/attach).
+
+        adopt=True: the workflow exists (or is owned elsewhere); never delete it from here.
+        adopt=False: this cluster creates the workflow's anchor on first submit.
+        """
+        with self._anchor_lock:
+            if self._anchor is not None or self._futures or self._closed:
+                raise RuntimeError(
+                    "this Cluster is already in use; a workflow needs a fresh Cluster "
+                    "(pass cluster=None to let sk8s build one)"
+                )
+            self.workflow_id = workflow_id
+            self._adopted = adopt
+            self.detached = detached
 
     # --- lazy client/store accessors -------------------------------------
     @property
@@ -306,6 +328,24 @@ class Cluster:
         fut.add_done_callback(self._forget)
         self._watcher.register(name)
         return fut
+
+    def track_job(self, name: str, *, keep_results: bool) -> JobFuture:
+        """Future for an already-submitted job of this workflow (e.g. a detached driver),
+        resolved by the watcher like any submitted job."""
+        existing = self._futures.get(name)
+        if existing is not None:
+            return existing[0]
+        fut = JobFuture(name, self.workflow_id, backend=self)
+        if keep_results:
+            self._keep_any = True
+        self._futures[name] = (fut, keep_results, default_image(self.config))
+        self._watcher.register(name)
+        return fut
+
+    def settle_job(self, name: str, phase: str) -> None:
+        """Resolve a tracked job now from a phase observed by polling rather than the watch."""
+        self._watcher.unregister(name)
+        self._on_terminal(name, phase)
 
     @staticmethod
     def _normalize_volumes(volumes: Any) -> dict[str, str]:
