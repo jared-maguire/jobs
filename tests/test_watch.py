@@ -233,3 +233,19 @@ def test_registered_returns_a_snapshot_copy() -> None:
     w.unregister("a")
     assert w.registered() == {"b"}
     w.stop()
+
+
+def test_autostart_false_defers_the_thread_until_start() -> None:
+    ran = threading.Event()
+
+    def events() -> Iterator[JobEvent]:
+        ran.set()
+        while True:
+            time.sleep(0.01)
+            yield ("x", "active")
+
+    w = JobWatcher(events, lambda n, p: None, autostart=False)
+    assert not ran.wait(0.2)
+    w.start()
+    assert ran.wait(5)
+    w.stop()

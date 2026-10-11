@@ -192,6 +192,23 @@ def test_namespace_defaults_to_current(tmp_path, monkeypatch) -> None:  # type: 
     assert _clean(core_api=core, store=store) == ["wf-old"]
 
 
+def test_namespace_falls_back_to_sk8s_when_context_has_none(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from sk8s import k8s
+
+    core, store = FakeCoreV1(), LocalStore(tmp_path)
+    seen: list[str] = []
+    real = core.list_namespaced_config_map
+
+    def spy(namespace: str, **kw):  # type: ignore[no-untyped-def]
+        seen.append(namespace)
+        return real(namespace, **kw)
+
+    core.list_namespaced_config_map = spy  # type: ignore[method-assign]
+    monkeypatch.setattr(k8s, "context_namespace", lambda: None)
+    _clean(core_api=core, store=store)
+    assert seen and set(seen) == {"sk8s"}
+
+
 def test_exported() -> None:
     assert sk8s.clean is clean and "clean" in sk8s.__all__
 

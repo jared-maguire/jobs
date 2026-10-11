@@ -1,12 +1,527 @@
-"""Console entrypoint. Subcommands land in later plans; version works now."""
-import argparse
+"""``sk8s`` console entrypoint: cluster setup, health checks, images, and workflow housekeeping.
 
-from sk8s import __version__
+Exit codes: 0 success, 1 failure (message on stderr, never a traceback), 2 usage error (argparse).
+``sk8s shell`` is the one place sk8s runs ``kubectl`` (an interactive exec, which needs a TTY);
+it lives here and never in the library.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import os
+import re
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Callable, Sequence
+
+from kubernetes import client
+from kubernetes.client import ApiException
+from kubernetes.config import ConfigException
+from urllib3.exceptions import HTTPError
+
+from sk8s import __version__, anchors, cleaning, images, k8s, spec, workflows
+from sk8s import config as config_mod
+from sk8s import doctor as doctor_mod
+from sk8s import profile as profile_mod
+from sk8s.cluster import default_image, job_phase
+from sk8s.config import Config, load_config
+from sk8s.errors import Sk8sError
+from sk8s.store import get_store
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+SHELL_DEADLINE_SECONDS = 4 * 3600  # a shell job outlives its exec (we exec away), so bound it
+SHELL_READY_TIMEOUT = 120.0
+# Keep the shell pod alive with plain POSIX sh so any image works (no python needed). `sleep
+# infinity` is GNU-only, so use a huge number of seconds. PID 1 ignores SIGTERM without a handler,
+# so trap it and `wait` on the backgrounded sleep: the pod then terminates promptly, not after the
+# 30s grace period.
+_SHELL_HANG = "trap 'exit 0' TERM INT; sleep 2147483647 & wait"
+_POD_FATAL_WAITING = {
+    "ImagePullBackOff", "ErrImagePull", "InvalidImageName",
+    "CreateContainerConfigError", "CrashLoopBackOff",
+}
+
+
+# --- shared helpers ----------------------------------------------------------------------------
+
+
+def _load_cfg() -> Config:
+    try:
+        return load_config()
+    except (ValueError, TypeError, OSError) as e:
+        raise Sk8sError(f"cannot load sk8s config ({config_mod.DEFAULT_CONFIG_PATH}): {e}") from e
+
+
+def _namespace(explicit: str | None = None, cfg: Config | None = None) -> str:
+    """The configured namespace (``sk8s config`` / SK8S_NAMESPACE), else the kube context's (if it sets one), else "sk8s"."""
+    if explicit:
+        return explicit
+    ns = (cfg if cfg is not None else _load_cfg()).namespace
+    if ns:
+        return ns
+    try:
+        return k8s.current_namespace()
+    except ConfigException as e:
+        raise Sk8sError(
+            f"cannot determine the namespace ({e}); set the namespace via 'sk8s config' or SK8S_NAMESPACE"
+        ) from e
+
+
+# --- duration parsing --------------------------------------------------------------------------
+
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)([dh]?)")
+
+
+def parse_duration_days(text: str) -> float:
+    """'7d' -> 7.0, '36h' -> 1.5, '3' (bare) -> 3.0 days. Anything else is rejected."""
+    m = _DURATION.fullmatch(text.strip().lower())
+    if m is None:
+        raise argparse.ArgumentTypeError(
+            f"invalid duration {text!r}: use a number of days (7), or 7d / 36h"
+        )
+    value = float(m.group(1))
+    return value / 24.0 if m.group(2) == "h" else value
+
+
+# --- config file writer (three keys; no toml-writing dependency) -------------------------------
+
+_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r"}
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def toml_string(value: str) -> str:
+    """A TOML basic string: quote, backslash and control characters escaped."""
+    out = []
+    for ch in value:
+        if ch in _ESCAPES:
+            out.append(_ESCAPES[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _toml_key(key: str) -> str:
+    return key if _BARE_KEY.fullmatch(key) else toml_string(key)
+
+
+def _toml_scalar(value: Any) -> str:
+    if isinstance(value, bool):  # before int: bool is an int
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return toml_string(value)
+    raise Sk8sError(f"config file holds a value this writer cannot preserve: {value!r}")
+
+
+def render_toml(data: dict[str, Any]) -> str:
+    """Top-level scalars, then one flat ``[table]`` per dict value (e.g. ``store_env``)."""
+    lines = [f"{_toml_key(k)} = {_toml_scalar(v)}" for k, v in data.items() if not isinstance(v, dict)]
+    for k, table in data.items():
+        if isinstance(table, dict):
+            lines.append("")
+            lines.append(f"[{_toml_key(k)}]")
+            lines.extend(f"{_toml_key(tk)} = {_toml_scalar(tv)}" for tk, tv in table.items())
+    return "\n".join(lines).lstrip("\n") + "\n"
+
+
+def write_config(path: Path, updates: dict[str, str]) -> None:
+    """Set ``updates`` in the TOML file at ``path``, keeping any other keys already there."""
+    data: dict[str, Any] = {}
+    if path.exists():
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (tomllib.TOMLDecodeError, OSError) as e:
+            raise Sk8sError(f"cannot update {path}: {e}; fix or remove it first") from e
+    data.update(updates)
+    text = render_toml(data)  # raises before touching the file if something is unpreservable
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".toml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# --- commands ----------------------------------------------------------------------------------
+
+
+def _cmd_config(args: argparse.Namespace) -> int:
+    cfg = _load_cfg()
+    # Unlike the other commands, config never infers the namespace from the kube context: it
+    # creates one, so the default is the dedicated "sk8s" namespace unless told otherwise.
+    namespace = args.namespace or cfg.namespace or config_mod.DEFAULT_NAMESPACE
+    store = args.store or cfg.store
+    provider = args.provider or profile_mod.detect_provider()
+    try:
+        prof = profile_mod.profile_for(
+            provider, namespace=namespace, store=store, image_prefix=cfg.image_prefix
+        )
+    except ValueError as e:
+        raise Sk8sError(str(e)) from e
+    if args.dry_run:
+        print("\n".join(profile_mod.plan(prof)))
+        return 0
+    print("\n".join(profile_mod.apply(prof)))
+    path = config_mod.DEFAULT_CONFIG_PATH
+    write_config(
+        path, {"namespace": prof.namespace, "store": prof.store, "image_prefix": prof.image_prefix}
+    )
+    print(f"wrote {path}")
+    return 0
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    cfg = _load_cfg()
+    prof = profile_mod.profile_for(
+        profile_mod.detect_provider(),
+        namespace=_namespace(None, cfg),
+        store=cfg.store,
+        image_prefix=cfg.image_prefix,
+    )
+    # Build the store here so a configured endpoint (MinIO etc.) is honoured; if it cannot be built
+    # (or no client can be), leave it to doctor, which reports that as a failed check.
+    store = None
+    try:
+        store = get_store(
+            cfg.store,
+            namespace=prof.namespace,
+            core_api=k8s.core_api(),
+            endpoint=cfg.store_endpoint,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    checks = doctor_mod.doctor(prof, store=store, store_endpoint=cfg.store_endpoint)
+    width = max((len(c.name) for c in checks), default=0)
+    for c in checks:
+        print(f"{'PASS' if c.ok else 'FAIL'}  {c.name:<{width}}".rstrip())
+        if not c.ok and c.fix_hint:
+            print(f"      {c.fix_hint}")
+    return 0 if all(c.ok for c in checks) else 1
+
+
+def _cmd_image_build(args: argparse.Namespace) -> int:
+    try:
+        if args.minikube:
+            dockerfile = images.generate_dockerfile(
+                pip=args.pip, conda=args.conda, channels=args.channel
+            )
+            tag = images.build_in_minikube(args.tag, dockerfile=dockerfile)
+        else:
+            tag = images.build(
+                args.tag, pip=args.pip, conda=args.conda, channels=args.channel, push=args.push
+            )
+    except ValueError as e:
+        raise Sk8sError(str(e)) from e
+    print(f"built {tag}")
+    return 0
+
+
+def _cmd_image_push(args: argparse.Namespace) -> int:
+    images.push(args.tag)
+    print(f"pushed {args.tag}")
+    return 0
+
+
+def _format_age(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{int(seconds // size)}{unit}"
+    return f"{int(seconds)}s"
+
+
+def _anchor_age(anchor: Any, now: datetime.datetime) -> str:
+    try:
+        created = datetime.datetime.fromisoformat(anchor.metadata.annotations[anchors.CREATED_AT])
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=datetime.timezone.utc)
+        return _format_age((now - created).total_seconds())
+    except (KeyError, TypeError, ValueError):
+        return "?"
+
+
+def _driver_phase(batch: Any, namespace: str, driver: str) -> str:
+    if not driver:
+        return "unknown"
+    try:
+        return job_phase(batch.read_namespaced_job(name=driver, namespace=namespace))
+    except ApiException:  # 404: reaped by the TTL controller; anything else: can't tell
+        return "unknown"
+
+
+def _cmd_workflows(args: argparse.Namespace) -> int:
+    namespace = _namespace()
+    core: Any = k8s.core_api()
+    batch: Any = k8s.batch_api()
+    items = core.list_namespaced_config_map(
+        namespace=namespace, label_selector=f"{anchors.ANCHOR_KIND_LABEL}={anchors.ANCHOR_KIND}"
+    ).items
+    if not items:
+        print(f"no workflows in namespace {namespace}")
+        return 0
+    now = datetime.datetime.now(datetime.timezone.utc)
+    rows = [("ID", "DETACHED", "AGE", "DRIVER")]
+    for cm in sorted(items, key=lambda c: (c.metadata.annotations or {}).get(anchors.CREATED_AT, "")):
+        ann = cm.metadata.annotations or {}
+        rows.append((
+            (cm.metadata.labels or {}).get(anchors.WORKFLOW_LABEL, cm.metadata.name),
+            "yes" if ann.get(anchors.DETACHED) == "true" else "no",
+            _anchor_age(cm, now),
+            _driver_phase(batch, namespace, ann.get(anchors.DRIVER_JOB, "")),
+        ))
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    for r in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip())
+    return 0
+
+
+def _cmd_logs(args: argparse.Namespace) -> int:
+    namespace = _namespace()
+    core: Any = k8s.core_api()
+    anchor = anchors.get_anchor(core, namespace=namespace, workflow_id=args.workflow)
+    if anchor is None:
+        raise Sk8sError(f"unknown workflow {args.workflow}: no anchor in namespace {namespace}")
+    driver = (anchor.metadata.annotations or {}).get(anchors.DRIVER_JOB, "")
+    if not driver:
+        raise Sk8sError(
+            f"workflow {args.workflow} has no driver job recorded "
+            "(only detached workflows record one, and only after it is submitted)"
+        )
+    pods = core.list_namespaced_pod(namespace=namespace, label_selector=f"job-name={driver}")
+    if not pods.items:
+        raise Sk8sError(f"no pods found for driver job {driver} (already reaped?)")
+    chunks = [
+        core.read_namespaced_pod_log(name=pod.metadata.name, namespace=namespace)
+        for pod in pods.items
+    ]
+    text = "\n".join(chunks)
+    sys.stdout.write(text if text.endswith("\n") or not text else text + "\n")
+    return 0
+
+
+def _cmd_kill(args: argparse.Namespace) -> int:
+    workflows.attach(args.workflow).kill()
+    print(f"killed {args.workflow}")
+    return 0
+
+
+def _cmd_clean(args: argparse.Namespace) -> int:
+    deleted = cleaning.clean(_namespace(), older_than_days=args.older_than)
+    if deleted:
+        print("\n".join(f"deleted {wf}" for wf in deleted))
+    else:
+        print("nothing to clean")
+    return 0
+
+
+def _shell_job(name: str, namespace: str, image: str, cfg: Config) -> client.V1Job:
+    labels = {"app.kubernetes.io/managed-by": spec.MANAGED_BY, "sk8s/kind": "shell"}
+    return client.V1Job(
+        api_version="batch/v1",
+        kind="Job",
+        metadata=client.V1ObjectMeta(name=name, namespace=namespace, labels=labels),
+        spec=client.V1JobSpec(
+            backoff_limit=0,
+            ttl_seconds_after_finished=cfg.ttl_seconds_after_finished,
+            active_deadline_seconds=SHELL_DEADLINE_SECONDS,
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(labels=labels),
+                spec=client.V1PodSpec(
+                    restart_policy="Never",
+                    service_account_name=cfg.service_account,
+                    containers=[
+                        client.V1Container(
+                            name="shell",
+                            image=image,
+                            image_pull_policy=cfg.pull_policy,
+                            command=["sh", "-c", _SHELL_HANG],
+                        )
+                    ],
+                ),
+            ),
+        ),
+    )
+
+
+# Seams for tests (and the one place that touches the process/PATH).
+_sleep = time.sleep
+_clock = time.monotonic
+_which = shutil.which
+_execvp = os.execvp
+
+
+def _wait_for_pod(
+    core: Any, namespace: str, job: str, *, timeout: float,
+    sleep: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
+) -> str:
+    """Name of the job's pod once it is Running; Sk8sError if it cannot get there."""
+    sleep = sleep or _sleep
+    clock = clock or _clock
+    deadline = clock() + timeout
+    while True:
+        pods = core.list_namespaced_pod(namespace=namespace, label_selector=f"job-name={job}")
+        for pod in pods.items:
+            status = pod.status
+            phase = status.phase if status is not None else None
+            if phase == "Running":
+                return str(pod.metadata.name)
+            if phase in ("Failed", "Succeeded"):
+                raise Sk8sError(f"shell pod {pod.metadata.name} ended early ({phase})")
+            for cs in (status.container_statuses or []) if status is not None else []:
+                waiting = cs.state.waiting if cs.state is not None else None
+                if waiting is not None and waiting.reason in _POD_FATAL_WAITING:
+                    raise Sk8sError(
+                        f"shell pod {pod.metadata.name} cannot start: {waiting.reason}"
+                        + (f" ({waiting.message})" if waiting.message else "")
+                    )
+        if clock() >= deadline:
+            raise Sk8sError(f"shell pod did not become Running within {timeout:.0f}s")
+        sleep(1.0)
+
+
+def _cmd_shell(args: argparse.Namespace) -> int:
+    if _which("kubectl") is None:
+        raise Sk8sError(
+            "kubectl not found on PATH: 'sk8s shell' needs it for the interactive exec "
+            "(install kubectl, or run the job's pod exec some other way)"
+        )
+    cfg = _load_cfg()
+    namespace = _namespace(None, cfg)
+    image = args.image or default_image(cfg)
+    batch: Any = k8s.batch_api()
+    core: Any = k8s.core_api()
+    name = spec.job_name("sk8s-shell")
+    batch.create_namespaced_job(namespace=namespace, body=_shell_job(name, namespace, image, cfg))
+    print(f"starting shell pod (job {name}) in namespace {namespace}...", flush=True)
+    try:
+        pod = _wait_for_pod(core, namespace, name, timeout=SHELL_READY_TIMEOUT)
+        print(
+            f"job {name} is removed after {SHELL_DEADLINE_SECONDS // 3600}h; "
+            f"delete earlier with: kubectl delete job {name} -n {namespace}",
+            flush=True,
+        )
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # The ruled exception: interactive exec needs a TTY, so hand the process to kubectl.
+        # The job is not deleted afterwards (we no longer exist); its deadline + TTL reap it.
+        _execvp("kubectl", ["kubectl", "exec", "-it", "-n", namespace, pod, "--", "sh"])
+    except BaseException:
+        try:
+            batch.delete_namespaced_job(
+                name=name, namespace=namespace, propagation_policy="Background"
+            )
+        except Exception:  # noqa: BLE001 — best effort; the original failure is what matters
+            pass
+        raise
+    return 0  # only reached when execvp is replaced (tests)
+
+
+# --- parser ------------------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="sk8s", description="Run Python functions on Kubernetes.")
+    parser.add_argument("--version", action="version", version=f"sk8s {__version__}")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
+
+    p = sub.add_parser("config", help="prepare a namespace for sk8s and write the client config")
+    p.add_argument("--namespace", help="namespace to create and configure (default: sk8s, or the namespace already configured)")
+    p.add_argument("--store", help="blob store (default: configured, else 'k8s')")
+    p.add_argument("--provider", help="local | generic (default: detected from the kube context)")
+    p.add_argument("--dry-run", action="store_true", help="print the plan; apply nothing")
+    p.set_defaults(func=_cmd_config)
+
+    p = sub.add_parser("doctor", help="check that the cluster is ready for sk8s")
+    p.set_defaults(func=_cmd_doctor)
+
+    img = sub.add_parser("image", help="build or push worker images")
+    img_sub = img.add_subparsers(dest="image_command", metavar="ACTION", required=True)
+    p = img_sub.add_parser("build", help="build a worker image with extra dependencies")
+    p.add_argument("--tag", required=True, help="image tag to build")
+    p.add_argument("--pip", action="append", default=[], metavar="PKG", help="pip dep (repeatable)")
+    p.add_argument("--conda", action="append", default=[], metavar="PKG", help="conda dep (repeatable)")
+    p.add_argument("--channel", action="append", default=[], metavar="CH", help="conda channel (repeatable)")
+    p.add_argument("--push", action="store_true", help="docker push after building")
+    p.add_argument("--minikube", action="store_true", help="build into minikube's image store")
+    p.set_defaults(func=_cmd_image_build)
+    p = img_sub.add_parser("push", help="docker push an image")
+    p.add_argument("--tag", required=True, help="image tag to push")
+    p.set_defaults(func=_cmd_image_push)
+
+    p = sub.add_parser("workflows", help="list workflows in the namespace")
+    p.set_defaults(func=_cmd_workflows)
+
+    p = sub.add_parser("logs", help="print a workflow's driver logs")
+    p.add_argument("workflow")
+    p.set_defaults(func=_cmd_logs)
+
+    p = sub.add_parser("kill", help="delete a workflow and everything it owns")
+    p.add_argument("workflow")
+    p.set_defaults(func=_cmd_kill)
+
+    p = sub.add_parser("clean", help="delete expired workflows")
+    p.add_argument(
+        "--older-than", type=parse_duration_days, metavar="D",
+        help="age limit instead of each workflow's retention: 7d, 36h, or bare days (7)",
+    )
+    p.set_defaults(func=_cmd_clean)
+
+    p = sub.add_parser("shell", help="open a shell in a pod in the cluster (needs kubectl)")
+    p.add_argument("--image", help="image for the shell pod (default: the worker image)")
+    p.set_defaults(func=_cmd_shell)
+    return parser
+
+
+def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Cross-flag usage errors, reported the argparse way (usage + exit 2)."""
+    if getattr(args, "image_command", None) != "build":
+        return
+    if not args.pip and not args.conda:
+        parser.error("image build: give at least one --pip or --conda dependency")
+    if args.channel and not args.conda:
+        parser.error("image build: --channel requires --conda")
+    if args.minikube and args.push:
+        parser.error("image build: --push cannot be combined with --minikube")
+
+
+def run(argv: Sequence[str]) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    _validate(parser, args)
+    try:
+        return int(args.func(args))
+    except Sk8sError as e:
+        print(f"sk8s: error: {e}", file=sys.stderr)
+    except ApiException as e:
+        print(f"sk8s: error: Kubernetes API error: HTTP {e.status} {e.reason}", file=sys.stderr)
+    except ConfigException as e:
+        print(f"sk8s: error: no usable kube config ({e})", file=sys.stderr)
+    except HTTPError as e:
+        print(f"sk8s: error: cannot reach the cluster ({type(e).__name__})", file=sys.stderr)
+    except OSError as e:
+        print(f"sk8s: error: {e}", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("sk8s: interrupted", file=sys.stderr)
+        return 130
+    return 1
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="sk8s")
-    parser.add_argument("--version", action="version", version=f"sk8s {__version__}")
-    parser.parse_args()
-    parser.print_help()
-    return 0
+    return run(sys.argv[1:])

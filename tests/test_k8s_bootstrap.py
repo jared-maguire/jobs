@@ -5,6 +5,7 @@ import pytest
 from kubernetes import config as kube_config_module
 
 from sk8s import k8s
+from sk8s.config import DEFAULT_NAMESPACE
 
 
 def test_in_pod_false_without_token(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -50,11 +51,44 @@ def test_current_namespace_outside_pod_uses_context_namespace(
     assert k8s.current_namespace() == "somens"
 
 
-def test_current_namespace_outside_pod_defaults_when_context_has_no_namespace(
+def test_current_namespace_outside_pod_falls_back_to_sk8s_not_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _use_kubeconfig(tmp_path, monkeypatch, namespace=None)
+    assert k8s.current_namespace() == DEFAULT_NAMESPACE == "sk8s"
+    assert k8s.current_namespace() != "default"
+
+
+def test_context_namespace_is_none_when_context_sets_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_kubeconfig(tmp_path, monkeypatch, namespace=None)
+    assert k8s.context_namespace() is None
+
+
+def test_context_namespace_reports_explicit_context_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_kubeconfig(tmp_path, monkeypatch, namespace="somens")
+    assert k8s.context_namespace() == "somens"
+
+
+def test_context_namespace_explicit_default_is_honored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A context that deliberately names "default" is explicit; only the *fallback* never is.
+    _use_kubeconfig(tmp_path, monkeypatch, namespace="default")
+    assert k8s.context_namespace() == "default"
     assert k8s.current_namespace() == "default"
+
+
+def test_in_pod_namespace_beats_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "token").write_text("tok")
+    (tmp_path / "namespace").write_text("podns")
+    monkeypatch.setattr(k8s, "_SA_DIR", tmp_path)
+    monkeypatch.setattr(k8s, "load", lambda: pytest.fail("in-pod must not read kubeconfig"))
+    assert k8s.context_namespace() == "podns"
+    assert k8s.current_namespace() == "podns"
 
 
 def test_load_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

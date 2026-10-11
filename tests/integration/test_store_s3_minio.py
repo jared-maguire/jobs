@@ -89,6 +89,7 @@ def s3_cluster(s3_client):  # type: ignore[no-untyped-def]
     from sk8s.config import load_config
 
     cfg = load_config(
+        namespace="default",  # legacy default-namespace RBAC; see dev-setup.md
         image=os.environ.get("SK8S_TEST_IMAGE", "sk8s-dev-stores:latest"),
         pull_policy="Never",
         ttl_seconds_after_finished=30,

@@ -14,11 +14,13 @@ else:
     import tomli as tomllib
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "sk8s" / "config.toml"
+# The dedicated namespace sk8s uses when nothing names one. Never "default".
+DEFAULT_NAMESPACE = "sk8s"
 
 
 @dataclass(frozen=True)
 class Config:
-    namespace: str | None = None        # None -> current kube-context namespace
+    namespace: str | None = None        # None -> kube-context namespace if it sets one, else "sk8s"
     image: str | None = None            # None -> official image for this version
     image_prefix: str = ""
     pull_policy: str = "IfNotPresent"

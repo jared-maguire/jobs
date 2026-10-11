@@ -26,7 +26,7 @@ IMAGE = os.environ.get("SK8S_WORKFLOW_TEST_IMAGE", "sk8s-dev-workflows:latest")
 
 
 def new_cluster() -> Cluster:
-    return Cluster(load_config(image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=30))
+    return Cluster(load_config(namespace="default", image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=30))
 
 
 @pytest.fixture

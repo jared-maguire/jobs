@@ -146,3 +146,15 @@ def test_delete_prefix_for_service_keys() -> None:
     assert set(s.core_api.configmaps) == {("ns1", "sk8s-svc-api2-payload"), ("ns1", "sk8s-wf-a-j-payload")}
     s.delete_prefix("svc")
     assert set(s.core_api.configmaps) == {("ns1", "sk8s-wf-a-j-payload")}
+
+
+def test_factory_namespace_resolution_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sk8s import k8s
+
+    core = FakeCoreV1()
+    monkeypatch.setattr(k8s, "context_namespace", lambda: "ctx-ns")
+    assert get_store("k8s", namespace="explicit", core_api=core).namespace == "explicit"  # type: ignore[attr-defined]
+    assert get_store("k8s", core_api=core).namespace == "ctx-ns"  # type: ignore[attr-defined]
+    monkeypatch.setattr(k8s, "context_namespace", lambda: None)
+    ns = get_store("k8s", core_api=core).namespace  # type: ignore[attr-defined]
+    assert ns == "sk8s" and ns != "default"

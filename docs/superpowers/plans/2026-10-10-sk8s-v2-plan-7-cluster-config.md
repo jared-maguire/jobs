@@ -67,3 +67,10 @@ Subcommands: `config` (--namespace, --store, --provider, --dry-run → plan/appl
 
 ## Done criteria
 Unit + mypy green; config/CLI integration green on minikube; PR into `version-2`.
+
+### Task 5 (added 2026-10-10, user request): Namespace defaults — never "default"
+
+**Rule:** namespace resolution = explicit (file/env/kwargs) > kube-context namespace when the context explicitly sets one > `"sk8s"` (constant `DEFAULT_NAMESPACE`). In-pod resolution unchanged. `sk8s config` defaults `--namespace` to `sk8s`; doctor hints updated; existing integration suites pin `namespace="default"` explicitly; dev-setup.md documents the dedicated-namespace default.
+
+- [ ] TDD across sk8s/k8s.py (a `context_namespace() -> str | None` distinction or equivalent), config/cluster resolution, cli.py default, doctor hints; update unit tests; pin default-ns in existing integration conftests (no cluster needed this task).
+- [ ] Full suite + mypy. Commit `feat: dedicated sk8s namespace default`.
