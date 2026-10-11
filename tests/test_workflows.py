@@ -179,6 +179,7 @@ def test_result_driver_gone_without_result_raises(tmp_path, monkeypatch) -> None
     cold = Cold(h)
     with pytest.raises(Sk8sError):
         workflows.attach(handle.id, cluster=cold.cluster).result(timeout=10)
+    assert (NS, f"sk8s-anchor-{handle.id}") in h.core.configmaps  # failure keeps the workflow
 
 
 def test_kill_deletes_anchor_and_blobs(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -261,3 +262,125 @@ def test_exports() -> None:
     assert sk8s.submit_workflow is workflows.submit_workflow
     assert sk8s.attach is workflows.attach
     assert sk8s.WorkflowHandle is workflows.WorkflowHandle
+
+
+def test_result_after_kill_raises_promptly(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    handle = workflows.submit_workflow(double, 1, cluster=h.cluster)
+    handle.kill()
+    with pytest.raises(Sk8sError, match="was killed"):
+        handle.result()  # no timeout: must not hang
+
+
+def test_kill_wakes_a_blocked_result(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import threading
+
+    h = Harness(tmp_path)
+    handle = workflows.submit_workflow(double, 1, cluster=h.cluster)
+    errors: list[BaseException] = []
+
+    def waiter() -> None:
+        try:
+            handle.result()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=waiter)
+    t.start()
+    t.join(0.3)
+    assert t.is_alive()
+    handle.kill()
+    t.join(5)
+    assert not t.is_alive()
+    assert len(errors) == 1 and "was killed" in str(errors[0])
+
+
+def test_attach_then_killed_elsewhere_result_raises(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(workflows, "_POLL", 0.05)
+    h = Harness(tmp_path)
+    handle = workflows.submit_workflow(double, 1, cluster=h.cluster)
+    cold = Cold(h)
+    attached = workflows.attach(handle.id, cluster=cold.cluster)
+    import threading
+
+    threading.Timer(0.2, handle.kill).start()  # another handle/process kills it mid-wait
+    with pytest.raises(Sk8sError, match="killed or expired"):
+        attached.result(timeout=10)
+
+
+def test_result_on_fresh_attach_after_kill_raises(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    handle = workflows.submit_workflow(double, 1, cluster=h.cluster)
+    attached = workflows.attach(handle.id, cluster=Cold(h).cluster)
+    handle.kill()
+    with pytest.raises(Sk8sError, match="killed or expired"):
+        attached.result(timeout=10)
+
+
+def test_attach_unknown_closes_internal_cluster(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    monkeypatch.setattr(workflows, "_new_cluster", lambda **extra: h.cluster)
+    with pytest.raises(Sk8sError, match="unknown workflow"):
+        workflows.attach("wf-nope")
+    assert h.cluster._closed
+    assert h.cluster._watcher._stopped.is_set()
+
+
+def test_attach_unknown_leaves_passed_cluster_unbound_and_open(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    before = h.cluster.workflow_id
+    with pytest.raises(Sk8sError):
+        workflows.attach("wf-nope", cluster=h.cluster)
+    assert h.cluster.workflow_id == before and not h.cluster._closed
+
+
+def test_submit_failure_closes_internal_cluster_and_leaks_nothing(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    monkeypatch.setattr(workflows, "_new_cluster", lambda **extra: h.cluster)
+
+    def fail(namespace: str, body: Any) -> None:
+        raise RuntimeError("api down")
+
+    h.batch.create_namespaced_job = fail  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="api down"):
+        workflows.submit_workflow(double, 1)
+    assert h.cluster._closed
+    assert not h.core.configmaps
+
+
+def test_owned_cluster_closed_on_result_delete_and_kill(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    monkeypatch.setattr(workflows, "_new_cluster", lambda **extra: h.cluster)
+    handle = workflows.submit_workflow(double, 2)
+    driver = _anchor(h, handle.id).metadata.annotations["sk8s/driver-job"]
+    h.finish_job(driver)
+    assert handle.result(timeout=10, delete=False) == 4
+    assert not h.cluster._closed  # kept: more result()/status() calls may follow
+    handle.result(timeout=10)
+    assert h.cluster._closed
+
+    h2 = Harness(tmp_path / "b")
+    monkeypatch.setattr(workflows, "_new_cluster", lambda **extra: h2.cluster)
+    workflows.submit_workflow(double, 2).kill()
+    assert h2.cluster._closed
+
+
+def test_handle_close_keeps_workflow_and_spares_passed_cluster(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    monkeypatch.setattr(workflows, "_new_cluster", lambda **extra: h.cluster)
+    owned = workflows.submit_workflow(double, 1)
+    owned.close()
+    assert h.cluster._closed
+    assert (NS, f"sk8s-anchor-{owned.id}") in h.core.configmaps
+
+    h2 = Harness(tmp_path / "b")
+    passed = workflows.submit_workflow(double, 1, cluster=h2.cluster)
+    passed.close()
+    assert not h2.cluster._closed
+
+
+def test_non_cluster_argument_is_a_type_error(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(TypeError, match="Cluster"):
+        workflows.submit_workflow(double, 1, cluster=object())
+    with pytest.raises(TypeError, match="Cluster"):
+        workflows.attach("wf-x", cluster="nope")

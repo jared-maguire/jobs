@@ -342,6 +342,11 @@ class Cluster:
         self._watcher.register(name)
         return fut
 
+    def untrack_job(self, name: str) -> None:
+        """Stop watching a tracked job without resolving it."""
+        self._watcher.unregister(name)
+        self._futures.pop(name, None)
+
     def settle_job(self, name: str, phase: str) -> None:
         """Resolve a tracked job now from a phase observed by polling rather than the watch."""
         self._watcher.unregister(name)
