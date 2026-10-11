@@ -204,7 +204,7 @@ print(sk8s.run(lambda x: x * 2, 21))  # 42
 The official worker image has only sk8s and the standard library. To add packages, layer
 them on a base image.
 
-### Recommended: use the minikube registry addon
+### Use the minikube registry addon
 
 A local registry makes minikube behave like a real cluster: plain `docker build` and
 `docker push`, and jobs pull by name with the default pull policy.
@@ -229,37 +229,49 @@ override is needed. Setting `image_prefix = "localhost:5000/"` in
 `~/.config/sk8s/config.toml` prepends that registry to the default worker image name,
 the same way you would point a real cluster at an ECR or GAR mirror prefix.
 
-### Fallback: build straight into minikube (no registry)
+### From Python
 
-Write a small Dockerfile layered on the local base image from the quickstart, in its own
-small directory, then build it with raw `minikube image build`:
+The same machinery is a small API, so a script can build its own worker image:
 
-```bash
-mkdir pysam-ctx && cd pysam-ctx
-printf 'FROM sk8s:dev\nRUN pip install --no-cache-dir pysam\n' > Dockerfile
-minikube image build -t pysam-worker:1 -f Dockerfile .
-minikube image ls | grep pysam-worker
+```python
+from sk8s import images
+
+df = images.generate_dockerfile(base="sk8s:dev", pip=["pysam"])
+print(df)
+# FROM sk8s:dev
+# RUN pip install --no-cache-dir pysam
 ```
 
-Three caveats. The Dockerfile must live inside the build context (the directory you pass
-last): a `-f` path outside it makes `minikube image build` exit 0 without building
-anything, as can an unresolvable `FROM`, so always check `minikube image ls` afterwards.
-Every `minikube image build` also leaks a context tarball at `/tmp/build.*.tar`, so keep
-the context small and clean `/tmp` periodically. And `minikube image rm` removes by image
-ID, so tags sharing an ID vanish together.
+`images.build` runs `docker build` (feeding it the Dockerfile on stdin) and returns the
+tag. With `push=True` it is the one-call version of the registry workflow above:
 
-Then point a run, or every run, at the image:
+```python
+tag = images.build("localhost:5000/pysam-worker:1", base="sk8s:dev", pip=["pysam"], push=True)
+
+# or bring your own Dockerfile text
+tag = images.build("localhost:5000/pysam-worker:1", dockerfile=df)
+images.push(tag)   # push separately, if you built without push=True
+```
+
+`docker build` runs on your host Docker daemon, which does not see the `sk8s:dev` you
+built into minikube in the quickstart. Build it there too (`docker build -t sk8s:dev -f
+docker/Dockerfile.dev .`), or pass any base the daemon can pull. `images.default_base()`
+returns the base used when you omit `base=`: the configured worker image, so an exported
+`SK8S_IMAGE` (or `image` in your config) is honored. Every function that shells out takes
+an optional `runner=` callable (default `subprocess.run`) so tests can inject a fake.
+`conda=[...]` is also accepted, but that path installs sk8s from PyPI and will not work
+until the first PyPI release.
+
+Then use the image, for one run or for every run:
 
 ```python
 import sk8s
 
-print(sk8s.run(lambda: __import__("pysam").__version__, image="pysam-worker:1"))
-sk8s.configure(image="pysam-worker:1")  # or SK8S_IMAGE=pysam-worker:1
+print(sk8s.run(lambda: __import__("pysam").__version__, image=tag))
+sk8s.configure(image=tag)
 ```
 
-(With `SK8S_PULL_POLICY=Never` exported as in the quickstart, minikube uses the local
-image as is.) For PyTorch use `torch` instead of `pysam`; the resulting image is large,
-so expect a slow first build.
+(Unset the quickstart's `SK8S_PULL_POLICY=Never` first: a registry image has to be pulled.)
 
 ### On a real cluster: `sk8s image build`
 
