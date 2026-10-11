@@ -1,16 +1,19 @@
 """The Kubernetes cluster backend: submit jobs, resolve futures, clean up blobs."""
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import dataclasses
 import logging
 import os
 import sys
+import threading
 import time
+import weakref
 from typing import Any, Callable, Iterator
 
 import sk8s
-from sk8s import serialize, spec
+from sk8s import anchors, serialize, spec
 from sk8s.config import Config, load_config
 from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout, PodFailed, StoreError
 from sk8s.future import JobFuture
@@ -73,6 +76,7 @@ class Cluster:
         core_api: Any | None = None,
         store: BlobStore | None = None,
         watcher_events: Callable[[], Iterator[JobEvent]] | None = None,
+        detached: bool = False,
         **overrides: Any,
     ) -> None:
         base = config if config is not None else load_config()
@@ -83,7 +87,17 @@ class Cluster:
         self._batch = batch_api
         self._core = core_api
         self._store = store
-        self.workflow_id = os.environ.get("SK8S_WORKFLOW_ID") or "wf-" + spec.job_name("x").rsplit("-", 1)[1]
+        inherited = os.environ.get("SK8S_WORKFLOW_ID")
+        self.workflow_id = inherited or "wf-" + spec.job_name("x").rsplit("-", 1)[1]
+        # In a worker pod the driver owns the workflow: adopt its anchor, never delete it.
+        self._adopted = bool(inherited)
+        self.detached = detached
+        self._anchor: Any | None = None  # created/adopted lazily on first submit
+        self._anchor_deleted = False
+        self._anchor_lock = threading.Lock()
+        self._closed = False
+        self._pending: set[JobFuture] = set()  # unresolved futures (unlike _futures, which empties before resolve)
+        self._atexit_hook: Callable[[], None] | None = None
         self._futures: dict[str, tuple[JobFuture, bool, str]] = {}  # name -> (future, keep_results, image)
         self._watcher = JobWatcher(
             watcher_events if watcher_events is not None else self._k8s_events,
@@ -112,6 +126,58 @@ class Cluster:
                 self.config.store, namespace=self.config.namespace, core_api=self._core
             )
         return self._store
+
+    # --- workflow anchor ----------------------------------------------------
+    def _ensure_anchor(self) -> Any:
+        """Create (or adopt) the workflow's anchor on first use; reused afterwards."""
+        with self._anchor_lock:
+            if self._anchor is not None:
+                return self._anchor
+            namespace = self.config.namespace
+            assert namespace is not None
+            anchor = None
+            if self._adopted:
+                anchor = anchors.get_anchor(
+                    self.core, namespace=namespace, workflow_id=self.workflow_id
+                )
+            if anchor is None:
+                anchor = anchors.create_anchor(
+                    self.core,
+                    namespace=namespace,
+                    workflow_id=self.workflow_id,
+                    store=self.config.store,
+                    store_prefix=self.workflow_id,
+                    retention_days=self.config.retention_days,
+                    detached=self.detached and not self._adopted,
+                )
+            self._anchor = anchor
+            self._register_atexit()
+            return anchor
+
+    def _register_atexit(self) -> None:
+        ref = weakref.ref(self)
+
+        def hook() -> None:
+            cluster = ref()
+            if cluster is not None:
+                cluster.close()
+
+        self._atexit_hook = hook
+        atexit.register(hook)
+
+    def _forget(self, fut: Any) -> None:
+        with self._anchor_lock:
+            self._pending.discard(fut)
+
+    def _auto_delete_ok(self) -> bool:
+        """Default close() policy: only a finished, non-detached, driver-owned workflow."""
+        if self._adopted or self.detached or self._anchor is None:
+            return False
+        ann = getattr(self._anchor.metadata, "annotations", None) or {}
+        if ann.get(anchors.DETACHED) == "true":
+            return False
+        with self._anchor_lock:
+            return not any(not f.done() for f in self._pending)
 
     # --- events from the real control plane -------------------------------
     def _k8s_events(self) -> Iterator[JobEvent]:
@@ -190,7 +256,10 @@ class Cluster:
         image = opts.get("image") or default_image(self.config)
         payload_key = f"{self.workflow_id}/{name}/payload"
         result_key = f"{self.workflow_id}/{name}/result"
-        payload_uri = self.store.put(payload_key, serialize.encode_payload(func, args, kwargs))
+        owner = anchors.owner_ref(self._ensure_anchor())
+        payload_uri = self.store.put(
+            payload_key, serialize.encode_payload(func, args, kwargs), owner=owner
+        )
         job = spec.build_job(
             name,
             image=image,
@@ -207,6 +276,7 @@ class Cluster:
             backoff_limit=opts.get("backoff_limit", 0),
             ttl=self.config.ttl_seconds_after_finished,
             privileged=opts.get("privileged", False),
+            owner=owner,
         )
         try:
             self.batch.create_namespaced_job(namespace=namespace, body=job)
@@ -220,6 +290,9 @@ class Cluster:
         fut = JobFuture(name, self.workflow_id, backend=self)
         keep = opts.get("keep_results", self.config.keep_results)
         self._futures[name] = (fut, keep, image)
+        with self._anchor_lock:
+            self._pending.add(fut)
+        fut.add_done_callback(self._forget)
         self._watcher.register(name)
         return fut
 
@@ -370,5 +443,34 @@ class Cluster:
             log.exception("post-cancel cleanup of job %s failed", job_name)
         return True
 
-    def close(self) -> None:
-        self._watcher.stop()
+    def close(self, delete_workflow: bool | None = None) -> None:
+        """Stop watching and (maybe) delete the workflow's anchor.
+
+        delete_workflow=None deletes the anchor only if this cluster created it, it
+        is not detached, and every future it issued has resolved; True forces,
+        False skips. Safe to call repeatedly: the watcher is stopped once, the
+        anchor is deleted at most once, and only the first default close() decides.
+        """
+        with self._anchor_lock:
+            first = not self._closed
+            self._closed = True
+        if first:
+            self._watcher.stop()
+            if self._atexit_hook is not None:
+                atexit.unregister(self._atexit_hook)
+        if self._anchor is None or self._anchor_deleted:
+            return
+        if delete_workflow is None:
+            if not first or not self._auto_delete_ok():
+                return
+        elif not delete_workflow:
+            return
+        self._anchor_deleted = True
+        namespace = self.config.namespace
+        assert namespace is not None
+        try:
+            anchors.delete_anchor(
+                self.core, self.store, namespace=namespace, workflow_id=self.workflow_id
+            )
+        except Exception:  # noqa: BLE001 — close() runs at interpreter exit; never raise
+            log.exception("could not delete anchor for workflow %s", self.workflow_id)

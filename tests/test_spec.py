@@ -56,3 +56,13 @@ def test_job_name_valid_and_random() -> None:
     assert n1 != n2
     assert re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", n1)
     assert len(job_name("x" * 100)) <= 63
+
+
+def test_owner_reference() -> None:
+    from kubernetes import client
+
+    assert make().metadata.owner_references is None
+    ref = client.V1OwnerReference(
+        api_version="v1", kind="ConfigMap", name="sk8s-anchor-wf-x", uid="u-1", controller=True
+    )
+    assert make(owner=ref).metadata.owner_references == [ref]

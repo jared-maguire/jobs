@@ -29,11 +29,12 @@ class Harness:
 
     def __init__(self, tmp_path, keep_results=False):  # type: ignore[no-untyped-def]
         self.batch = FakeBatchV1()
+        self.core = FakeCoreV1()
         self.store = LocalStore(tmp_path)
         self.events: "queue.Queue[JobEvent]" = queue.Queue()
         cfg = Config(namespace="ns1", image="sk8s:dev", keep_results=keep_results)
         self.cluster = Cluster(
-            cfg, batch_api=self.batch, core_api=FakeCoreV1(), store=self.store,
+            cfg, batch_api=self.batch, core_api=self.core, store=self.store,
             watcher_events=self._event_iter,
         )
         _OPEN.append(self.cluster)

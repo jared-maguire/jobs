@@ -5,6 +5,8 @@ import random
 import re
 import string
 
+from typing import Any
+
 from kubernetes import client
 
 MANAGED_BY = "sk8s"
@@ -33,6 +35,7 @@ def build_job(
     backoff_limit: int,
     ttl: int,
     privileged: bool,
+    owner: Any | None = None,
 ) -> client.V1Job:
     labels = {"app.kubernetes.io/managed-by": MANAGED_BY, "sk8s/workflow-id": workflow_id}
     env = [
@@ -79,7 +82,10 @@ def build_job(
     return client.V1Job(
         api_version="batch/v1",
         kind="Job",
-        metadata=client.V1ObjectMeta(name=name, namespace=namespace, labels=labels),
+        metadata=client.V1ObjectMeta(
+            name=name, namespace=namespace, labels=labels,
+            owner_references=[owner] if owner is not None else None,
+        ),
         spec=client.V1JobSpec(
             backoff_limit=backoff_limit,
             ttl_seconds_after_finished=ttl,
