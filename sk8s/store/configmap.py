@@ -12,6 +12,7 @@ from sk8s.store.base import BlobStore
 
 MAX_CONFIGMAP_BLOB = 950_000
 MANAGED_BY = {"app.kubernetes.io/managed-by": "sk8s"}
+KEY_ANNOTATION = "sk8s/key"  # original blob key; names are lossy after sanitizing
 
 
 def _sanitize(key: str) -> str:
@@ -40,6 +41,7 @@ class ConfigMapStore(BlobStore):
         meta = client.V1ObjectMeta(
             name=_sanitize(key),
             labels={**MANAGED_BY, "sk8s/workflow-id": workflow_id},
+            annotations={KEY_ANNOTATION: key},
             owner_references=[owner] if owner is not None else None,
         )
         body = client.V1ConfigMap(
@@ -83,10 +85,18 @@ class ConfigMapStore(BlobStore):
                 raise
 
     def delete_prefix(self, prefix: str) -> None:
-        name_prefix = _sanitize(prefix)
+        prefix = prefix.strip("/")
+        if not prefix:
+            raise ValueError("delete_prefix requires a non-empty prefix")
+        # The first segment is the workflow id, which put() stores as a label;
+        # narrow by label server-side, then match whole segments on the exact key
+        # (sanitized names are lossy, so they can't express the boundary).
+        workflow_id = prefix.split("/", 1)[0]
         cms = self.core_api.list_namespaced_config_map(
-            namespace=self.namespace, label_selector="app.kubernetes.io/managed-by=sk8s"
+            namespace=self.namespace,
+            label_selector=f"app.kubernetes.io/managed-by=sk8s,sk8s/workflow-id={workflow_id}",
         )
         for cm in cms.items:
-            if cm.metadata.name.startswith(name_prefix):
+            key = (cm.metadata.annotations or {}).get(KEY_ANNOTATION, "")
+            if key == prefix or key.startswith(prefix + "/"):
                 self.delete(f"k8s://{self.namespace}/{cm.metadata.name}")

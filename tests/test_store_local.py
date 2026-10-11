@@ -40,6 +40,31 @@ def test_delete_prefix(tmp_path: Path) -> None:
     assert s.get(s.uri_for("wf-b/j1/r")) == b"3"
 
 
+def test_delete_prefix_matches_whole_segments(tmp_path: Path) -> None:
+    s = LocalStore(tmp_path)
+    s.put("wf-a/j1/r", b"1")
+    s.put("wf-a/j1-x/r", b"3")
+    s.put("wf-ab/j1/r", b"2")
+    # multi-segment prefix: wf-a/j1 does not take wf-a/j1-x
+    s.delete_prefix("wf-a/j1")
+    with pytest.raises(BlobNotFound):
+        s.get(s.uri_for("wf-a/j1/r"))
+    assert s.get(s.uri_for("wf-a/j1-x/r")) == b"3"
+    # single-segment prefix: wf-a does not take wf-ab
+    s.delete_prefix("wf-a")
+    with pytest.raises(BlobNotFound):
+        s.get(s.uri_for("wf-a/j1-x/r"))
+    assert s.get(s.uri_for("wf-ab/j1/r")) == b"2"
+
+
+def test_delete_prefix_rejects_empty(tmp_path: Path) -> None:
+    s = LocalStore(tmp_path)
+    s.put("wf-a/j1/r", b"1")
+    with pytest.raises(ValueError):
+        s.delete_prefix("/")  # would otherwise rmtree the whole root
+    assert s.get(s.uri_for("wf-a/j1/r")) == b"1"
+
+
 def test_factory(tmp_path: Path) -> None:
     s = get_store(f"local:{tmp_path}")
     assert isinstance(s, LocalStore)

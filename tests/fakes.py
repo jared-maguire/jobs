@@ -1,6 +1,7 @@
 """In-memory fakes for the kubernetes client surface sk8s uses."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from kubernetes.client import ApiException
@@ -11,6 +12,8 @@ class FakeCoreV1:
         self.configmaps: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1ConfigMap
 
     def create_namespaced_config_map(self, namespace: str, body: Any) -> Any:
+        if (namespace, body.metadata.name) in self.configmaps:
+            raise ApiException(status=409, reason="Conflict")
         self.configmaps[(namespace, body.metadata.name)] = body
         return body
 
@@ -26,6 +29,12 @@ class FakeCoreV1:
         del self.configmaps[(namespace, name)]
 
     def list_namespaced_config_map(self, namespace: str, label_selector: str = "") -> Any:
-        class R:
-            items = [v for (ns, _), v in self.configmaps.items() if ns == namespace]
-        return R()
+        """Honors the simple `k=v[,k=v...]` equality form of label selectors."""
+        wanted = dict(p.split("=", 1) for p in label_selector.split(",") if p)
+        items = [
+            v
+            for (ns, _), v in self.configmaps.items()
+            if ns == namespace
+            and all((v.metadata.labels or {}).get(k) == val for k, val in wanted.items())
+        ]
+        return SimpleNamespace(items=items)

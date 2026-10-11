@@ -37,7 +37,10 @@ class LocalStore(BlobStore):
         self._path(uri).unlink(missing_ok=True)
 
     def delete_prefix(self, prefix: str) -> None:
-        target = self.root / prefix
+        prefix = prefix.strip("/")
+        if not prefix:
+            raise ValueError("delete_prefix requires a non-empty prefix")
+        target = self.root / prefix  # directory tree = whole-segment matching
         if target.is_dir():
             shutil.rmtree(target)
         elif target.exists():
