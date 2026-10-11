@@ -29,7 +29,7 @@ JOB_OPTIONS = {
     "pull_policy", "keep_results",
 }
 
-_WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName"}
+_WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
 _SELECTOR = "app.kubernetes.io/managed-by=sk8s"
 # Workflow ids that collide with non-workflow key prefixes in the store.
 RESERVED_WORKFLOW_IDS = frozenset({"svc", "doctor"})

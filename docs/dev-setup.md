@@ -42,17 +42,18 @@ sk8s doctor
    minikube image build -t sk8s-dev:latest -f docker/Dockerfile.dev .
    ```
 
-   For a different Python, pass the build arg. The flag depends on minikube's
-   container runtime (`minikube profile list` shows it):
+   For a different Python, pass the build arg. This is the buildctl (containerd
+   runtime) form, verified with minikube 1.38 and what CI uses (CI pins
+   `container-runtime: containerd`):
 
    ```
-   # containerd runtime (buildkit): verified with minikube 1.38
    minikube image build -t sk8s-dev:latest -f docker/Dockerfile.dev \
      --build-opt=opt=build-arg:PYTHON_VERSION=3.12 .
-   # docker runtime: the form CI uses
-   minikube image build -t sk8s-dev:latest -f docker/Dockerfile.dev \
-     --build-opt=build-arg=PYTHON_VERSION=3.12 .
    ```
+
+   A minikube on the docker runtime may instead accept the
+   `--build-opt=build-arg=PYTHON_VERSION=3.12` spelling (`minikube profile list` shows
+   your runtime).
 
    `minikube image build` can exit 0 even when the build fails (for example an
    unresolvable `FROM`), so check `minikube image ls | grep sk8s-dev` after building.

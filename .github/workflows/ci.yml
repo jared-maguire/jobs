@@ -55,6 +55,7 @@ jobs:
       SK8S_WORKFLOW_TEST_IMAGE: sk8s-dev-ci:ci
       SK8S_CONFIG_TEST_IMAGE: sk8s-dev-ci:ci
       SK8S_VOLUMES_TEST_IMAGE: sk8s-dev-ci:ci
+      SK8S_SERVICES_TEST_IMAGE: sk8s-dev-ci:ci
     steps:
       - uses: actions/checkout@v4
 
@@ -68,16 +69,16 @@ jobs:
         run: pip install -e ".[dev,s3,gcs]"
 
       - uses: medyagh/setup-minikube@v0
+        with:
+          # the build-opt form below is buildctl syntax; pin the runtime so it's deterministic
+          container-runtime: containerd
 
-      # Build into minikube's own image store so pods (pull_policy Never) find them.
-      # The services suite hardcodes its tag, so the (layer-cached) build is repeated for it.
-      - name: Build worker images into minikube
+      # Build into minikube's own image store so pods (pull_policy Never) find it.
+      - name: Build worker image into minikube
         run: |
-          for tag in sk8s-dev-ci:ci sk8s-dev-services:latest; do
-            minikube image build -t "$tag" \
-              --build-opt=opt=build-arg:PYTHON_VERSION="$PYTHON_VERSION" \
-              -f docker/Dockerfile.dev .
-          done
+          minikube image build -t sk8s-dev-ci:ci \
+            --build-opt=opt=build-arg:PYTHON_VERSION="$PYTHON_VERSION" \
+            -f docker/Dockerfile.dev .
           minikube image ls
 
       # Same commands as docs/dev-setup.md (default-namespace RBAC); deliberately not

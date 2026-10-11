@@ -34,7 +34,10 @@ GONE_TIMEOUT = 3 * TTL
 
 
 def _new_cluster() -> Cluster:
-    return Cluster(load_config(image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=TTL))
+    # Legacy default-namespace RBAC (dev-setup.md); pinned so we don't follow the "sk8s" default.
+    return Cluster(
+        load_config(namespace="default", image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=TTL)
+    )
 
 
 @pytest.fixture
