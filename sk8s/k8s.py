@@ -1,4 +1,4 @@
-"""Kubernetes client bootstrap: in-pod detection and lazy, cached API clients."""
+"""Kubernetes client bootstrap: in-pod detection, a cached config load, and per-call API clients."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -38,6 +38,6 @@ def current_namespace() -> str:
     if in_pod():
         return (_SA_DIR / "namespace").read_text().strip()
     load()
-    contexts, active = config.list_kube_config_contexts()  # type: ignore[no-untyped-call]
+    _, active = config.list_kube_config_contexts()  # type: ignore[no-untyped-call]
     ns = (active.get("context") or {}).get("namespace")
     return ns or "default"
