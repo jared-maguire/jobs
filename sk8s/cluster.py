@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import concurrent.futures
 import dataclasses
+import datetime
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ from sk8s import anchors, clones, serialize, spec, volumes
 from sk8s.config import Config, load_config
 from sk8s.errors import (
     BlobNotFound, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
-    VolumeAttachBlocked, VolumeProvisioningFailed,
+    VolumeAttachBlocked, VolumeError, VolumeProvisioningFailed,
 )
 from sk8s.future import JobFuture
 from sk8s.store import get_store
@@ -41,9 +42,13 @@ _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName",
 # ... backoff condition") shares the FailedAttachVolume reason and must never be fatal.
 _ATTACH_BLOCKED = re.compile(r"Volume is already used by pod\(s\) (?P<pods>.+?)\s*$")
 _NO_CONTENT_SOURCE = "VolumeContentSource must be provided"
-# A real detach takes ~8-15s after the holder finishes (spike section 7); a holder that is
-# still alive a minute after we first saw the block is a wedge, not a hand-over.
-_VOLUME_WEDGE_GRACE = 60.0
+_PV_IN_EVENT = re.compile(r'volume "(?P<pv>[^"]+)"')
+
+
+def match_pv(message: str) -> str | None:
+    m = _PV_IN_EVENT.search(message or "")
+    return m.group("pv") if m else None
+
 _STUCK_PHASES = ("imagepull", "volume-stuck")
 _SELECTOR = "app.kubernetes.io/managed-by=sk8s"
 # Workflow ids that collide with non-workflow key prefixes in the store.
@@ -184,6 +189,10 @@ class Cluster:
         self._mount_plans: dict[str, _MountPlan] = {}  # job name -> clone-backed volume bookkeeping
         self._diagnoses: dict[str, PodFailed] = {}  # job name -> the typed error for a "volume-stuck" job
         self._attach_blocked_since: dict[str, float] = {}  # pod name -> when its attach block was first seen
+        self._provision_failing_since: dict[str, float] = {}  # clone claim -> first ProvisioningFailed sighting
+        self._wall_clock: Callable[[], datetime.datetime] = (
+            lambda: datetime.datetime.now(datetime.timezone.utc)
+        )
         self._events_forbidden = False
         self._sleep: Callable[[float], None] = time.sleep
         self._watcher = JobWatcher(
@@ -431,6 +440,13 @@ class Cluster:
                     waiting.append((job, pod))
             for gone in set(self._attach_blocked_since) - live_pods:
                 del self._attach_blocked_since[gone]
+            claims = {
+                v.persistent_volume_claim.claim_name
+                for _, pod in waiting for v in pod.spec.volumes or []
+                if v.persistent_volume_claim is not None
+            }
+            for gone in set(self._provision_failing_since) - claims:
+                del self._provision_failing_since[gone]
             if not waiting or self._events_forbidden:
                 return
             attach = self._events("reason=FailedAttachVolume")
@@ -472,12 +488,17 @@ class Cluster:
             for v in pod.spec.volumes or []
             if v.persistent_volume_claim is not None
         }
-        for ev in provisioning:  # infeasible: no grace period
+        for ev in provisioning:
             involved = ev.involved_object
-            if involved.name in mounts and _NO_CONTENT_SOURCE in (ev.message or ""):
+            if involved.name not in mounts:
+                continue
+            if _NO_CONTENT_SOURCE in (ev.message or ""):  # infeasible: no grace period
                 return VolumeProvisioningFailed(
                     job, mounts[involved.name], involved.name, ev.message
                 )
+            diagnosis = self._diagnose_clone(job, mounts[involved.name], involved.name, ev.message)
+            if diagnosis is not None:
+                return diagnosis
         for ev in attach:
             if ev.involved_object.name != pod.metadata.name:
                 continue
@@ -490,11 +511,44 @@ class Cluster:
                 self._attach_blocked_since.pop(pod.metadata.name, None)  # a detach in flight
                 return None
             since = self._attach_blocked_since.setdefault(pod.metadata.name, self._clock())
-            if self._clock() - since < _VOLUME_WEDGE_GRACE:
+            if self._clock() - since < self.config.volume_attach_grace_seconds:
                 return None
-            claim, volume = next(iter(mounts.items()))
+            claim, volume = self._blocked_mount(mounts, match_pv(ev.message))
             return VolumeAttachBlocked(job, volume, claim, live, ev.message)
         return None
+
+    def _diagnose_clone(self, job: str, volume: str, claim: str, message: str) -> PodFailed | None:
+        """A ProvisioningFailed event on a clone sk8s created: fatal once it has stayed Pending
+        for the grace period (the provisioner retries transient causes by itself)."""
+        try:
+            pvc = self.core.read_namespaced_persistent_volume_claim(
+                name=claim, namespace=self.config.namespace
+            )
+        except ApiException:
+            return None
+        is_clone = (pvc.metadata.labels or {}).get(clones.KIND_LABEL) == clones.KIND_CLONE
+        if not is_clone or pvc.status is None or pvc.status.phase != "Pending":
+            self._provision_failing_since.pop(claim, None)  # provisioned since: the event is history
+            return None
+        since = self._provision_failing_since.setdefault(claim, self._clock())
+        grace = self.config.volume_provision_grace_seconds
+        if self._clock() - since < grace:
+            return None
+        return VolumeProvisioningFailed(job, volume, claim, message, clone_grace=grace)
+
+    def _blocked_mount(self, mounts: dict[str, str], pv: str | None) -> tuple[str, str]:
+        """(claim, volume) of the mount the attach event is about: the claim bound to PV ``pv``."""
+        if pv is not None and len(mounts) > 1:
+            for claim, volume in mounts.items():
+                try:
+                    bound = self.core.read_namespaced_persistent_volume_claim(
+                        name=claim, namespace=self.config.namespace
+                    ).spec.volume_name
+                except ApiException:
+                    continue
+                if bound == pv:
+                    return claim, volume
+        return next(iter(mounts.items()))
 
     def _pod_holds_volumes(self, name: str) -> bool:
         """True unless the pod is over or gone (a finished pod releases its disk, spike section 7)."""
@@ -519,50 +573,60 @@ class Cluster:
             )
         image = opts.get("image") or default_image(self.config)
         mounts = volumes.parse_mounts(opts.get("volumes"))  # ValueError before any side effect
-        # Resolves read-only mounts of clone-backed volumes (may wait for a running writer),
-        # so it runs before the payload is stored: a failure here leaks nothing.
-        pod_mounts, plan = self._resolve_mounts(mounts)
+        # Order matters (see sk8s.clones, "Races"): writers are held back and MARKED first, before
+        # anything slow; read-only mounts are resolved to a clone as LATE as possible, right before
+        # the Job that references it. Everything after the markers cleans them up on failure.
+        pvcs, plan = self._prepare_mounts(mounts, name)
         payload_key = f"{self.workflow_id}/{name}/payload"
         result_key = f"{self.workflow_id}/{name}/result"
-        anchor = self._ensure_anchor()
-        owner = anchors.owner_ref(anchor)
-        payload_uri = self.store.put(
-            payload_key, serialize.encode_payload(func, args, kwargs), owner=owner
-        )
-        job = spec.build_job(
-            name,
-            image=image,
-            namespace=namespace,
-            workflow_id=self.workflow_id,
-            payload_uri=payload_uri,
-            result_key=result_key,
-            store=self.config.store,
-            store_endpoint=self.config.store_endpoint,
-            store_env=self.config.store_env,
-            service_account=opts.get("service_account", self.config.service_account),
-            pull_policy=opts.get("pull_policy", self.config.pull_policy),
-            requests=opts.get("requests", {}),
-            limits=opts.get("limits", {}),
-            volumes=pod_mounts,
-            backoff_limit=opts.get("backoff_limit", 0),
-            ttl=self.config.ttl_seconds_after_finished,
-            privileged=opts.get("privileged", False),
-            owner=owner,
-            anchor_name=anchor.metadata.name,
-            anchor_uid=anchor.metadata.uid,
-        )
+        payload_uri: str | None = None
+        job_created = False
         try:
-            self._mark_writers(plan, name)
-            self.batch.create_namespaced_job(namespace=namespace, body=job)
-        except BaseException as exc:
-            self._settle_writers(plan, name, wrote=False)  # the job never existed: nothing written
-            # No job will ever consume (or clean up) the payload: don't leak it.
+            anchor = self._ensure_anchor()
+            owner = anchors.owner_ref(anchor)
+            payload_uri = self.store.put(
+                payload_key, serialize.encode_payload(func, args, kwargs), owner=owner
+            )
+            pod_mounts = self._resolve_pod_mounts(mounts, pvcs, plan)
+            job = spec.build_job(
+                name,
+                image=image,
+                namespace=namespace,
+                workflow_id=self.workflow_id,
+                payload_uri=payload_uri,
+                result_key=result_key,
+                store=self.config.store,
+                store_endpoint=self.config.store_endpoint,
+                store_env=self.config.store_env,
+                service_account=opts.get("service_account", self.config.service_account),
+                pull_policy=opts.get("pull_policy", self.config.pull_policy),
+                requests=opts.get("requests", {}),
+                limits=opts.get("limits", {}),
+                volumes=pod_mounts,
+                backoff_limit=opts.get("backoff_limit", 0),
+                ttl=self.config.ttl_seconds_after_finished,
+                privileged=opts.get("privileged", False),
+                owner=owner,
+                anchor_name=anchor.metadata.name,
+                anchor_uid=anchor.metadata.uid,
+            )
             try:
-                self.store.delete(payload_uri)
-            except Exception:  # noqa: BLE001 — best-effort; the create error is what matters
-                log.exception("could not delete payload blob %s after failed create", payload_key)
-            if isinstance(exc, ApiException) and exc.status in _REJECTION_STATUSES:
-                raise _job_rejected(name, exc, privileged=bool(opts.get("privileged"))) from exc
+                self.batch.create_namespaced_job(namespace=namespace, body=job)
+            except ApiException as exc:
+                if exc.status in _REJECTION_STATUSES:
+                    raise _job_rejected(name, exc, privileged=bool(opts.get("privileged"))) from exc
+                raise
+            job_created = True
+            self._verify_clones(pod_mounts)
+        except BaseException:
+            if job_created:  # a Job whose clone vanished would hang Pending forever
+                self._delete_stuck_job(name)
+            self._settle_writers(plan, name, wrote=False)  # the job never ran: nothing written
+            if payload_uri is not None:  # no job will ever consume (or clean up) the payload
+                try:
+                    self.store.delete(payload_uri)
+                except Exception:  # noqa: BLE001 — best-effort; the original error is what matters
+                    log.exception("could not delete payload blob %s after failed submit", payload_key)
             raise
         fut = JobFuture(name, self.workflow_id, backend=self)
         keep = opts.get("keep_results", self.config.keep_results)
@@ -610,7 +674,16 @@ class Cluster:
             job_active=lambda job: job_phase(job) == "active",
             wait_seconds=self.config.volume_wait_seconds,
             clock=self._clock, sleep=self._sleep,
+            completed_at=self._completed_at, wall_clock=self._wall_clock,
         )
+
+    def _completed_at(self, job_name: str) -> datetime.datetime | None:
+        try:
+            job = self.batch.read_namespaced_job(name=job_name, namespace=self.config.namespace)
+            stamp = job.status.completion_time if job.status is not None else None
+        except Exception:  # noqa: BLE001 — unknown ordering is handled conservatively
+            return None
+        return stamp if isinstance(stamp, datetime.datetime) else None
 
     def _writer_state(self, job_name: str) -> str:
         """running | succeeded | failed | gone, for an rw job named in a volume's writer marker."""
@@ -635,33 +708,63 @@ class Cluster:
             return clones.RUNNING
         return {"succeeded": clones.SUCCEEDED, "failed": clones.FAILED}.get(phase or "", clones.GONE)
 
-    def _resolve_mounts(
-        self, mounts: list[volumes.Mount]
-    ) -> tuple[list[spec.PodMount], _MountPlan]:
-        """Pick the claim for each mount: the volume itself, or, for a read-only mount of a
-        clone-backed volume, its current clone."""
+    def _prepare_mounts(
+        self, mounts: list[volumes.Mount], job_name: str
+    ) -> tuple[dict[str, Any], _MountPlan]:
+        """Read every volume; hold back and mark this job as a writer of each clone-backed
+        volume it mounts read-write. A read error is fatal: an rw job must never run unmarked."""
         plan = _MountPlan()
-        pod_mounts: list[spec.PodMount] = []
+        pvcs: dict[str, Any] = {}
         if not mounts:
-            return pod_mounts, plan
+            return pvcs, plan
         mgr = self._clone_manager()
+        try:
+            for m in mounts:
+                pvc = mgr.read_volume(m.name)  # VolumeNotFound: fail now, not as a Pending pod
+                pvcs[m.name] = pvc
+                if not m.read_only and clones.is_clone_backed(pvc):
+                    mgr.guard_writer_start(m.name, pvc)
+                    mgr.mark_writer(m.name, job_name)
+                    plan.writers.append(m.name)
+        except BaseException:
+            self._settle_writers(plan, job_name, wrote=False)
+            raise
+        return pvcs, plan
+
+    def _resolve_pod_mounts(
+        self, mounts: list[volumes.Mount], pvcs: dict[str, Any], plan: _MountPlan
+    ) -> list[spec.PodMount]:
+        """Pick the claim for each mount: the volume itself or, for a read-only mount of a
+        clone-backed volume, its current clone (waits for a running writer, bounded)."""
+        pod_mounts: list[spec.PodMount] = []
+        mgr = self._clone_manager() if mounts else None
         for m in mounts:
             claim = m.name
-            try:
-                pvc = mgr.read_volume(m.name)  # VolumeNotFound: fail now, not as a Pending pod
-            except ApiException as exc:
-                # Cannot tell (no PVC read permission?): behave as before, mount the volume.
-                log.warning("cannot read volume %s (%s); mounting it as is", m.name, exc)
-                pvc = None
-            if pvc is not None and clones.is_clone_backed(pvc):
-                if m.read_only:
-                    claim = mgr.resolve_read_only(m.name, pvc)
-                    plan.readers.append(m.name)
-                else:
-                    mgr.guard_writer_start(m.name, pvc)
-                    plan.writers.append(m.name)
+            if m.read_only and clones.is_clone_backed(pvcs[m.name]):
+                assert mgr is not None
+                claim = mgr.resolve_read_only(m.name, pvcs[m.name])
+                plan.readers.append(m.name)
             pod_mounts.append(spec.PodMount(m.name, claim, m.mountpoint, m.read_only))
-        return pod_mounts, plan
+        return pod_mounts
+
+    def _verify_clones(self, pod_mounts: list[spec.PodMount]) -> None:
+        """The Job exists: make sure the clone it claims was not swept in the meantime."""
+        for m in pod_mounts:
+            if m.claim == m.name:
+                continue
+            try:
+                self.core.read_namespaced_persistent_volume_claim(
+                    name=m.claim, namespace=self.config.namespace
+                )
+            except ApiException as exc:
+                if exc.status != 404:
+                    log.warning("cannot re-check clone %s: %s", m.claim, exc)
+                    continue
+                raise VolumeError(
+                    f"the read-only clone {m.claim!r} of volume {m.name!r} was deleted while "
+                    f"this job was being submitted (another client superseded it); nothing was "
+                    f"started. Submit the job again."
+                ) from exc
 
     def _mark_writers(self, plan: _MountPlan, job_name: str) -> None:
         if plan.writers:

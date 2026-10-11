@@ -1,6 +1,7 @@
 """In-memory fakes for the kubernetes client surface sk8s uses."""
 from __future__ import annotations
 
+import datetime
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -135,6 +136,8 @@ class FakeCoreV1:
             raise ApiException(status=409, reason="Conflict")
         if not body.metadata.uid:
             body.metadata.uid = uuid.uuid4().hex
+        if body.metadata.creation_timestamp is None:
+            body.metadata.creation_timestamp = datetime.datetime.now(datetime.timezone.utc)
         self.pvcs[(namespace, body.metadata.name)] = body
         return body
 

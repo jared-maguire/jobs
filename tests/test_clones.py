@@ -45,6 +45,13 @@ class H:
         )
         self.cluster._clock = lambda: self.now
         self.cluster._sleep = self._sleep
+        self.wall_offset = 0.0  # advanced by age(): the wall clock clones and markers are aged by
+        self.cluster._wall_clock = lambda: (
+            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=self.wall_offset)
+        )
+
+    def age(self, seconds: float) -> None:
+        self.wall_offset += seconds
 
     def _sleep(self, seconds: float) -> None:
         self.now += seconds
@@ -152,15 +159,18 @@ def test_missing_volume_is_a_typed_error_in_both_modes_and_creates_nothing(h: H)
     assert not h.batch.jobs
 
 
-def test_unreadable_volume_degrades_to_mounting_it_as_is(h: H) -> None:
+@pytest.mark.parametrize("volumes", ["plain", {"plain": RW}])
+def test_unreadable_volume_fails_the_submit_in_both_modes(h: H, volumes: Any) -> None:
+    """An rw job must never run unmarked because a read blipped; nothing is created."""
     h.volume("plain", modes=["ReadWriteOnce"])
 
     def boom(name: str, namespace: str) -> Any:
-        raise ApiException(status=403, reason="Forbidden")
+        raise ApiException(status=500, reason="Internal Server Error")
 
     h.core.read_namespaced_persistent_volume_claim = boom  # type: ignore[method-assign]
-    pod = h.pod(h.cluster.submit(lambda: 1, volumes="plain"))
-    assert pod.volumes[0].persistent_volume_claim.claim_name == "plain"
+    with pytest.raises(VolumeError, match="cannot read volume 'plain'"):
+        h.cluster.submit(lambda: 1, volumes=volumes)
+    assert not h.batch.jobs and not h.core.pvc_patches
 
 
 # --- writers: markers and the generation ----------------------------------------------------------------
@@ -405,6 +415,7 @@ def test_dead_clients_vanished_job_counts_as_completed(h: H) -> None:
     ghost = h.cluster.submit(lambda: 1, volumes={"idx": RW})
     h.cluster._mount_plans.pop(ghost.job_name)
     del h.batch.jobs[(NS, ghost.job_name)]
+    h.age(clones.MARKER_MIN_AGE + 1)  # a young marker could still be a Job about to be created
     h.reader()
     assert h.ann("idx")[clones.WRITER_GENERATION_ANNOTATION] == ghost.job_name
 
@@ -418,6 +429,7 @@ def test_a_completed_writer_triggers_a_new_clone_and_the_old_one_is_deleted(h: H
     first = h.reader()
     (old,) = h.clone_names()
     h.end(first)  # the old clone has no active user left
+    h.age(clones.CLONE_MIN_AGE + 1)  # ...and is old enough to be swept
     w2 = h.populate()
     fut = h.reader()
     (new,) = h.clone_names()
@@ -451,6 +463,7 @@ def test_superseded_clone_still_used_by_an_active_job_is_kept_until_that_job_end
     h.populate()
     early = h.reader()  # holds the old clone (job active)
     (old,) = h.clone_names()
+    h.age(clones.CLONE_MIN_AGE + 1)
     h.populate()
     h.reader()  # supersedes; must not strand `early`'s pod on a vanished claim
     assert (NS, old) in h.core.pvcs and old not in h.core.pvc_deleted
@@ -504,6 +517,7 @@ def test_writer_is_not_held_by_an_unbound_clone_nobody_is_waiting_on(h: H) -> No
     for (ns, jname), job in list(h.batch.jobs.items()):
         if any(v.persistent_volume_claim.claim_name == name for v in job.spec.template.spec.volumes or []):
             h.set_status(jname, succeeded=1)
+    h.age(clones.CLONE_MIN_AGE + 1)  # and no reader has touched it for a while
     h.cluster.submit(lambda: 1, volumes={"idx": RW})  # no raise, no wait
     assert h.now == 0.0
 

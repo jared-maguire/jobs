@@ -44,7 +44,7 @@ NOISE = [
     'ControllerPublish not permitted on node "projects/p/zones/z/instances/gk3-x" due to '
     "backoff condition",
 ]
-GRACE = 60.0
+GRACE = 300.0  # Config.volume_attach_grace_seconds default
 
 
 def event(reason: str, message: str, kind: str, name: str) -> Any:
@@ -141,7 +141,7 @@ def test_attach_block_surfaces_as_a_typed_error_after_the_grace_period(h: H) -> 
     assert "Waiting for detach" in text and "already used by pod(s) sk8s-rox-r1-ro1" in text  # verbatim
     assert "sk8s-rox-r1-ro1" in text and "'idx'" in text
     assert 'access_modes=["ReadWriteOnce", "ReadOnlyMany"]' in text  # the fix for a reader fleet
-    assert "one node" in text
+    assert "one node" in text and "no timeout of its own" in text
     assert fut.job_name in h.batch.deleted  # the wedged Job is removed: it must not run later
 
 

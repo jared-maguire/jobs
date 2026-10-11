@@ -114,6 +114,7 @@ def test_plain_rwo_volume_is_byte_identical_to_before_class_resolution(
         name = sk8s.create_volume("5Gi", name="data", keep=True, cluster=harness.cluster)
         body = client.ApiClient().sanitize_for_serialization(harness.pvc(name))
         body["metadata"].pop("uid", None)  # assigned by the fake API server, not by sk8s
+        body["metadata"].pop("creationTimestamp", None)  # ditto
         assert body == {
             "metadata": {
                 "name": "data",

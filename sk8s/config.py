@@ -40,6 +40,16 @@ class Config:
     # How long a read-only mount waits for a running rw job to finish before it can be served
     # (a clone must never be taken under a live writer); VolumeWaitTimeout when it runs out.
     volume_wait_seconds: float = 300.0
+    # How long a pod may sit Pending behind a LIVE holder of its ReadWriteOnce volume before the
+    # job fails with VolumeAttachBlocked (and is deleted). The trade-off: a second rw job queued
+    # behind a long writer legitimately waits for it (hand-over takes ~15s after the holder ends),
+    # so this must exceed the queueing you want to allow; but the wait has no timeout of its own in
+    # Kubernetes, so it must be finite (a forgotten fan-out would hang forever). 0 fails at once.
+    volume_attach_grace_seconds: float = 300.0
+    # How long sk8s's own read-only clone may stay Pending with ProvisioningFailed events before the
+    # job fails with VolumeProvisioningFailed. The provisioner retries on its own (quota freed, a
+    # rate-limited source disk); this is how long that is given.
+    volume_provision_grace_seconds: float = 300.0
     retention_days: int = 7
     keep_results: bool = False
     # Extra env vars exported to worker pods (e.g. AWS_* creds for an S3-compatible store).
@@ -53,7 +63,7 @@ _FIELDS = {f.name: f.type for f in dataclasses.fields(Config)}
 def _coerce(name: str, raw: str) -> Any:
     if name in ("ttl_seconds_after_finished", "retention_days"):
         return int(raw)
-    if name == "volume_wait_seconds":
+    if name in ("volume_wait_seconds", "volume_attach_grace_seconds", "volume_provision_grace_seconds"):
         return float(raw)
     if name == "keep_results":
         return raw.strip().lower() in ("1", "true", "yes")

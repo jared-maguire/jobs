@@ -158,10 +158,26 @@ class VolumeProvisioningFailed(PodFailed):
     created without a content source, which GKE's PD CSI driver rejects.
     """
 
-    def __init__(self, job_name: str, volume: str, claim: str, message: str) -> None:
+    def __init__(
+        self, job_name: str, volume: str, claim: str, message: str, *, clone_grace: float = 0.0
+    ) -> None:
         self.volume = volume
         self.claim = claim
         self.message = message
+        if clone_grace:
+            super().__init__(
+                job_name,
+                reason=(
+                    f"the read-only clone {claim!r} of its volume {volume!r} was still not "
+                    f"provisioned after {clone_grace:g}s. Kubernetes reports ProvisioningFailed: "
+                    f"{message}\n"
+                    f"The provisioner keeps retrying, so this was not a transient hiccup. Typical "
+                    f"causes are storage quota or the cloud rate-limiting clones of one source "
+                    f"disk: free quota or resubmit later (raise "
+                    f"Config.volume_provision_grace_seconds to wait longer)."
+                ),
+            )
+            return
         super().__init__(
             job_name,
             reason=(

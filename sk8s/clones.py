@@ -39,11 +39,36 @@ labeled ``sk8s/kind: volume-clone`` and ``sk8s/clone-of: <primary>``, owned by t
 anchor (and carry its workflow label) when the primary is workflow-owned, and ownerless when
 the primary is ``keep=True`` (``delete_volume`` removes them with their primary).
 
-Known residual hazard: with a ``WaitForFirstConsumer`` class the clone's disk is cut when its
-first reader pod is *scheduled*, not when the PVC is created. A writer started in that window
-is held back (:meth:`CloneManager.guard_writer_start`) as long as a reader Job references the
-Pending clone, but a writer started by another client in the few milliseconds between a
-reader's clone creation and its Job creation is not.
+Races and how they are closed (Plan 10 fix round 1):
+
+- ``submit`` order is: read volumes, hold back writers (:meth:`CloneManager.guard_writer_start`)
+  and **mark them at once**, then store the payload, and only then resolve read-only mounts, so a
+  clone is created immediately before its Job. Nothing slow (the payload upload, which can take
+  seconds) sits between a clone's creation and the Job that references it, nor between a
+  writer's guard and its marker.
+- :meth:`CloneManager.sweep_stale` never deletes a clone created or *used* (adopted by a new
+  read-only mount) within ``CLONE_MIN_AGE`` seconds, which is far above the reader's remaining
+  gap (a handful of API calls) even on a slow API server. Adoption stamps ``sk8s/clone-last-used``.
+- The writer-side guard also holds a writer back while the current clone is Pending and was
+  used within that window, even if its reader's Job does not exist yet.
+- After creating a Job that claims a clone, the Cluster re-checks that the clone still exists and
+  fails loudly (and removes the Job) if another client's sweep got there first.
+- A marker whose Job does not exist yet is not settled until it is ``MARKER_MIN_AGE`` old.
+- The generation never moves backward: a late settle of an older writer is compared by Job
+  completion time and skipped if a newer writer is already the generation.
+
+What is still true (by design, not bugs):
+
+- A clone is cut from the *live primary*. If a writer failed, or was cancelled, before the
+  next reader, whatever it had already written to the primary is captured by that reader's clone
+  even though that writer never became the generation.
+- A marker whose Job is gone is treated as a *completed* writer (the conservative direction: it
+  may re-clone needlessly; the alternative is stale reads).
+- With a ``WaitForFirstConsumer`` class the clone's disk is cut when its first reader pod is
+  scheduled, not when the PVC is created; the writer-side guard above covers that window as long
+  as the reader's Job (or the recent-use stamp) exists.
+- A cross-client writer that starts in the (now API-calls-wide) gap between a reader's
+  clone creation and its Job creation, and whose marker-check lost the race, is not prevented.
 """
 from __future__ import annotations
 
@@ -70,6 +95,7 @@ MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 ACCESS_MODES_ANNOTATION = "sk8s/access-modes"
 WRITER_GENERATION_ANNOTATION = "sk8s/writer-generation"
 CLONE_GENERATION_ANNOTATION = "sk8s/clone-generation"
+CLONE_LAST_USED_ANNOTATION = "sk8s/clone-last-used"
 WRITER_MARKER_PREFIX = "writers.sk8s/"  # a valid annotation prefix; the job name is the key's name
 
 READ_ONLY_MANY = "ReadOnlyMany"
@@ -82,7 +108,17 @@ SUCCEEDED = "succeeded"
 FAILED = "failed"
 GONE = "gone"  # the Job no longer exists and none of its pods are still running
 
+# Seconds. A clone younger (or used more recently) than this is never swept; it must dwarf the
+# reader's gap between resolving a clone and its Job existing (a few API calls), whatever the
+# API server latency, yet stay short enough that an abandoned clone is cleaned up promptly.
+CLONE_MIN_AGE = 120.0
+# Seconds before a writer marker whose Job does not exist yet may be settled as "gone". The
+# marker is set before the payload upload, so this bounds how long that upload may take.
+MARKER_MIN_AGE = 120.0
+
 WriterState = Callable[[str], str]
+CompletedAt = Callable[[str], "datetime.datetime | None"]
+WallClock = Callable[[], datetime.datetime]
 JobActive = Callable[[Any], bool]
 
 
@@ -143,6 +179,8 @@ class CloneManager:
         poll_seconds: float = 2.0,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        completed_at: CompletedAt = lambda job: None,
+        wall_clock: WallClock = lambda: datetime.datetime.now(datetime.timezone.utc),
     ) -> None:
         self.core = core
         self.batch = batch
@@ -153,6 +191,8 @@ class CloneManager:
         self.poll_seconds = poll_seconds
         self.clock = clock
         self.sleep = sleep
+        self.completed_at = completed_at
+        self.wall_clock = wall_clock
 
     # --- reading -----------------------------------------------------------------------------
 
@@ -165,25 +205,60 @@ class CloneManager:
         except ApiException as e:
             if _is_404(e):
                 raise VolumeNotFound(name, self.namespace) from e
-            raise
+            raise VolumeError(
+                f"cannot read volume {name!r} in namespace {self.namespace!r} "
+                f"(HTTP {e.status}: {e.reason}); not submitting a job that could mount it unchecked"
+            ) from e
+
+    def _age(self, stamp: str | datetime.datetime | None) -> float | None:
+        """Seconds since ``stamp`` (an ISO string or datetime), or None if unknown."""
+        if stamp is None or stamp == "":
+            return None
+        try:
+            when = (
+                stamp if isinstance(stamp, datetime.datetime)
+                else datetime.datetime.fromisoformat(stamp)
+            )
+        except ValueError:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        return (self.wall_clock() - when).total_seconds()
 
     # --- writer markers ------------------------------------------------------------------------
 
     def mark_writer(self, volume: str, job: str) -> None:
         """Record that ``job`` is about to mount ``volume`` read-write (before the Job exists)."""
-        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        stamp = self.wall_clock().isoformat()
         self._patch_annotations(volume, {WRITER_MARKER_PREFIX + job: stamp})
 
     def settle_writer(self, volume: str, job: str, *, wrote: bool) -> None:
         """``job`` is over: drop its marker and, if it completed, make it the new generation."""
         patch: dict[str, str | None] = {WRITER_MARKER_PREFIX + job: None}
-        if wrote:
+        if wrote and self._newest_generation(volume, job):
             patch[WRITER_GENERATION_ANNOTATION] = job
         try:
             self._patch_annotations(volume, patch)
         except ApiException as e:
             if not _is_404(e):  # a deleted volume has nothing left to settle
                 raise
+
+    def _newest_generation(self, volume: str, job: str) -> bool:
+        """False if the volume's generation is already a writer that completed *after* ``job``.
+
+        Settles can arrive out of order (a slow client settling an old writer after a reader
+        already settled a newer one); the generation must never move backward, or readers would
+        be served an older clone's data as current. Compared by Job completion time; if either
+        time is unknown the settle goes ahead (the conservative direction: a re-clone).
+        """
+        try:
+            current = generation(self.read_volume(volume))
+        except VolumeError:
+            return True
+        if not current or current == job:
+            return True
+        mine, theirs = self.completed_at(job), self.completed_at(current)
+        return not (mine is not None and theirs is not None and mine < theirs)
 
     def _patch_annotations(self, volume: str, annotations: dict[str, str | None]) -> None:
         self.core.patch_namespaced_persistent_volume_claim(
@@ -196,6 +271,12 @@ class CloneManager:
         settled = False
         for job in active_writers(pvc):
             state = self.writer_state(job)
+            if state == GONE:
+                # The marker precedes the Job (and the payload upload before it): a Job that does
+                # not exist yet is a writer about to start, not one that is over.
+                age = self._age((pvc.metadata.annotations or {}).get(WRITER_MARKER_PREFIX + job))
+                if age is not None and age < MARKER_MIN_AGE:
+                    state = RUNNING
             if state == RUNNING:
                 running.append(job)
                 continue
@@ -274,9 +355,10 @@ class CloneManager:
             )
         except ApiException as e:
             if not _is_404(e):
-                raise
+                raise self._clone_error(name, volume, "read", e) from e
         else:
             self._check_clone(existing, volume)
+            self._touch(existing)
             return name
         try:
             self.core.create_namespaced_persistent_volume_claim(
@@ -284,15 +366,54 @@ class CloneManager:
             )
         except ApiException as e:
             if e.status != 409:
-                raise
+                raise self._clone_error(name, volume, "create", e) from e
             # Another client created it between our read and our create: adopt theirs.
-            self._check_clone(
-                self.core.read_namespaced_persistent_volume_claim(
-                    name=name, namespace=self.namespace
-                ),
-                volume,
+            adopted = self.core.read_namespaced_persistent_volume_claim(
+                name=name, namespace=self.namespace
             )
+            self._check_clone(adopted, volume)
+            self._touch(adopted)
         return name
+
+    @staticmethod
+    def _clone_error(name: str, volume: str, verb: str, exc: ApiException) -> VolumeError:
+        return VolumeError(
+            f"could not {verb} the read-only clone {name!r} of volume {volume!r} "
+            f"(HTTP {exc.status}: {exc.reason}); read-only mounts of this volume cannot start"
+        )
+
+    def _touch(self, clone: Any) -> None:
+        """Stamp an adopted clone as in use, so a concurrent sweep leaves it alone.
+
+        Throttled to once per half ``CLONE_MIN_AGE`` so a fan-out does not patch per job.
+        """
+        annotations = clone.metadata.annotations or {}
+        fresh = self._age(annotations.get(CLONE_LAST_USED_ANNOTATION))
+        if fresh is not None and fresh < CLONE_MIN_AGE / 2:
+            return
+        if (age := self._age(clone.metadata.creation_timestamp)) is not None and age < CLONE_MIN_AGE / 2:
+            return  # brand new: creation already protects it
+        try:
+            self.core.patch_namespaced_persistent_volume_claim(
+                name=clone.metadata.name, namespace=self.namespace,
+                body={"metadata": {"annotations": {
+                    CLONE_LAST_USED_ANNOTATION: self.wall_clock().isoformat()
+                }}},
+            )
+        except ApiException as e:
+            if not _is_404(e):
+                raise
+
+    def recently_used(self, clone: Any) -> bool:
+        """True if the clone was created, or adopted by a read-only mount, within CLONE_MIN_AGE."""
+        for stamp in (
+            clone.metadata.creation_timestamp,
+            (clone.metadata.annotations or {}).get(CLONE_LAST_USED_ANNOTATION),
+        ):
+            age = self._age(stamp)
+            if age is not None and age < CLONE_MIN_AGE:
+                return True
+        return False
 
     @staticmethod
     def _check_clone(existing: Any, volume: str) -> None:
@@ -340,7 +461,9 @@ class CloneManager:
                     return
                 raise
             phase = getattr(getattr(clone, "status", None), "phase", None)
-            if phase != "Pending" or not self.active_jobs_using(name):
+            # A Pending clone is about to be cut by a reader: one whose Job exists, or one a
+            # reader resolved moments ago and is still about to create the Job for.
+            if phase != "Pending" or not (self.recently_used(clone) or self.active_jobs_using(name)):
                 return
             if self.clock() >= deadline:
                 raise VolumeWaitTimeout(
@@ -398,6 +521,8 @@ class CloneManager:
         for clone in self.clones_of(volume):
             name = clone.metadata.name
             if name == current or clone.metadata.deletion_timestamp is not None:
+                continue
+            if self.recently_used(clone):  # a reader may be between resolving it and its Job
                 continue
             if self.active_jobs_using(name):
                 continue
