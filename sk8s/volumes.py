@@ -50,6 +50,11 @@ volume with a plain ReadWriteOnce PVC and serves read-only mounts from a hidden 
   ``sk8s/kind: volume-clone`` and owned like the volume (same anchor; none for ``keep=True``,
   where ``delete_volume`` removes them with the volume).
 
+Read-only mounts need a storage class whose provisioner implements PVC cloning (GKE's PD CSI
+driver does). A provisioner that ignores ``dataSource`` (minikube's default
+``k8s.io/minikube-hostpath``) hands out an EMPTY clone without any error, so do not use
+``ReadOnlyMany`` volumes there except to exercise the wiring.
+
 A volume without ``ReadOnlyMany`` in its modes has no clone: a ``ro`` mount mounts the volume
 itself read-only, with ReadWriteOnce's one-node-at-a-time limit (a second node's pod waits
 for the first; sk8s reports that as ``VolumeAttachBlocked`` instead of hanging).

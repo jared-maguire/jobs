@@ -140,3 +140,9 @@ def test_explicit_path_beats_sk8s_config(tmp_path: Path) -> None:
     a.write_text('namespace = "a"\n')
     b.write_text('namespace = "b"\n')
     assert load_config(path=a, env={"SK8S_CONFIG": str(b)}).namespace == "a"
+
+
+def test_volume_wait_seconds_default_and_env_override() -> None:
+    assert load_config(path=Path("/nonexistent"), env={}).volume_wait_seconds == 300.0
+    cfg = load_config(path=Path("/nonexistent"), env={"SK8S_VOLUME_WAIT_SECONDS": "12.5"})
+    assert cfg.volume_wait_seconds == 12.5
