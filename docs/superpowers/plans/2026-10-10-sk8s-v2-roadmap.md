@@ -21,13 +21,13 @@ independently mergeable software.
 | # | Plan | Branch | Depends on | Status |
 |---|------|--------|-----------|--------|
 | 1 | Foundation: data plane, worker, futures, core API | `feat/core` | — | **Merged** (PR #70) |
-| 2 | Workflows: anchors, detached submit/attach, retention GC | `feat/workflows` | 1 | **In progress** (`...plan-2-workflows.md`) |
-| 3 | Cloud stores: S3 + GCS backends, MinIO tests | `feat/stores-cloud` | 1 | **In progress** (`...plan-3-stores-cloud.md`) |
-| 4 | Volumes: PVCs, anchor ownership, scratch_volume | `feat/volumes` | 1 (+2 for anchor refs) | wave 2 |
-| 5 | Services: serve(), Service handle, get_service | `feat/services` | 1 | **In progress** (`...plan-5-services.md`) |
-| 6 | Images: published base images, builders, release CI | `feat/images` | 1 | **In progress** (`...plan-6-images.md`) |
-| 7 | Cluster config: ClusterProfile, `sk8s config`/`doctor`, CLI | `feat/cluster-config` | 1 (CLI workflow cmds need 2) | wave 2 |
-| 8 | CI & docs: minikube per-PR workflow, GKE/EKS nightly matrix, docs site, migration guide | `feat/ci-docs` | 3, 6, 7 | wave 3 |
+| 2 | Workflows: anchors, detached submit/attach, retention GC | `feat/workflows` | 1 | **Merged** (PR #74) |
+| 3 | Cloud stores: S3 + GCS backends, MinIO tests | `feat/stores-cloud` | 1 | **Merged** (PR #72) |
+| 4 | Volumes: PVCs, anchor ownership, scratch_volume | `feat/volumes` | 1, 2 | **In progress** (`...plan-4-volumes.md`) |
+| 5 | Services: serve(), Service handle, get_service | `feat/services` | 1 | **Merged** (PR #73) |
+| 6 | Images: published base images, builders, release CI | `feat/images` | 1 | **Merged** (PR #71) |
+| 7 | Cluster config: ClusterProfile, `sk8s config`/`doctor`, CLI (local/generic only) | `feat/cluster-config` | 1, 2 | **In progress** (`...plan-7-cluster-config.md`) |
+| 8 | CI & docs: minikube per-PR workflow, docs site, migration guide (GKE/EKS TABLED per Jared 2026-10-10) | `feat/ci-docs` | 3, 6, 7 | wave 3 |
 
 Execution notes (2026-10-10): Jared waived plan-review gates ("get it all done").
 Integration suites share one minikube → integration tasks run serially across
