@@ -489,3 +489,34 @@ def test_per_job_namespace_same_value_accepted(tmp_path) -> None:  # type: ignor
     h = Harness(tmp_path)
     fut = h.cluster.submit(lambda: 1, namespace="ns1")
     assert ("ns1", fut.job_name) in h.batch.jobs
+
+
+def test_store_endpoint_flows_to_job_env_and_store_factory(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    seen: dict = {}  # type: ignore[type-arg]
+
+    def fake_get_store(store, **kw):  # type: ignore[no-untyped-def]
+        seen.update(kw)
+        return LocalStore(tmp_path)
+
+    monkeypatch.setattr("sk8s.cluster.get_store", fake_get_store)
+    batch = FakeBatchV1()
+    cfg = Config(namespace="ns1", image="sk8s:dev", store="s3://b/p/", store_endpoint="http://minio:9000")
+    cluster = Cluster(cfg, batch_api=batch, core_api=FakeCoreV1(), watcher_events=lambda: iter(()))
+    _OPEN.append(cluster)
+    fut = cluster.submit(lambda: 1)
+    env = {e.name: e.value for e in batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].env}
+    assert env["SK8S_S3_ENDPOINT"] == "http://minio:9000"
+    assert seen["endpoint"] == "http://minio:9000"
+
+
+def test_store_env_flows_to_job_env(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    batch = FakeBatchV1()
+    cfg = Config(namespace="ns1", image="sk8s:dev", store_env={"AWS_ACCESS_KEY_ID": "k"})
+    cluster = Cluster(
+        cfg, batch_api=batch, core_api=FakeCoreV1(),
+        store=LocalStore(tmp_path), watcher_events=lambda: iter(()),
+    )
+    _OPEN.append(cluster)
+    fut = cluster.submit(lambda: 1)
+    env = {e.name: e.value for e in batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].env}
+    assert env["AWS_ACCESS_KEY_ID"] == "k"

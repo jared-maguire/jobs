@@ -24,3 +24,37 @@
    ```
    SK8S_INTEGRATION=1 pytest tests/integration -v
    ```
+
+## S3 store integration tests (MinIO)
+
+`tests/integration/test_store_s3_minio.py` runs the S3 store against a MinIO
+deployed in the cluster by `tests/integration/minio.py` (Deployment + Service
+`minio` in the current namespace, default `minioadmin` credentials; created on
+first use and reused afterwards, never torn down automatically). The client
+reaches it through a `kubectl port-forward svc/minio` that the fixture starts and
+stops; worker pods reach it via `minio.default.svc.cluster.local:9000` and get
+their credentials from `Config.store_env`. `store_env` values land in plaintext in the Job spec and the config file, so use it for dev/MinIO credentials only; production should use IRSA / Workload Identity or Secret-sourced env.
+
+Two endpoint variables control the S3 endpoint and are easy to confuse.
+`SK8S_STORE_ENDPOINT` is the config-layered setting (file < env < kwargs) that
+the client uses and that is forwarded to worker pods as `Config.store_endpoint`.
+`SK8S_S3_ENDPOINT` is the highest-precedence runtime override on both sides: it
+wins over `Config.store_endpoint` in the client, and it is also the variable
+workers receive in their Job env.
+
+1. Build a worker image that includes the `s3` extra (boto3). Use a feature
+   tag so you do not clobber `sk8s-dev:latest`:
+
+   ```
+   minikube image build -t sk8s-dev-stores:latest -f docker/Dockerfile.dev .
+   ```
+2. Run the tests (the image defaults to `sk8s-dev-stores:latest`; override with
+   `SK8S_TEST_IMAGE`):
+
+   ```
+   SK8S_INTEGRATION=1 pytest tests/integration/test_store_s3_minio.py -v
+   ```
+
+Notes: `minio/minio` is no longer published on Docker Hub or quay.io, so the
+helper uses `cgr.dev/chainguard/minio:latest` (override with
+`SK8S_TEST_MINIO_IMAGE`). To remove it: `kubectl delete deploy,svc minio`.

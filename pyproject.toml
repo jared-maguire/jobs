@@ -18,7 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 s3 = ["boto3>=1.34"]
 gcs = ["google-cloud-storage>=2.14"]
-dev = ["pytest>=8", "pytest-timeout>=2", "mypy>=1.8"]
+dev = ["pytest>=8", "pytest-timeout>=2", "mypy>=1.8", "boto3>=1.34", "google-cloud-storage>=2.14"]
 
 [project.scripts]
 sk8s = "sk8s.cli:main"
@@ -30,3 +30,7 @@ markers = ["integration: requires a live Kubernetes cluster (SK8S_INTEGRATION=1)
 [tool.mypy]
 strict = true
 packages = ["sk8s"]
+
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*", "google.cloud", "google.cloud.*"]
+ignore_missing_imports = true

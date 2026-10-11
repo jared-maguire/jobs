@@ -64,3 +64,16 @@ def test_oversized_result_becomes_error(tmp_path: Path, monkeypatch) -> None:  #
     assert code == 1
     with pytest.raises(BlobTooLarge, match="s3:// or gs://"):
         serialize.decode_result(blob)
+
+
+def test_worker_threads_s3_endpoint_to_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}  # type: ignore[type-arg]
+
+    def fake_get_store(store, **kw):  # type: ignore[no-untyped-def]
+        seen.update(store=store, **kw)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(worker, "get_store", fake_get_store)
+    with pytest.raises(RuntimeError):
+        worker.main({"SK8S_STORE": "s3://b/p/", "SK8S_S3_ENDPOINT": "http://minio:9000"})
+    assert seen["endpoint"] == "http://minio:9000"

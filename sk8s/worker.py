@@ -16,7 +16,9 @@ from sk8s.store import get_store
 
 def main(environ: Mapping[str, str]) -> int:
     store = get_store(
-        environ["SK8S_STORE"], namespace=environ.get("SK8S_NAMESPACE")
+        environ["SK8S_STORE"],
+        namespace=environ.get("SK8S_NAMESPACE"),
+        endpoint=environ.get("SK8S_S3_ENDPOINT"),
     )
     payload = store.get(environ["SK8S_PAYLOAD_URI"])
     result_key = environ["SK8S_RESULT_KEY"]
