@@ -61,7 +61,9 @@ def main(environ: Mapping[str, str]) -> int:
     if environ.get("SK8S_SERVICE") == "1":
         return _run_service(environ)
     store = get_store(
-        environ["SK8S_STORE"], namespace=environ.get("SK8S_NAMESPACE")
+        environ["SK8S_STORE"],
+        namespace=environ.get("SK8S_NAMESPACE"),
+        endpoint=environ.get("SK8S_S3_ENDPOINT"),
     )
     payload = store.get(environ["SK8S_PAYLOAD_URI"])
     result_key = environ["SK8S_RESULT_KEY"]

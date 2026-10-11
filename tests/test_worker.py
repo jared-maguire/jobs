@@ -144,3 +144,16 @@ def test_service_flag_other_than_1_is_job_mode(tmp_path: Path) -> None:
     }
     assert worker.main(env) == 0
     assert serialize.decode_result(store.get(store.uri_for("wf/j/result"))) == 5
+
+
+def test_worker_threads_s3_endpoint_to_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}  # type: ignore[type-arg]
+
+    def fake_get_store(store, **kw):  # type: ignore[no-untyped-def]
+        seen.update(store=store, **kw)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(worker, "get_store", fake_get_store)
+    with pytest.raises(RuntimeError):
+        worker.main({"SK8S_STORE": "s3://b/p/", "SK8S_S3_ENDPOINT": "http://minio:9000"})
+    assert seen["endpoint"] == "http://minio:9000"
