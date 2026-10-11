@@ -39,6 +39,10 @@ def submit_workflow(
     ``configure(cluster=obj)``. A ``cluster`` you pass must be unused (otherwise
     ``RuntimeError``) and becomes dedicated to the new workflow; it is not closed
     by the handle. A non-``Cluster`` argument raises ``TypeError``.
+
+    A failed ``submit_workflow`` consumes the cluster you passed: the half-made
+    workflow is deleted and the cluster is marked deleted, so any later ``submit`` on
+    it raises ``RuntimeError``. Pass a fresh ``Cluster`` to retry.
     """
     _check_cluster(cluster)
     owned = cluster is None
@@ -58,6 +62,7 @@ def submit_workflow(
         # Nothing records or owns a half-submitted workflow: don't leak a detached anchor.
         if c.workflow_id == wf:  # bound: something may have been created
             anchors.delete_anchor(c.core, c.store, namespace=_ns(c), workflow_id=wf)
+            c._mark_anchor_deleted()  # a passed cluster must not keep submitting into a dead anchor
         if owned:
             c.close(delete_workflow=False)
         raise

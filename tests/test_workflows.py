@@ -434,3 +434,18 @@ def test_transient_errors_warn_once_per_error_type(tmp_path, monkeypatch, caplog
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and "ApiException" in warnings[0].getMessage()
     assert len([r for r in caplog.records if r.levelno == logging.DEBUG]) == 2
+
+
+def test_failed_submit_workflow_consumes_passed_cluster(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+
+    def fail(*_a: Any, **_kw: Any) -> None:
+        raise ApiException(status=500, reason="patch failed")
+
+    monkeypatch.setattr("sk8s.anchors.set_annotation", fail)
+    with pytest.raises(ApiException):
+        workflows.submit_workflow(double, 1, cluster=h.cluster)
+    assert not h.core.configmaps  # the half-made anchor is gone
+    with pytest.raises(RuntimeError, match="was deleted"):
+        h.cluster.submit(double, 2)  # the passed cluster is not usable-but-poisoned
+    assert not h.core.configmaps

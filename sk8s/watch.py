@@ -46,6 +46,11 @@ class JobWatcher:
         with self._lock:
             self._registered.discard(job_name)
 
+    def registered(self) -> set[str]:
+        """Snapshot of the job names still awaiting a terminal event."""
+        with self._lock:
+            return set(self._registered)
+
     def stop(self) -> None:
         self._stopped.set()
 

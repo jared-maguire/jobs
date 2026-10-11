@@ -12,6 +12,8 @@ import time
 import weakref
 from typing import Any, Callable, Iterator
 
+from kubernetes.client import ApiException
+
 import sk8s
 from sk8s import anchors, serialize, spec
 from sk8s.config import Config, load_config
@@ -32,6 +34,11 @@ _SELECTOR = "app.kubernetes.io/managed-by=sk8s"
 _FETCH_ATTEMPTS = 3
 _RETRY_DELAY = 0.5  # seconds between result-fetch attempts (store write visibility lag)
 _K8S_DEFAULT_BACKOFF_LIMIT = 6
+# A cached anchor is re-read from the API when it was last verified more than this many
+# seconds ago, so a workflow deleted behind our back (kill/clean from another process)
+# fails loudly instead of every new Job being silently garbage-collected (dangling owner).
+_ANCHOR_RECHECK_SECONDS = 60.0
+_JOB_DELETED_REASON = "job was deleted before completing (workflow killed or expired?)"
 
 log = logging.getLogger("sk8s.cluster")
 
@@ -100,6 +107,8 @@ class Cluster:
         self.detached = detached
         self._anchor: Any | None = None  # created/adopted lazily on first submit
         self._anchor_deleted = False
+        self._anchor_verified_at = 0.0  # self._clock() when the cached anchor was last confirmed to exist
+        self._clock: Callable[[], float] = time.monotonic
         self._keep_any = False  # some job kept its results: don't cascade-delete on exit
         self._anchor_lock = threading.Lock()
         self._closed = False
@@ -155,14 +164,27 @@ class Cluster:
         """Create (or adopt) the workflow's anchor on first use; reused afterwards."""
         with self._anchor_lock:
             if self._anchor_deleted:
-                raise RuntimeError(
-                    f"workflow {self.workflow_id} was deleted by close(); "
-                    "create a new Cluster to submit more jobs"
-                )
-            if self._anchor is not None:
-                return self._anchor
+                raise self._deleted_error()
             namespace = self.config.namespace
             assert namespace is not None
+            if self._anchor is not None:
+                now = self._clock()
+                if now - self._anchor_verified_at > _ANCHOR_RECHECK_SECONDS:
+                    try:
+                        present = anchors.get_anchor(
+                            self.core, namespace=namespace, workflow_id=self.workflow_id
+                        ) is not None
+                    except Exception:  # noqa: BLE001 — transient API trouble must not block submits
+                        log.warning(
+                            "could not re-verify anchor of workflow %s; assuming it exists",
+                            self.workflow_id, exc_info=True,
+                        )
+                        present = True
+                    if not present:
+                        self._anchor_deleted = True
+                        raise self._deleted_error()
+                    self._anchor_verified_at = now
+                return self._anchor
             anchor = None
             if self._adopted:
                 anchor = anchors.get_anchor(
@@ -179,8 +201,20 @@ class Cluster:
                     detached=self.detached and not self._adopted,
                 )
             self._anchor = anchor
+            self._anchor_verified_at = self._clock()
             self._register_atexit()
             return anchor
+
+    def _deleted_error(self) -> RuntimeError:
+        return RuntimeError(
+            f"workflow {self.workflow_id} was deleted (by close(), kill, or clean); "
+            "create a new Cluster to submit more jobs"
+        )
+
+    def _mark_anchor_deleted(self) -> None:
+        """Poison this cluster: its workflow's anchor is gone, later submits raise."""
+        with self._anchor_lock:
+            self._anchor_deleted = True
 
     def _register_atexit(self) -> None:
         ref = weakref.ref(self)
@@ -214,11 +248,22 @@ class Cluster:
         # LIST first: replays the current phase of every job, so terminal events
         # that fired while the stream was down (or before it first opened) are
         # not lost. The watch then resumes from the list's resourceVersion.
+        # Snapshot the registered names BEFORE listing: a job registered before the LIST
+        # started was created before it, so its absence from the LIST means it is gone
+        # (a job registered mid-LIST must not be mistaken for a deleted one).
+        expected = self._watcher.registered()
         listing = self.batch.list_namespaced_job(
             namespace=self.config.namespace, label_selector=_SELECTOR
         )
+        listed: set[str] = set()
         for job in listing.items:
+            listed.add(job.metadata.name)
             yield (job.metadata.name, job_phase(job))
+        # Jobs we are waiting on that no longer exist (deleted while the stream was down,
+        # or before it first opened) will never produce another event: resolve them as
+        # failed. _collect still prefers a stored result blob over this verdict.
+        for name in sorted(expected - listed):
+            yield (name, "failed")
         yield from self._pull_failures()
 
         stream_kwargs: dict[str, Any] = {}
@@ -235,7 +280,12 @@ class Cluster:
             **stream_kwargs,
         ):
             job = event["object"]
-            yield (job.metadata.name, job_phase(job))
+            if event.get("type") == "DELETED":
+                # Gone, whatever its last status said. A finished job reaped by its TTL
+                # still resolves with its result blob; an unfinished one fails.
+                yield (job.metadata.name, "failed")
+            else:
+                yield (job.metadata.name, job_phase(job))
             # Every 30s of stream activity, check active jobs for stuck image pulls.
             now = time.monotonic()
             if now - last_pull_check > 30:
@@ -449,7 +499,18 @@ class Cluster:
             except Exception:  # noqa: BLE001 — cleanup is best-effort
                 log.exception("could not delete blob %s", key)
 
+    def _job_is_gone(self, name: str) -> bool:
+        try:
+            self.batch.read_namespaced_job(name=name, namespace=self.config.namespace)
+        except ApiException as exc:
+            return bool(exc.status == 404)
+        except Exception:  # noqa: BLE001 — cannot tell: fall back to the generic reason
+            return False
+        return False
+
     def _failure_reason(self, name: str) -> str:
+        if self._job_is_gone(name):
+            return _JOB_DELETED_REASON
         try:
             pods = self.core.list_namespaced_pod(
                 namespace=self.config.namespace, label_selector=f"job-name={name}"

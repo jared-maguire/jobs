@@ -82,6 +82,12 @@ class FakeBatchV1:
         self.deleted.append(name)
         self.jobs.pop((namespace, name), None)
 
+    def read_namespaced_job(self, name: str, namespace: str) -> Any:
+        try:
+            return self.jobs[(namespace, name)]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found")
+
     def list_namespaced_job(self, namespace: str, label_selector: str = "", **_: Any) -> Any:
         """Honors the simple `k=v[,k=v...]` equality form of label selectors."""
         wanted = dict(p.split("=", 1) for p in label_selector.split(",") if p)

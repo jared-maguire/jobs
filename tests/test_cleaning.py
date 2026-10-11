@@ -438,3 +438,24 @@ def test_worker_sweep_uses_recorded_stores(tmp_path, monkeypatch) -> None:  # ty
     env = _worker_env(tmp_path / "own")
     assert worker.main(env) == 0
     assert not _has(core, "wf-old") and not (other / "wf-old").exists()
+
+
+def test_anchor_younger_than_floor_survives_zero_retention(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    core, store = FakeCoreV1(), LocalStore(tmp_path)
+    _make(core, "wf-young", age_days=100 / 86400, retention=0)
+    assert clean(NS, core_api=core, store=store, batch_api=FakeBatchV1()) == []
+    assert clean(NS, older_than_days=0, core_api=core, store=store, batch_api=FakeBatchV1()) == []
+    assert _has(core, "wf-young")
+
+
+def test_anchor_older_than_floor_with_zero_retention_is_reaped(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    core, store = FakeCoreV1(), LocalStore(tmp_path)
+    _make(core, "wf-aged", age_days=400 / 86400, retention=0)
+    assert clean(NS, core_api=core, store=store, batch_api=FakeBatchV1()) == ["wf-aged"]
+    assert not _has(core, "wf-aged")
+
+
+def test_workflow_force_path_ignores_age_floor(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    core, store = FakeCoreV1(), LocalStore(tmp_path)
+    _make(core, "wf-young", age_days=10 / 86400, retention=0)
+    assert clean(NS, workflow="wf-young", core_api=core, store=store) == ["wf-young"]

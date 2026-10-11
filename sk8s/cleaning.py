@@ -17,6 +17,13 @@ from sk8s.cluster import job_phase
 
 log = logging.getLogger("sk8s.cleaning")
 
+# Never reap an anchor younger than this, whatever retention / older_than_days say
+# (the workflow= force path is exempt). Closes two windows: (1) between a client creating
+# an anchor and its first Job existing (and its driver being recorded), when "no active
+# jobs" is vacuously true; (2) retention_days=0 / older_than_days=0 footguns that would
+# otherwise make every worker's start-up sweep delete brand-new workflows.
+_MIN_ANCHOR_AGE_SECONDS = 300.0
+
 
 def _age_days(anchor: Any, now: datetime.datetime) -> float:
     created = datetime.datetime.fromisoformat(anchor.metadata.annotations[anchors.CREATED_AT])
@@ -64,6 +71,7 @@ def clean(
     jobs is still active. Younger or live workflows are kept; anchors with missing or
     malformed annotations, an unresolvable store, or a job listing that fails are
     skipped and logged (a failed safety check never falls through to a delete).
+    An anchor younger than 300 seconds is never deleted this way, whatever the limit.
     ``exclude`` lists workflow ids the sweep never touches (a worker excludes its own).
 
     Each anchor's blobs are removed from the store named in its ``sk8s/store``
@@ -129,7 +137,10 @@ def clean(
         if wf in exclude:
             continue
         try:
-            expired = _age_days(cm, now) > _limit_days(cm, older_than_days)
+            age = _age_days(cm, now)
+            expired = age > _limit_days(cm, older_than_days) and (
+                age * 86400.0 >= _MIN_ANCHOR_AGE_SECONDS
+            )
         except (KeyError, TypeError, ValueError):
             log.warning("skipping anchor %s: malformed or missing annotations", name, exc_info=True)
             continue

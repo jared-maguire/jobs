@@ -130,3 +130,8 @@
 
 ## Done criteria
 Unit suite + mypy green; integration green on minikube including the nested-jobs test; PR into `version-2`.
+
+## Deviations from spec §5
+
+- **Payload ConfigMap ownership.** Payload ConfigMaps are owner-referenced to the workflow's ANCHOR, not to the Job as the spec sketched (the payload must exist before the Job it feeds does, so the Job cannot be its owner at create time). Consequence: the payloads of crashed clients (no `_cleanup`) are reclaimed at anchor retention, not at the Job's `ttlSecondsAfterFinished`.
+- **"`submit_workflow` warns on k8s store" is deferred.** The spec line that `submit_workflow` should warn when the configured store is the k8s ConfigMap store (size-limited, cluster-local) is not implemented here: there is no object-store backend on this branch to recommend instead. Revisit when object-store backends land on this branch's descendants.
