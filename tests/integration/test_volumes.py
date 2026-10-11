@@ -25,14 +25,16 @@ from tests.integration.conftest import requires_cluster
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(300)]
 
 IMAGE = os.environ.get("SK8S_VOLUMES_TEST_IMAGE", "sk8s-dev-volumes:latest")
+TTL = 10  # ttl_seconds_after_finished for the suite's clusters
 # A PVC delete blocks on the pvc-protection finalizer until every pod that mounts it is
 # *deleted*; Succeeded pods count. Job pods vanish only when the TTL controller reaps
-# the job (ttl_seconds_after_finished=30 here, plus controller lag), so 30s is too tight.
-GONE_TIMEOUT = 75
+# the job (TTL seconds after it finishes, plus controller lag), so the wait must
+# comfortably exceed TTL: 3x leaves generous margin for that lag.
+GONE_TIMEOUT = 3 * TTL
 
 
 def _new_cluster() -> Cluster:
-    return Cluster(load_config(image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=30))
+    return Cluster(load_config(image=IMAGE, pull_policy="Never", ttl_seconds_after_finished=TTL))
 
 
 @pytest.fixture
@@ -50,6 +52,17 @@ def _pvc_exists(c: Cluster, name: str) -> bool:
             return False
         raise
     return True
+
+
+def _pvc_alive(c: Cluster, name: str) -> bool:
+    """True only if the PVC exists, is NOT Terminating, and has no owner (kept volume)."""
+    try:
+        pvc = c.core.read_namespaced_persistent_volume_claim(name=name, namespace=c.config.namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return False
+        raise
+    return pvc.metadata.deletion_timestamp is None and not pvc.metadata.owner_references
 
 
 def _poll(cond: Callable[[], Any], timeout: float, what: str, interval: float = 0.5) -> Any:
@@ -150,7 +163,7 @@ def test_kept_volume_survives_cascade(vol_cluster: Cluster) -> None:
         # Survives a stable 5s window (a cascade would have removed it by now).
         end = time.monotonic() + 5
         while time.monotonic() < end:
-            assert _pvc_exists(vol_cluster, vol), "kept volume was removed by the anchor cascade"
+            assert _pvc_alive(vol_cluster, vol), "kept volume was removed (or is Terminating/owned) after the anchor cascade"
             time.sleep(0.5)
 
         # ...and its data is still readable from a different workflow.
