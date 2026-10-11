@@ -14,6 +14,10 @@ class FakeCoreV1:
         self.create_calls: list[str] = []  # every create attempt, 409s included
         self.delete_policies: dict[str, str | None] = {}  # configmap name -> propagation policy
         self.services: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1Service
+        self.namespaces: dict[str, Any] = {}  # name -> V1Namespace
+        self.service_accounts: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1ServiceAccount
+        # Every namespace/serviceaccount write attempt as (verb, kind, name); 409s included.
+        self.actions: list[tuple[str, str, str]] = []
 
     def create_namespaced_config_map(self, namespace: str, body: Any) -> Any:
         self.create_calls.append(body.metadata.name)
@@ -74,6 +78,39 @@ class FakeCoreV1:
         if (namespace, name) not in self.services:
             raise ApiException(status=404, reason="Not Found")
         del self.services[(namespace, name)]
+
+    def create_namespace(self, body: Any) -> Any:
+        self.actions.append(("create", "Namespace", body.metadata.name))
+        if body.metadata.name in self.namespaces:
+            raise ApiException(status=409, reason="Conflict")
+        self.namespaces[body.metadata.name] = body
+        return body
+
+    def read_namespace(self, name: str) -> Any:
+        try:
+            return self.namespaces[name]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found")
+
+    def create_namespaced_service_account(self, namespace: str, body: Any) -> Any:
+        self.actions.append(("create", "ServiceAccount", body.metadata.name))
+        if (namespace, body.metadata.name) in self.service_accounts:
+            raise ApiException(status=409, reason="Conflict")
+        self.service_accounts[(namespace, body.metadata.name)] = body
+        return body
+
+    def read_namespaced_service_account(self, name: str, namespace: str) -> Any:
+        try:
+            return self.service_accounts[(namespace, name)]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found")
+
+    def replace_namespaced_service_account(self, name: str, namespace: str, body: Any) -> Any:
+        self.actions.append(("replace", "ServiceAccount", name))
+        if (namespace, name) not in self.service_accounts:
+            raise ApiException(status=404, reason="Not Found")
+        self.service_accounts[(namespace, name)] = body
+        return body
 
     def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
         class R:
@@ -147,3 +184,65 @@ class FakeAppsV1:
         if (namespace, name) not in self.deployments:
             raise ApiException(status=404, reason="Not Found")
         del self.deployments[(namespace, name)]
+
+
+class FakeRbacV1:
+    """Role / RoleBinding fakes with 409-on-duplicate-create and 404-on-missing semantics."""
+
+    def __init__(self) -> None:
+        self.roles: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1Role
+        self.role_bindings: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1RoleBinding
+        # Every write attempt as (verb, kind, name); 409s included.
+        self.actions: list[tuple[str, str, str]] = []
+
+    def _create(self, store: dict[tuple[str, str], Any], kind: str, ns: str, body: Any) -> Any:
+        self.actions.append(("create", kind, body.metadata.name))
+        if (ns, body.metadata.name) in store:
+            raise ApiException(status=409, reason="Conflict")
+        store[(ns, body.metadata.name)] = body
+        return body
+
+    def _read(self, store: dict[tuple[str, str], Any], ns: str, name: str) -> Any:
+        try:
+            return store[(ns, name)]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found")
+
+    def _replace(
+        self, store: dict[tuple[str, str], Any], kind: str, ns: str, name: str, body: Any
+    ) -> Any:
+        self.actions.append(("replace", kind, name))
+        if (ns, name) not in store:
+            raise ApiException(status=404, reason="Not Found")
+        store[(ns, name)] = body
+        return body
+
+    def _delete(self, store: dict[tuple[str, str], Any], kind: str, ns: str, name: str) -> None:
+        self.actions.append(("delete", kind, name))
+        if (ns, name) not in store:
+            raise ApiException(status=404, reason="Not Found")
+        del store[(ns, name)]
+
+    def create_namespaced_role(self, namespace: str, body: Any) -> Any:
+        return self._create(self.roles, "Role", namespace, body)
+
+    def read_namespaced_role(self, name: str, namespace: str) -> Any:
+        return self._read(self.roles, namespace, name)
+
+    def replace_namespaced_role(self, name: str, namespace: str, body: Any) -> Any:
+        return self._replace(self.roles, "Role", namespace, name, body)
+
+    def delete_namespaced_role(self, name: str, namespace: str) -> None:
+        self._delete(self.roles, "Role", namespace, name)
+
+    def create_namespaced_role_binding(self, namespace: str, body: Any) -> Any:
+        return self._create(self.role_bindings, "RoleBinding", namespace, body)
+
+    def read_namespaced_role_binding(self, name: str, namespace: str) -> Any:
+        return self._read(self.role_bindings, namespace, name)
+
+    def replace_namespaced_role_binding(self, name: str, namespace: str, body: Any) -> Any:
+        return self._replace(self.role_bindings, "RoleBinding", namespace, name, body)
+
+    def delete_namespaced_role_binding(self, name: str, namespace: str) -> None:
+        self._delete(self.role_bindings, "RoleBinding", namespace, name)

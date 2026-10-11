@@ -46,3 +46,8 @@ def current_namespace() -> str:
     _, active = config.list_kube_config_contexts()  # type: ignore[no-untyped-call]
     ns = (active.get("context") or {}).get("namespace")
     return ns or "default"
+
+
+def rbac_api() -> client.RbacAuthorizationV1Api:
+    load()
+    return client.RbacAuthorizationV1Api()
