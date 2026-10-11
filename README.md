@@ -16,7 +16,11 @@ sk8s.map(lambda x: x ** 2, range(1000), batch_size=50)  # 20 Jobs, results in or
 - **Futures, not job names.** `submit` returns a `Future`; `map` collects results in
   order; a function that raises re-raises the *same exception type* locally with the
   remote traceback attached.
-- **Any picklable value** goes in and comes out (cloudpickle), not just JSON.
+- **Any picklable value** goes in and comes out (cloudpickle), not just JSON. Results are
+  pickled, so the client needs the modules of the types a job returns: return builtins
+  (`float`, `int`, `list`, `dict`) for portable results, and note that numpy arrays or
+  `numpy.float64` scalars need numpy installed client-side too. A result that cannot be
+  unpickled raises `ResultDecodeError` (the job itself succeeded).
 - **Detached workflows.** Submit a driver function, close your laptop, and `attach` to it
   later from any process.
 - **Services and volumes** are first-class: `serve()` a function as a Deployment behind a

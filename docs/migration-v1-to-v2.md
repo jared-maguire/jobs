@@ -36,6 +36,10 @@ against the v2 code in this repository.
    your function is free to print (stdout is just the pod log, readable with
    `future.logs()`). Two consequences:
    - The client **unpickles** results, so only use a result store you trust.
+   - The client also needs the modules of the types a job returns. Prefer builtins
+     (`float`, `int`, `list`, `dict`) for portable results; numpy arrays, `numpy.float64`
+     and similar require the library installed client-side too, otherwise `.result()`
+     raises `ResultDecodeError` even though the job succeeded.
    - The default `k8s` store keeps each payload and result in a ConfigMap, which caps a
      blob at about 950 KB (`BlobTooLarge`). Configure an `s3://` or `gs://` store for large
      data (see the README's [Result stores](../README.md#result-stores)).

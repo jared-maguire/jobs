@@ -16,7 +16,7 @@ from typing import Any, Callable
 import cloudpickle  # type: ignore[import-untyped]  # no py.typed marker upstream
 
 from sk8s import __version__
-from sk8s.errors import RemoteException, RemoteTraceback, VersionMismatch
+from sk8s.errors import RemoteException, RemoteTraceback, ResultDecodeError, VersionMismatch
 
 
 def _python_minor() -> str:
@@ -71,7 +71,15 @@ def decode_result(data: bytes) -> Any:
     head, _, body = data.partition(b"\n")
     header = json.loads(head)
     if header["kind"] == "ok":
-        return pickle.loads(body)
+        try:
+            return pickle.loads(body)
+        except Exception as decode_exc:
+            raise ResultDecodeError(
+                "the job succeeded but its result could not be deserialized on this "
+                f"client: {type(decode_exc).__name__}: {decode_exc} \u2014 install the missing module "
+                "locally (results are pickled; the client needs the modules of the types "
+                "a job returns) or return builtin types from the function"
+            ) from decode_exc
     # kind == "err"
     if body:
         try:
