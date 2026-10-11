@@ -38,3 +38,39 @@ class FakeCoreV1:
             and all((v.metadata.labels or {}).get(k) == val for k, val in wanted.items())
         ]
         return SimpleNamespace(items=items)
+
+    def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
+        class R:
+            items: list[Any] = []
+
+        return R()
+
+    def read_namespaced_pod_log(self, name: str, namespace: str) -> str:
+        return ""
+
+
+class FakeBatchV1:
+    def __init__(self) -> None:
+        self.jobs: dict[tuple[str, str], Any] = {}
+        self.deleted: list[str] = []
+
+    def create_namespaced_job(self, namespace: str, body: Any) -> Any:
+        self.jobs[(namespace, body.metadata.name)] = body
+        return body
+
+    def delete_namespaced_job(
+        self, name: str, namespace: str, propagation_policy: str = "Background"
+    ) -> None:
+        self.deleted.append(name)
+        self.jobs.pop((namespace, name), None)
+
+    def list_namespaced_job(self, namespace: str, label_selector: str = "", **_: Any) -> Any:
+        """Honors the simple `k=v[,k=v...]` equality form of label selectors."""
+        wanted = dict(p.split("=", 1) for p in label_selector.split(",") if p)
+        items = [
+            j
+            for (ns, _name), j in self.jobs.items()
+            if ns == namespace
+            and all((j.metadata.labels or {}).get(k) == v for k, v in wanted.items())
+        ]
+        return SimpleNamespace(items=items, metadata=SimpleNamespace(resource_version="1"))
