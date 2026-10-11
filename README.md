@@ -197,6 +197,33 @@ sk8s.configure(cluster=sk8s.LocalCluster())
 print(sk8s.run(lambda x: x * 2, 21))  # 42
 ```
 
+## Custom images
+
+The official worker image has only sk8s and the standard library. To add packages, layer
+them on a base image. On minikube, build on the local base image from the quickstart:
+
+```bash
+sk8s image build --tag pysam-worker:1 --base sk8s:dev --pip pysam --minikube
+```
+
+The CLI checks that the image really landed in minikube's image store and fails loudly if
+it did not. Then point a run, or every run, at it:
+
+```python
+import sk8s
+
+print(sk8s.run(lambda: __import__("pysam").__version__, image="pysam-worker:1"))
+sk8s.configure(image="pysam-worker:1")  # or SK8S_IMAGE=pysam-worker:1
+```
+
+(With `SK8S_PULL_POLICY=Never` exported as in the quickstart, minikube uses the local
+image as is.) When `--base` is omitted the base is the configured worker image, so an
+exported `SK8S_IMAGE` also serves as the default base. For PyTorch use `--pip torch`; the
+resulting image is large, so expect a slow first build. `--base` only applies to pip
+dependencies. `--conda` builds from miniforge and installs sk8s from PyPI at your exact
+version, so it needs the first PyPI release. On a real cluster, build with `--push`
+instead of `--minikube` and use a tag your cluster can pull.
+
 ## Cleanup and lifecycle
 
 A normal `sk8s.run` / `map` session deletes its own bookkeeping when the process exits.
@@ -241,7 +268,7 @@ context's namespace if it names one, else `sk8s`.
 | `sk8s logs WORKFLOW` | Print a workflow driver's logs. |
 | `sk8s kill WORKFLOW` | Delete a workflow and everything it owns. |
 | `sk8s clean [--older-than 7d]` | Delete expired workflows (`7d`, `36h`, or bare days). |
-| `sk8s image build --tag TAG [--pip PKG] [--conda PKG] [--channel CH] [--push \| --minikube]` | Build a worker image with extra dependencies layered on the official base image (published at release time). |
+| `sk8s image build --tag TAG [--base IMG] [--pip PKG] [--conda PKG] [--channel CH] [--push \| --minikube]` | Build a worker image with extra dependencies layered on the official base image (published at release time) or on `--base IMG` (pip only). See [Custom images](#custom-images). |
 | `sk8s image push --tag TAG` | `docker push` an image. |
 | `sk8s shell [--image IMG]` | Open an interactive shell in a pod (needs `kubectl`). |
 | `sk8s --version` | Print the version. |

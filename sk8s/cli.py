@@ -219,12 +219,14 @@ def _cmd_image_build(args: argparse.Namespace) -> int:
     try:
         if args.minikube:
             dockerfile = images.generate_dockerfile(
-                pip=args.pip, conda=args.conda, channels=args.channel
+                base=args.base, pip=args.pip, conda=args.conda, channels=args.channel
             )
             tag = images.build_in_minikube(args.tag, dockerfile=dockerfile)
         else:
+            extra = {} if args.base is None else {"base": args.base}
             tag = images.build(
-                args.tag, pip=args.pip, conda=args.conda, channels=args.channel, push=args.push
+                args.tag, pip=args.pip, conda=args.conda, channels=args.channel, push=args.push,
+                **extra,
             )
     except ValueError as e:
         raise Sk8sError(str(e)) from e
@@ -458,6 +460,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pip", action="append", default=[], metavar="PKG", help="pip dep (repeatable)")
     p.add_argument("--conda", action="append", default=[], metavar="PKG", help="conda dep (repeatable)")
     p.add_argument("--channel", action="append", default=[], metavar="CH", help="conda channel (repeatable)")
+    p.add_argument("--base", metavar="IMG", help="base image to layer pip deps on "
+                   "(default: the official worker image; not valid with --conda)")
     p.add_argument("--push", action="store_true", help="docker push after building")
     p.add_argument("--minikube", action="store_true", help="build into minikube's image store")
     p.set_defaults(func=_cmd_image_build)

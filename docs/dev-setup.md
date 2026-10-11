@@ -55,8 +55,11 @@ sk8s doctor
    `--build-opt=build-arg=PYTHON_VERSION=3.12` spelling (`minikube profile list` shows
    your runtime).
 
-   `minikube image build` can exit 0 even when the build fails (for example an
-   unresolvable `FROM`), so check `minikube image ls | grep sk8s-dev` after building.
+   The raw `minikube image build` can exit 0 even when the build fails (for example an
+   unresolvable `FROM`, or a `-f` Dockerfile outside the build context), so check
+   `minikube image ls | grep sk8s-dev` after building. `sk8s image build --minikube`
+   does that check for you: it puts its generated Dockerfile inside the context and
+   raises an error if the tag is missing from `minikube image ls` afterwards.
 
 ## Legacy default-namespace RBAC
 

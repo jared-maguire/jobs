@@ -85,7 +85,7 @@ def _output_tail(stderr: Any, stdout: Any) -> str:
     return "\n".join([*err, *out])
 
 
-def _run(runner: Callable[..., Any] | None, argv: list[str], what: str, **kwargs: Any) -> None:
+def _run(runner: Callable[..., Any] | None, argv: list[str], what: str, **kwargs: Any) -> Any:
     run = subprocess.run if runner is None else runner
     try:
         proc = run(argv, capture_output=True, text=True, **kwargs)
@@ -94,6 +94,7 @@ def _run(runner: Callable[..., Any] | None, argv: list[str], what: str, **kwargs
     if proc.returncode != 0:
         tail = _output_tail(proc.stderr, proc.stdout)
         raise Sk8sError(f"{what} failed (exit {proc.returncode}):\n{tail}")
+    return proc
 
 
 def push(tag: str, *, runner: Callable[..., Any] | None = None) -> None:
@@ -109,6 +110,7 @@ def build(
     *,
     dockerfile: str | None = None,
     path: str | Path = ".",
+    base: str | None = None,
     pip: Sequence[str] = (),
     conda: Sequence[str] = (),
     channels: Sequence[str] = (),
@@ -119,17 +121,24 @@ def build(
 
     The Dockerfile (given, or generated from ``pip``/``conda``/``channels``) is
     fed to docker on stdin. With ``push=True`` the image is pushed afterwards.
-    An explicit ``dockerfile`` cannot be combined with ``pip``/``conda``/``channels``.
+    An explicit ``dockerfile`` cannot be combined with ``base``/``pip``/``conda``/``channels``.
     """
-    if dockerfile is not None and (pip or conda or channels):
-        raise ValueError("dockerfile cannot be combined with pip/conda/channels")
+    if dockerfile is not None and (base or pip or conda or channels):
+        raise ValueError("dockerfile cannot be combined with base/pip/conda/channels")
     if dockerfile is None:
-        dockerfile = generate_dockerfile(pip=pip, conda=conda, channels=channels)
+        dockerfile = generate_dockerfile(base=base, pip=pip, conda=conda, channels=channels)
     _run(runner, ["docker", "build", "-t", tag, "-f", "-", str(path)],
          f"docker build {tag}", input=dockerfile)
     if push:
         _push(tag, runner=runner)
     return tag
+
+
+def _image_known(listing: str, tag: str) -> bool:
+    """Whether ``minikube image ls`` output lists ``tag`` (it prefixes ``docker.io/library/``)."""
+    name = tag if ":" in tag.rsplit("/", 1)[-1] or "@" in tag else f"{tag}:latest"
+    wanted = {name, f"docker.io/{name}", f"docker.io/library/{name}"}
+    return any(line.strip() in wanted for line in listing.splitlines())
 
 
 def build_in_minikube(
@@ -141,17 +150,30 @@ def build_in_minikube(
 ) -> str:
     """Build straight into minikube's image store (no registry round trip).
 
-    ``minikube image build`` cannot read a Dockerfile from stdin, so the text
-    goes through a temporary file that is removed afterwards.
+    ``minikube image build`` cannot read a Dockerfile from stdin, and a ``-f``
+    path outside the build context makes it a silent no-op (exit 0, no image).
+    So the text goes into a uniquely named file at the context root, which is
+    removed afterwards. Because minikube can also report success for a build
+    that produced nothing, the image is checked with ``minikube image ls``
+    and a missing tag raises Sk8sError.
     """
     if dockerfile is None:
         raise ValueError("build_in_minikube requires a dockerfile")
-    fd, name = tempfile.mkstemp(prefix="sk8s-Dockerfile-")
+    fd, name = tempfile.mkstemp(prefix=".sk8s-build-", suffix=".Dockerfile", dir=str(path))
     try:
         with os.fdopen(fd, "w") as f:
             f.write(dockerfile)
-        _run(runner, ["minikube", "image", "build", "-t", tag, "-f", name, str(path)],
-             f"minikube image build {tag}")
+        os.chmod(name, 0o644)
+        built = _run(runner, ["minikube", "image", "build", "-t", tag, "-f",
+                              os.path.basename(name), str(path)],
+                     f"minikube image build {tag}")
     finally:
         os.unlink(name)
+    listing = _run(runner, ["minikube", "image", "ls"], "minikube image ls")
+    if not _image_known(_text(listing.stdout), tag):
+        tail = _output_tail(built.stderr, built.stdout)
+        raise Sk8sError(
+            f"minikube image build {tag} exited 0 but the image is not in "
+            f"`minikube image ls`; minikube build failures can be silent.\n{tail}"
+        )
     return tag

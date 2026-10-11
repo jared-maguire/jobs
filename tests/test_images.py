@@ -96,17 +96,23 @@ def test_dockerfile_worker_definition():
 
 
 class FakeRunner:
-    def __init__(self, returncode=0, stderr="", stdout=""):
+    def __init__(self, returncode=0, stderr="", stdout="", ls_stdout=None, cwd_ctx=None):
         self.calls = []
         self.returncode = returncode
         self.stderr = stderr
         self.stdout = stdout
+        self.ls_stdout = ls_stdout
         self.minikube_file_text = None
+        self.minikube_file = None
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
-        if argv[0] == "minikube":
-            self.minikube_file_text = Path(argv[argv.index("-f") + 1]).read_text()
+        if argv[:3] == ["minikube", "image", "ls"]:
+            return subprocess.CompletedProcess(argv, 0, self.ls_stdout or "", "")
+        if argv[:3] == ["minikube", "image", "build"]:
+            ctx = Path(argv[-1])
+            self.minikube_file = ctx / argv[argv.index("-f") + 1]
+            self.minikube_file_text = self.minikube_file.read_text()
         return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
 
 
@@ -220,26 +226,63 @@ def test_push_argv_and_failure():
         images.push("t:1", runner=bad)
 
 
-def test_build_in_minikube_uses_tempfile_and_cleans_up():
-    r = FakeRunner()
-    out = images.build_in_minikube("$(evil)", dockerfile="FROM y\n", path="ctx", runner=r)
-    assert out == "$(evil)"
+def test_build_in_minikube_dockerfile_inside_context_and_cleaned_up(tmp_path):
+    r = FakeRunner(ls_stdout="docker.io/library/my:tag\nregistry.k8s.io/pause:3.9\n")
+    out = images.build_in_minikube("my:tag", dockerfile="FROM y\n", path=tmp_path, runner=r)
+    assert out == "my:tag"
     argv, kw = r.calls[0]
-    assert argv[:4] == ["minikube", "image", "build", "-t"]
-    assert argv[4] == "$(evil)"
+    assert argv[:5] == ["minikube", "image", "build", "-t", "my:tag"]
     assert argv[5] == "-f"
-    assert argv[7] == "ctx"
-    assert len(argv) == 8
+    name = argv[6]
+    assert "/" not in name and name.startswith(".sk8s-build-") and name.endswith(".Dockerfile")
+    assert argv[7] == str(tmp_path) and len(argv) == 8
     assert "input" not in kw
+    assert r.minikube_file == tmp_path / name
     assert r.minikube_file_text == "FROM y\n"
-    assert not Path(argv[6]).exists()
+    assert list(tmp_path.iterdir()) == []
+    assert r.calls[1][0] == ["minikube", "image", "ls"]
 
 
-def test_build_in_minikube_failure_raises_and_cleans_up():
+def test_build_in_minikube_unique_names(tmp_path):
+    names = set()
+    for _ in range(3):
+        r = FakeRunner(ls_stdout="docker.io/library/t:1\n")
+        images.build_in_minikube("t:1", dockerfile="FROM y\n", path=tmp_path, runner=r)
+        names.add(r.calls[0][0][6])
+    assert len(names) == 3
+
+
+def test_build_in_minikube_failure_raises_and_cleans_up(tmp_path):
     r = FakeRunner(returncode=2, stderr="MARKER-MK")
     with pytest.raises(Sk8sError, match="MARKER-MK"):
-        images.build_in_minikube("t:1", dockerfile="FROM y\n", runner=r)
-    assert not Path(r.calls[0][0][6]).exists()
+        images.build_in_minikube("t:1", dockerfile="FROM y\n", path=tmp_path, runner=r)
+    assert r.minikube_file is not None
+    assert list(tmp_path.iterdir()) == []
+    assert len(r.calls) == 1  # no verification after a failed build
+
+
+@pytest.mark.parametrize("listing", [
+    "docker.io/library/t:1\n",
+    "t:1\n",
+    "  docker.io/library/t:1  \nother:2\n",
+])
+def test_build_in_minikube_verification_passes(tmp_path, listing):
+    r = FakeRunner(ls_stdout=listing)
+    assert images.build_in_minikube("t:1", dockerfile="FROM y\n", path=tmp_path, runner=r) == "t:1"
+
+
+def test_build_in_minikube_untagged_means_latest(tmp_path):
+    r = FakeRunner(ls_stdout="docker.io/library/t:latest\n")
+    assert images.build_in_minikube("t", dockerfile="FROM y\n", path=tmp_path, runner=r) == "t"
+
+
+def test_build_in_minikube_verification_fails_when_image_absent(tmp_path):
+    r = FakeRunner(stdout="MARKER-OUT", ls_stdout="docker.io/library/t:10\ndocker.io/library/xt:1\n")
+    with pytest.raises(Sk8sError, match="t:1") as ei:
+        images.build_in_minikube("t:1", dockerfile="FROM y\n", path=tmp_path, runner=r)
+    msg = str(ei.value)
+    assert "silent" in msg and "MARKER-OUT" in msg
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_build_in_minikube_requires_dockerfile_or_deps_default():
