@@ -2,7 +2,9 @@
 
 This page is for people hacking on sk8s itself: running the integration suites,
 building worker images, and testing against MinIO. If you just want to *use*
-sk8s on minikube, the [README quickstart](../README.md#quickstart-about-5-minutes) is shorter.
+sk8s on minikube, the [README quickstart](../README.md#quickstart-about-5-minutes) is shorter
+(it uses the registry addon and the default pull policy; this page's `minikube image build`
+tags are the test suite's convention instead, see [Running the suites](#running-the-suites)).
 See also: [migration guide](migration-v1-to-v2.md) and
 [conventions reference](conventions.md) (labels, workflow ids, blob keys).
 
@@ -65,8 +67,9 @@ sk8s doctor
    registry route below. And `minikube image rm` removes by image ID, so tags that
    share an ID (for example an identical rebuild under a new tag) vanish together.
 
-   **Registry route (recommended for custom images).** Enable the addon, keep a
-   port-forward running while you push, then use plain docker:
+   **Registry route (recommended for custom images).** The README quickstart already
+   enables the addon and starts the port-forward; if you skipped it, enable the addon, keep
+   a port-forward running while you push, then use plain docker:
 
    ```bash
    minikube addons enable registry
@@ -108,7 +111,12 @@ SK8S_INTEGRATION=1 pytest tests/integration -v
 ```
 
 Most suites default to their own feature-specific image tag (built the same
-way as above, with a different `-t`) and have an environment override:
+way as above, with a different `-t`) and have an environment override. The suites
+configure `pull_policy="Never"` themselves for these bare local tags (the test suite's
+local-image convention, built with `minikube image build` and no registry); it is
+distinct from the README quickstart, which pushes to the registry addon and uses the
+default pull policy. The README's [no-registry aside](../README.md#no-registry-building-directly-into-minikube)
+explains why `Never` is the right policy for bare local tags:
 
 | Suite | Default image tag | Override |
 |---|---|---|

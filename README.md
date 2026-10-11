@@ -34,29 +34,31 @@ sk8s.map(lambda x: x ** 2, range(1000), batch_size=50)  # 20 Jobs, results in or
 
 You need Python 3.10+, Docker, [minikube](https://minikube.sigs.k8s.io/) and `kubectl`.
 
+This quickstart uses minikube's registry addon, so the workflow is the same one you would
+use on a real cluster: `docker build`, `docker push`, and jobs pull the image by name with
+the default pull policy. (No registry? See [Building directly into
+minikube](#no-registry-building-directly-into-minikube).)
+
 **1. Start a cluster.**
 
 ```bash
 minikube start
 ```
 
-**2. Install sk8s** from a checkout (`pip install -e .` installs the `sk8s` command too):
+**2. Enable the registry addon.** This gives the cluster an image registry that every pod
+can pull from as `localhost:5000`, which is what lets you push images from your machine and
+have jobs use them:
+
+```bash
+minikube addons enable registry
+```
+
+**3. Install sk8s** from a checkout (`pip install -e .` installs the `sk8s` command too):
 
 ```bash
 git clone -b version-2 https://github.com/jared-maguire/jobs.git sk8s && cd sk8s
 python -m venv .venv && . .venv/bin/activate
 pip install -e .
-```
-
-**3. Build the worker image** into minikube. The worker's Python minor version must match
-your local interpreter (the payload carries a version check); `docker/Dockerfile.dev`
-defaults to Python 3.14. For another version, pass a build arg, e.g.
-`--build-opt=opt=build-arg:PYTHON_VERSION=3.12` (see [docs/dev-setup.md](docs/dev-setup.md)
-for the syntax per minikube container runtime).
-
-```bash
-minikube image build -t sk8s:dev -f docker/Dockerfile.dev .
-export SK8S_IMAGE=sk8s:dev SK8S_PULL_POLICY=Never   # use that image, never pull it
 ```
 
 **4. Prepare a namespace.** `sk8s config` creates the `sk8s` namespace with a
@@ -67,7 +69,44 @@ sk8s config --namespace sk8s
 sk8s doctor        # five PASS lines when the cluster is ready
 ```
 
-**5. Run a function.**
+**5. Reach the registry from your machine.** Forward its port and leave this running
+while you push (add `&` to background it, or use a spare terminal):
+
+```bash
+kubectl -n kube-system port-forward svc/registry 5000:80 &
+```
+
+(A persistent alternative to the port-forward is a `socat` relay from `localhost:5000` to
+`$(minikube ip):5000`, run under a supervisor or in a container.)
+
+**6. Build the worker image and push it.** The worker's Python minor version must match
+your local interpreter (the payload carries a version check); `docker/Dockerfile.dev`
+defaults to Python 3.14. For another version, add a build arg, e.g.
+`--build-arg PYTHON_VERSION=3.12`.
+
+```bash
+docker build -t localhost:5000/sk8s-base:dev -f docker/Dockerfile.dev .
+docker push localhost:5000/sk8s-base:dev
+```
+
+**7. Point sk8s at that image.** Either set it for this shell:
+
+```bash
+export SK8S_IMAGE=localhost:5000/sk8s-base:dev
+```
+
+or put it in `~/.config/sk8s/config.toml` (recommended, since it persists across shells;
+`sk8s config` keeps keys it did not write, so this is safe to add at any point):
+
+```toml
+image = "localhost:5000/sk8s-base:dev"
+```
+
+Nodes cache images by tag and the default pull policy (`IfNotPresent`) will not refetch a
+tag a node already has, so when you rebuild the base, push it under a new tag and update
+`image`.
+
+**8. Run a function.**
 
 ```python
 import sk8s
@@ -78,7 +117,7 @@ fut = sk8s.submit(lambda x: x + 1, 41)  # same, but returns a Future immediately
 print(fut.result(timeout=120))          # 42
 ```
 
-**6. Map over many inputs.** `batch_size` packs several items into each Job, and an item
+**9. Map over many inputs.** `batch_size` packs several items into each Job, and an item
 that raises fails only itself:
 
 ```python
@@ -99,7 +138,7 @@ When some items of a `map` fail, every other item is still collected and
 `sk8s.MapFailed` lists the failing indices (`e.failures`). Use `submit_map` /
 `submit_starmap` to get the futures themselves.
 
-**7. Start a detached workflow.** The driver function runs in the cluster as a Job and can
+**10. Start a detached workflow.** The driver function runs in the cluster as a Job and can
 submit its own Jobs. Your process does not need to stay alive:
 
 > **Rule of thumb:** a plain `submit()`/`run()` is tethered to your Python session — if the process dies, the job still completes but its result is stranded. For anything you might walk away from, use `submit_workflow()` and reattach later with `attach(id)`.
@@ -126,7 +165,7 @@ print(same.result(timeout=300))          # 285, then the finished workflow is de
 `sk8s workflows` lists workflows, `sk8s logs <id>` prints a driver's output and
 `sk8s kill <id>` deletes one with everything it owns.
 
-**8. Serve a function.** `serve()` runs a function that blocks forever (here an HTTP
+**11. Serve a function.** `serve()` runs a function that blocks forever (here an HTTP
 server) as a Deployment plus a ClusterIP Service. The URL works inside the cluster, so we
 call it from a Job (from your machine, `kubectl port-forward -n sk8s service/hello 8080`):
 
@@ -165,7 +204,7 @@ print(sk8s.run(call, svc.url))  # hello from sk8s
 svc.delete()                    # services live until you delete them
 ```
 
-**9. Use a volume.** A volume is a PersistentVolumeClaim mounted at `/mnt/<name>`.
+**12. Use a volume.** A volume is a PersistentVolumeClaim mounted at `/mnt/<name>`.
 `keep=True` makes it independent of any workflow (otherwise it is deleted with the
 workflow that created it):
 
@@ -199,21 +238,48 @@ sk8s.configure(cluster=sk8s.LocalCluster())
 print(sk8s.run(lambda x: x * 2, 21))  # 42
 ```
 
+### No registry? Building directly into minikube
+
+If you cannot or would rather not run the registry addon, build the worker image straight
+into minikube's image store. The Python minor-version rule from step 6 still applies; pass
+`--build-opt=opt=build-arg:PYTHON_VERSION=3.12` for another version (see
+[docs/dev-setup.md](docs/dev-setup.md) for the syntax per container runtime).
+
+```bash
+minikube image build -t sk8s:dev -f docker/Dockerfile.dev .
+minikube image ls | grep sk8s:dev          # minikube can exit 0 even when the build failed
+export SK8S_IMAGE=sk8s:dev SK8S_PULL_POLICY=Never
+```
+
+**Why `Never`?** A bare tag like `sk8s:dev` names no registry, so Kubernetes resolves it to
+`docker.io/library/sk8s:dev`. With the default `IfNotPresent` policy, a local build that
+failed silently (see the `grep` above) would not be an error: the node would fall back to
+pulling that name from Docker Hub and your function would run inside whatever image happens
+to live there, a stranger's image under a name you assumed was yours. `Never` makes the
+kubelet use only what is already on the node, so a missing build fails loudly
+(`ErrImageNeverPull`) instead. A registry-qualified name such as `localhost:5000/...` does
+not have this problem, because it can only resolve to a registry you control, which is why
+the main path above needs no override.
+
+`Never` is session state (an environment variable, or `pull_policy` in your config), and it
+breaks registry images, which have to be pulled. When you switch to the registry flow,
+`unset SK8S_IMAGE SK8S_PULL_POLICY` (and remove any `pull_policy` or `image` line you added
+to `config.toml`) before setting `SK8S_IMAGE` as in step 7.
+
 ## Custom images
 
 The official worker image has only sk8s and the standard library. To add packages, layer
 them on a base image.
 
-### Use the minikube registry addon
+### Through the registry
 
-A local registry makes minikube behave like a real cluster: plain `docker build` and
-`docker push`, and jobs pull by name with the default pull policy.
+This continues the quickstart: the registry addon is enabled, the step 5 port-forward is
+running, and `SK8S_IMAGE` (or `image` in your config) points at your pushed base. A custom
+image is a Dockerfile layered on that base, built, pushed and pulled with the same
+`localhost:5000/` prefix and the default pull policy:
 
 ```bash
-minikube addons enable registry
-kubectl -n kube-system port-forward svc/registry 5000:80 &   # keep this running while you push
-
-# a Dockerfile layered on your base image, e.g. FROM sk8s:dev + RUN pip install pysam
+# a Dockerfile layered on your base, e.g. FROM localhost:5000/sk8s-base:dev + RUN pip install pysam
 docker build -t localhost:5000/pysam-worker:1 .
 docker push localhost:5000/pysam-worker:1
 ```
@@ -226,8 +292,9 @@ print(sk8s.run(lambda: __import__("pysam").__version__, image="localhost:5000/py
 
 Pods resolve `localhost:5000` through the addon's node-local proxy, so no pull-policy
 override is needed. Setting `image_prefix = "localhost:5000/"` in
-`~/.config/sk8s/config.toml` prepends that registry to the default worker image name,
-the same way you would point a real cluster at an ECR or GAR mirror prefix.
+`~/.config/sk8s/config.toml` prepends that registry to the official worker image name
+(used only when `image` is not set), the same way you would point a real cluster at an ECR
+or GAR mirror prefix.
 
 ### From Python
 
@@ -236,9 +303,9 @@ The same machinery is a small API, so a script can build its own worker image:
 ```python
 from sk8s import images
 
-df = images.generate_dockerfile(base="sk8s:dev", pip=["pysam"])
+df = images.generate_dockerfile(base="localhost:5000/sk8s-base:dev", pip=["pysam"])
 print(df)
-# FROM sk8s:dev
+# FROM localhost:5000/sk8s-base:dev
 # RUN pip install --no-cache-dir pysam
 ```
 
@@ -246,18 +313,19 @@ print(df)
 tag. With `push=True` it is the one-call version of the registry workflow above:
 
 ```python
-tag = images.build("localhost:5000/pysam-worker:1", base="sk8s:dev", pip=["pysam"], push=True)
+tag = images.build("localhost:5000/pysam-worker:1", base="localhost:5000/sk8s-base:dev", pip=["pysam"], push=True)
 
 # or bring your own Dockerfile text
 tag = images.build("localhost:5000/pysam-worker:1", dockerfile=df)
 images.push(tag)   # push separately, if you built without push=True
 ```
 
-`docker build` runs on your host Docker daemon, which does not see the `sk8s:dev` you
-built into minikube in the quickstart. Build it there too (`docker build -t sk8s:dev -f
-docker/Dockerfile.dev .`), or pass any base the daemon can pull. `images.default_base()`
-returns the base used when you omit `base=`: the configured worker image, so an exported
-`SK8S_IMAGE` (or `image` in your config) is honored. Every function that shells out takes
+`docker build` runs on your host Docker daemon, which pulls the base through the same
+`localhost:5000` port-forward you use for pushing, so keep it running. (A base built with
+`minikube image build` is invisible to that daemon.) `images.default_base()` returns the
+base used when you omit `base=`: the configured worker image, so an exported `SK8S_IMAGE`
+(or `image` in your config) is honored, and after the quickstart that is your registry
+base. Every function that shells out takes
 an optional `runner=` callable (default `subprocess.run`) so tests can inject a fake.
 `conda=[...]` is also accepted, but that path installs sk8s from PyPI and will not work
 until the first PyPI release.
@@ -270,8 +338,6 @@ import sk8s
 print(sk8s.run(lambda: __import__("pysam").__version__, image=tag))
 sk8s.configure(image=tag)
 ```
-
-(Unset the quickstart's `SK8S_PULL_POLICY=Never` first: a registry image has to be pulled.)
 
 ### On a real cluster: `sk8s image build`
 
