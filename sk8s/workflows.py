@@ -111,6 +111,7 @@ class WorkflowHandle:
         self._owns_cluster = owns_cluster
         self._killed = False
         self._deleted = False
+        self._warned: set[str] = set()
         self._lock = threading.Lock()
 
     def _anchor(self, missing: str | None = None) -> Any:
@@ -163,6 +164,19 @@ class WorkflowHandle:
         except concurrent.futures.InvalidStateError:
             pass  # resolved first (result or kill): keep that outcome
 
+    def _transient(self, what: str, exc: Exception) -> None:
+        """Log a swallowed transient error: a warning the first time each error type is seen
+        on this handle, debug afterwards (a long wait must not flood the log)."""
+        kind = type(exc).__name__
+        if kind in self._warned:
+            log.debug("%s failed for workflow %s (%s); retrying", what, self.id, kind, exc_info=True)
+            return
+        self._warned.add(kind)
+        log.warning(
+            "%s failed for workflow %s (%s: %s); retrying next slice (further %s errors are "
+            "logged at debug)", what, self.id, kind, exc, kind,
+        )
+
     def _check_alive(self, fut: JobFuture) -> None:
         """Called while the driver is unresolved. The watcher only reports transitions it
         sees, so a driver that finished before we watched (or was reaped by the TTL
@@ -175,8 +189,8 @@ class WorkflowHandle:
             )
         except Sk8sError:
             raise
-        except Exception:  # noqa: BLE001 — transient API trouble must not abort a long wait
-            log.debug("anchor read failed for workflow %s; retrying next slice", self.id, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — transient API trouble must not abort a long wait
+            self._transient("anchor read", exc)
             return
         if anchor is None:
             try:
@@ -194,8 +208,8 @@ class WorkflowHandle:
             jobs = self._jobs()
         except Sk8sError:
             raise
-        except Exception:  # noqa: BLE001 — transient API trouble must not abort a long wait
-            log.debug("job list failed for workflow %s; retrying next slice", self.id, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — transient API trouble must not abort a long wait
+            self._transient("job list", exc)
             return
         job = next((j for j in jobs if j.metadata.name == name), None)
         phase = "failed" if job is None else job_phase(job)  # reaped: result blob decides

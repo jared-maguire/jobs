@@ -1,6 +1,6 @@
 import pytest
 
-from tests.fakes import FakeCoreV1
+from tests.fakes import FakeBatchV1, FakeCoreV1
 
 
 @pytest.fixture(autouse=True)
@@ -9,3 +9,4 @@ def _no_real_cluster_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
     import sk8s.worker as worker
 
     monkeypatch.setattr(worker, "_core_api", lambda: FakeCoreV1())
+    monkeypatch.setattr(worker, "_batch_api", lambda: FakeBatchV1())

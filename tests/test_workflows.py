@@ -415,3 +415,22 @@ def test_check_alive_tolerates_transient_api_errors(tmp_path, monkeypatch) -> No
     h.batch.jobs[(NS, driver)].status = client.V1JobStatus(succeeded=1)
     assert handle.result(timeout=10) == 8
     assert flaky == {"read": 0, "list": 0}  # both failures were hit and survived
+
+
+def test_transient_errors_warn_once_per_error_type(tmp_path, monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    import logging
+
+    h = Harness(tmp_path)
+    handle = workflows.submit_workflow(double, 4, cluster=h.cluster)
+
+    def read(name: str, namespace: str) -> Any:
+        raise ApiException(status=500, reason="Internal Server Error")
+
+    monkeypatch.setattr(h.core, "read_namespaced_config_map", read)
+    fut = handle._driver_future()
+    with caplog.at_level(logging.DEBUG, logger="sk8s.workflows"):
+        for _ in range(3):
+            handle._check_alive(fut)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "ApiException" in warnings[0].getMessage()
+    assert len([r for r in caplog.records if r.levelno == logging.DEBUG]) == 2

@@ -25,12 +25,18 @@ def _core_api() -> Any:
     return k8s.core_api()
 
 
-def _sweep(environ: Mapping[str, str], store: Any) -> None:
+def _batch_api() -> Any:
+    from sk8s import k8s
+
+    return k8s.batch_api()
+
+
+def _sweep(environ: Mapping[str, str]) -> None:
     """Best-effort retention sweep of the pod's namespace; never raises.
 
     Skipped when SK8S_SWEEP=0 or when this is not a job-mode pod (no SK8S_RESULT_KEY).
-    The pod's own workflow is excluded so a sweep can never cascade-delete the job
-    that is running it.
+    Each anchor's blobs are removed from the store it recorded. The pod's own workflow
+    is excluded so a sweep can never cascade-delete the job that is running it.
     """
     if environ.get("SK8S_SWEEP") == "0" or not environ.get("SK8S_RESULT_KEY"):
         return
@@ -39,7 +45,7 @@ def _sweep(environ: Mapping[str, str], store: Any) -> None:
 
         own = environ.get("SK8S_WORKFLOW_ID")
         clean(
-            environ.get("SK8S_NAMESPACE"), core_api=_core_api(), store=store,
+            environ.get("SK8S_NAMESPACE"), core_api=_core_api(), batch_api=_batch_api(),
             exclude=(own,) if own else (),
         )
     except Exception:  # noqa: BLE001 — a sweep must never fail the job
@@ -52,7 +58,7 @@ def main(environ: Mapping[str, str]) -> int:
     )
     payload = store.get(environ["SK8S_PAYLOAD_URI"])
     result_key = environ["SK8S_RESULT_KEY"]
-    _sweep(environ, store)
+    _sweep(environ)
     owner = None
     if environ.get("SK8S_ANCHOR_NAME") and environ.get("SK8S_ANCHOR_UID"):
         # Not a controller reference: the anchor already controls the Job itself.
