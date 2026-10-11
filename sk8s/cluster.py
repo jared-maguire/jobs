@@ -71,6 +71,7 @@ class Cluster:
         *,
         batch_api: Any | None = None,
         core_api: Any | None = None,
+        apps_api: Any | None = None,
         store: BlobStore | None = None,
         watcher_events: Callable[[], Iterator[JobEvent]] | None = None,
         **overrides: Any,
@@ -82,6 +83,7 @@ class Cluster:
             self.config = dataclasses.replace(self.config, namespace=k8s.current_namespace())
         self._batch = batch_api
         self._core = core_api
+        self._apps = apps_api
         self._store = store
         self.workflow_id = os.environ.get("SK8S_WORKFLOW_ID") or "wf-" + spec.job_name("x").rsplit("-", 1)[1]
         self._futures: dict[str, tuple[JobFuture, bool, str]] = {}  # name -> (future, keep_results, image)
@@ -104,6 +106,13 @@ class Cluster:
             from sk8s import k8s
             self._core = k8s.core_api()
         return self._core
+
+    @property
+    def apps(self) -> Any:
+        if self._apps is None:
+            from sk8s import k8s
+            self._apps = k8s.apps_api()
+        return self._apps
 
     @property
     def store(self) -> BlobStore:
