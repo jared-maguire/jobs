@@ -27,7 +27,7 @@ independently mergeable software.
 | 5 | Services: serve(), Service handle, get_service | `feat/services` | 1 | **Merged** (PR #73) |
 | 6 | Images: published base images, builders, release CI | `feat/images` | 1 | **Merged** (PR #71) |
 | 7 | Cluster config: ClusterProfile, `sk8s config`/`doctor`, CLI (local/generic only) | `feat/cluster-config` | 1, 2 | **Merged** (PR #76) |
-| 8 | CI & docs: minikube per-PR workflow, stress test, docs site, migration guide (GKE/EKS TABLED) | `feat/ci-docs` | 3, 6, 7 | **In progress** (`...plan-8-ci-docs.md`) |
+| 8 | CI & docs: minikube per-PR workflow, stress test, docs site, migration guide (GKE/EKS TABLED) | `feat/ci-docs` | 3, 6, 7 | **Merged** (PR #77) |
 
 Execution notes (2026-10-10): Jared waived plan-review gates ("get it all done").
 Integration suites share one minikube → integration tasks run serially across
@@ -42,3 +42,5 @@ task waits on 2; its PVC core does not).
 Each plan is executed subagent-driven: implementer agents work tasks in the
 feature clone, a reviewer agent checks each task, and the finished branch gets
 a whole-branch review before its PR into `version-2`.
+
+**2026-10-10: ALL 8 PLANS MERGED. The v2 rebuild on `version-2` is complete** (GKE/EKS adapters + cloud CI tabled; release checklist in plan-8 history and docs/superpowers/decisions-log.md).
