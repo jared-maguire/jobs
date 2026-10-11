@@ -71,7 +71,6 @@ def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
     ["image", "build"],  # --tag required
     ["image", "build", "--tag", "t"],  # no deps
     ["image", "build", "--tag", "t", "--pip", "x", "--channel", "c"],  # channel w/o conda
-    ["image", "build", "--tag", "t", "--pip", "x", "--push", "--minikube"],
     ["image", "push"],
     ["clean", "--older-than", "garbage"],
     ["config", "--no-such-flag"],
@@ -109,18 +108,6 @@ def test_image_build_base_parses_and_passes_through(monkeypatch: pytest.MonkeyPa
     assert ns.base == "sk8s:dev"
     assert cli.build_parser().parse_args(["image", "build", "--tag", "t", "--pip", "x"]).base is None
 
-    seen: dict[str, Any] = {}
-
-    def fake_minikube(tag: str, *, dockerfile: str | None = None, **kw: Any) -> str:
-        seen["dockerfile"] = dockerfile
-        return tag
-
-    monkeypatch.setattr(images, "build_in_minikube", fake_minikube)
-    assert cli.run(
-        ["image", "build", "--tag", "t:1", "--base", "sk8s:dev", "--pip", "pysam", "--minikube"]
-    ) == 0
-    assert seen["dockerfile"].startswith("FROM sk8s:dev\n")
-
     built: list[dict[str, Any]] = []
     monkeypatch.setattr(images, "build", lambda tag, **kw: built.append(kw) or tag)
     assert cli.run(["image", "build", "--tag", "t:1", "--base", "b:1", "--pip", "x"]) == 0
@@ -131,24 +118,9 @@ def test_image_build_base_with_conda_is_rejected(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("docker ran"))
-    for extra in ([], ["--minikube"]):
-        rc = cli.run(["image", "build", "--tag", "t:1", "--base", "b:1", "--conda", "x", *extra])
-        assert rc == 1
-        assert "base cannot be combined with conda" in capsys.readouterr().err
-
-
-def test_image_build_minikube_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, str | None]] = []
-
-    def fake_minikube(tag: str, *, dockerfile: str | None = None, **kw: Any) -> str:
-        calls.append((tag, dockerfile))
-        return tag
-
-    monkeypatch.setattr(images, "build_in_minikube", fake_minikube)
-    monkeypatch.setattr(images, "build", lambda *a, **k: pytest.fail("docker build used"))
-    assert cli.run(["image", "build", "--tag", "t:1", "--pip", "numpy", "--minikube"]) == 0
-    (tag, dockerfile), = calls
-    assert tag == "t:1" and dockerfile is not None and "pip install" in dockerfile and "numpy" in dockerfile
+    rc = cli.run(["image", "build", "--tag", "t:1", "--base", "b:1", "--conda", "x"])
+    assert rc == 1
+    assert "base cannot be combined with conda" in capsys.readouterr().err
 
 
 def test_image_push_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
