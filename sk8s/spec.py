@@ -46,6 +46,11 @@ def build_job(
         client.V1EnvVar(name="SK8S_PAYLOAD_URI", value=payload_uri),
         client.V1EnvVar(name="SK8S_RESULT_KEY", value=result_key),
         client.V1EnvVar(name="SK8S_WORKFLOW_ID", value=workflow_id),
+        # Nested submissions from inside the pod build their Cluster from SK8S_* env, so
+        # they must inherit how this pod itself was launched.
+        client.V1EnvVar(name="SK8S_IMAGE", value=image),
+        client.V1EnvVar(name="SK8S_PULL_POLICY", value=pull_policy),
+        client.V1EnvVar(name="SK8S_SERVICE_ACCOUNT", value=service_account),
     ]
     if anchor_name and anchor_uid:  # lets the worker own its result blob via the anchor
         env.append(client.V1EnvVar(name="SK8S_ANCHOR_NAME", value=anchor_name))

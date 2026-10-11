@@ -33,6 +33,10 @@ def test_basic_fields() -> None:
     assert env["SK8S_RESULT_KEY"] == "wf-x/job-abc123/result"
     assert env["SK8S_STORE"] == "k8s"
     assert env["SK8S_WORKFLOW_ID"] == "wf-x"
+    # nested in-pod submissions inherit image / pull policy / service account
+    assert env["SK8S_IMAGE"] == c.image
+    assert env["SK8S_PULL_POLICY"] == c.image_pull_policy
+    assert env["SK8S_SERVICE_ACCOUNT"]
 
 
 def test_resources_and_volumes() -> None:

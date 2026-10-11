@@ -51,7 +51,8 @@ def test_no_blobs_left_behind(cluster) -> None:  # type: ignore[no-untyped-def]
     while time.monotonic() < deadline:
         items = cluster.core.list_namespaced_config_map(
             namespace=cluster.config.namespace,
-            label_selector=f"sk8s/workflow-id={cluster.workflow_id}",
+            # The workflow anchor (sk8s/kind=anchor) legitimately outlives the job.
+            label_selector=f"sk8s/workflow-id={cluster.workflow_id},sk8s/kind!=anchor",
         ).items
         if not items:
             break

@@ -24,3 +24,10 @@
    ```
    SK8S_INTEGRATION=1 pytest tests/integration -v
    ```
+
+   The workflow suite (`tests/integration/test_workflows.py`) has jobs submit
+   jobs, so the in-pod worker must run *this* branch's code. Tag that build
+   `sk8s-dev-workflows:latest` (override with `SK8S_WORKFLOW_TEST_IMAGE`) and run
+   the older suite against it with `SK8S_TEST_IMAGE=sk8s-dev-workflows:latest`.
+   Workflows use the same `sk8s` ServiceAccount RBAC as above (jobs and
+   configmaps: get/list/watch/create/delete/patch).
