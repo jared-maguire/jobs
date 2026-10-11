@@ -2,7 +2,7 @@
 
 This page is for people hacking on sk8s itself: running the integration suites,
 building worker images, and testing against MinIO. If you just want to *use*
-sk8s on minikube, the [README quickstart](../README.md#quickstart) is shorter.
+sk8s on minikube, the [README quickstart](../README.md#quickstart-about-5-minutes) is shorter.
 See also: [migration guide](migration-v1-to-v2.md) and
 [conventions reference](conventions.md) (labels, workflow ids, blob keys).
 
@@ -40,8 +40,22 @@ sk8s doctor
 
    ```
    minikube image build -t sk8s-dev:latest -f docker/Dockerfile.dev .
-   # other Python: minikube image build --build-opt=build-arg=PYTHON_VERSION=3.12 ...
    ```
+
+   For a different Python, pass the build arg. The flag depends on minikube's
+   container runtime (`minikube profile list` shows it):
+
+   ```
+   # containerd runtime (buildkit): verified with minikube 1.38
+   minikube image build -t sk8s-dev:latest -f docker/Dockerfile.dev \
+     --build-opt=opt=build-arg:PYTHON_VERSION=3.12 .
+   # docker runtime: the form CI uses
+   minikube image build -t sk8s-dev:latest -f docker/Dockerfile.dev \
+     --build-opt=build-arg=PYTHON_VERSION=3.12 .
+   ```
+
+   `minikube image build` can exit 0 even when the build fails (for example an
+   unresolvable `FROM`), so check `minikube image ls | grep sk8s-dev` after building.
 
 ## Legacy default-namespace RBAC
 
