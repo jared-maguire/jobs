@@ -59,6 +59,9 @@ def build_job(
         env.append(client.V1EnvVar(name="SK8S_ANCHOR_UID", value=anchor_uid))
     if store_endpoint:
         env.append(client.V1EnvVar(name="SK8S_S3_ENDPOINT", value=store_endpoint))
+        # Nested clusters rebuild their Config from SK8S_* env (load_config's generic layer),
+        # so they need the config-level name too to propagate the endpoint onward.
+        env.append(client.V1EnvVar(name="SK8S_STORE_ENDPOINT", value=store_endpoint))
     for key, value in (store_env or {}).items():
         env.append(client.V1EnvVar(name=key, value=value))
     resources = None

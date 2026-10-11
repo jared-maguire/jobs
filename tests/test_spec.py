@@ -82,6 +82,20 @@ def test_s3_endpoint_exported_only_when_configured() -> None:
     assert _env(make(store_endpoint="http://minio:9000"))["SK8S_S3_ENDPOINT"] == "http://minio:9000"
 
 
+def test_store_endpoint_exported_and_round_trips_through_load_config(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from pathlib import Path
+
+    from sk8s.config import load_config
+
+    assert "SK8S_STORE_ENDPOINT" not in _env(make())
+    assert "SK8S_STORE_ENDPOINT" not in _env(make(store_endpoint=None))
+    env = _env(make(store_endpoint="http://minio:9000"))
+    assert env["SK8S_STORE_ENDPOINT"] == "http://minio:9000"
+    # In-pod: the nested Cluster's config is rebuilt from the pod env and must see it.
+    cfg = load_config(path=Path(tmp_path / "absent.toml"), env=env)
+    assert cfg.store_endpoint == "http://minio:9000"
+
+
 def test_store_env_exported_to_worker() -> None:
     assert "AWS_ACCESS_KEY_ID" not in _env(make())
     env = _env(make(store_env={"AWS_ACCESS_KEY_ID": "k", "AWS_SECRET_ACCESS_KEY": "s"}))

@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - version-2
+
+# A newer push to the same PR/branch supersedes the in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev,s3,gcs]"
+
+      - name: Unit tests
+        run: pytest -m "not integration"
+
+      - name: Type check
+        run: mypy
+
+  # The real integration suite against a live minikube cluster (not mocks).
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # The worker's Python minor version must match the client's (serialize handshake),
+      # so the same value drives setup-python and the image build-arg.
+      PYTHON_VERSION: "3.12"
+      SK8S_INTEGRATION: "1"
+      # Suites that don't pin a namespace follow this; the RBAC below lives in "default".
+      SK8S_NAMESPACE: default
+      SK8S_TEST_IMAGE: sk8s-dev-ci:ci
+      SK8S_WORKFLOW_TEST_IMAGE: sk8s-dev-ci:ci
+      SK8S_CONFIG_TEST_IMAGE: sk8s-dev-ci:ci
+      SK8S_VOLUMES_TEST_IMAGE: sk8s-dev-ci:ci
+      SK8S_SERVICES_TEST_IMAGE: sk8s-dev-ci:ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev,s3,gcs]"
+
+      - uses: medyagh/setup-minikube@v0
+        with:
+          # the build-opt form below is buildctl syntax; pin the runtime so it's deterministic
+          container-runtime: containerd
+
+      # Build into minikube's own image store so pods (pull_policy Never) find it.
+      - name: Build worker image into minikube
+        run: |
+          minikube image build -t sk8s-dev-ci:ci \
+            --build-opt=opt=build-arg:PYTHON_VERSION="$PYTHON_VERSION" \
+            -f docker/Dockerfile.dev .
+          minikube image ls
+
+      # Same commands as docs/dev-setup.md (default-namespace RBAC); deliberately not
+      # `sk8s config`, to keep CI deterministic.
+      - name: Apply RBAC (default namespace)
+        run: |
+          kubectl create serviceaccount sk8s
+          kubectl create role sk8s --verb=get,list,watch,create,delete,patch \
+            --resource=jobs,pods,pods/log,configmaps,persistentvolumeclaims,deployments.apps,services
+          kubectl create rolebinding sk8s --role=sk8s --serviceaccount=default:sk8s
+
+      - name: Integration tests
+        run: pytest tests/integration -m "integration and not stress" -v
+
+      - name: Cluster diagnostics
+        if: failure()
+        run: |
+          kubectl get all,configmaps,pvc -A -o wide || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -n 80 || true
+          kubectl logs -n default -l app.kubernetes.io/managed-by=sk8s --tail=100 --prefix || true

@@ -44,7 +44,7 @@ SHELL_READY_TIMEOUT = 120.0
 # 30s grace period.
 _SHELL_HANG = "trap 'exit 0' TERM INT; sleep 2147483647 & wait"
 _POD_FATAL_WAITING = {
-    "ImagePullBackOff", "ErrImagePull", "InvalidImageName",
+    "ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull",
     "CreateContainerConfigError", "CrashLoopBackOff",
 }
 

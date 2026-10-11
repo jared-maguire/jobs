@@ -25,7 +25,10 @@ sk8s = "sk8s.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: requires a live Kubernetes cluster (SK8S_INTEGRATION=1)"]
+markers = [
+    "integration: requires a live Kubernetes cluster (SK8S_INTEGRATION=1)",
+    "stress: long multi-client stress test (integration; excluded from the per-PR CI run)",
+]
 
 [tool.mypy]
 strict = true

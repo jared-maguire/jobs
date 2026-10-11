@@ -1,3 +1,4 @@
+import os
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -13,7 +14,7 @@ from tests.integration.conftest import requires_cluster
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(600)]
 
-IMAGE = "sk8s-dev-services:latest"
+IMAGE = os.environ.get("SK8S_SERVICES_TEST_IMAGE", "sk8s-dev-services:latest")
 NAME = "sk8s-it-http"
 PORT = 8080
 

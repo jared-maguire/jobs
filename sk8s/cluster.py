@@ -29,8 +29,10 @@ JOB_OPTIONS = {
     "pull_policy", "keep_results",
 }
 
-_WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName"}
+_WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
 _SELECTOR = "app.kubernetes.io/managed-by=sk8s"
+# Workflow ids that collide with non-workflow key prefixes in the store.
+RESERVED_WORKFLOW_IDS = frozenset({"svc", "doctor"})
 _FETCH_ATTEMPTS = 3
 _RETRY_DELAY = 0.5  # seconds between result-fetch attempts (store write visibility lag)
 _K8S_DEFAULT_BACKOFF_LIMIT = 6
@@ -105,10 +107,10 @@ class Cluster:
         # workflow: use its anchor, never delete it from this cluster.
         inherited = workflow_id or os.environ.get("SK8S_WORKFLOW_ID")
         self.workflow_id = inherited or new_workflow_id()
-        if self.workflow_id == "svc":
+        if self.workflow_id in RESERVED_WORKFLOW_IDS:
             raise ValueError(
-                "workflow id 'svc' is reserved for service blobs (svc/<name>/...); "
-                "check SK8S_WORKFLOW_ID"
+                f"workflow id {self.workflow_id!r} is reserved (svc/ holds service blobs, "
+                "doctor/ holds doctor probe keys); check SK8S_WORKFLOW_ID"
             )
         self._adopted = bool(inherited)
         self.detached = detached

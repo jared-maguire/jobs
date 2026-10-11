@@ -190,8 +190,9 @@ def test_workflow_id_from_environment(tmp_path, monkeypatch) -> None:  # type: i
     assert h.cluster.workflow_id == "wf-from-env"
 
 
-def test_workflow_id_svc_is_reserved(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv("SK8S_WORKFLOW_ID", "svc")
+@pytest.mark.parametrize("reserved", ["svc", "doctor"])
+def test_workflow_id_reserved(tmp_path, monkeypatch, reserved) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("SK8S_WORKFLOW_ID", reserved)
     with pytest.raises(ValueError, match="reserved"):
         Harness(tmp_path)
 
@@ -446,13 +447,15 @@ def test_pull_probe_tolerates_missing_container_state(tmp_path) -> None:  # type
     assert list(h.cluster._pull_failures()) == []
 
 
-def test_pull_probe_detects_image_pull_backoff(tmp_path) -> None:  # type: ignore[no-untyped-def]
+@pytest.mark.parametrize("reason", ["ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"])
+def test_pull_probe_detects_pull_failure_reasons(tmp_path, reason: str) -> None:  # type: ignore[no-untyped-def]
+    # ErrImageNeverPull (pull_policy Never + image absent) used to hang futures forever.
     h = Harness(tmp_path)
     fut = h.cluster.submit(lambda: 1)
 
     class Core(FakeCoreV1):
         def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
-            waiting = SimpleNamespace(reason="ImagePullBackOff")
+            waiting = SimpleNamespace(reason=reason)
             cs = SimpleNamespace(state=SimpleNamespace(waiting=waiting))
             pod = SimpleNamespace(
                 metadata=SimpleNamespace(labels={"job-name": fut.job_name}),
