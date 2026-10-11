@@ -116,6 +116,23 @@ def test_service_mode_does_not_need_result_key(tmp_path: Path) -> None:
     assert code == 1
 
 
+def test_service_mode_sigterm_is_clean_shutdown(tmp_path: Path) -> None:
+    import signal
+
+    def serve_until_term() -> None:
+        import os
+        import signal
+        import time
+
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(30)  # interrupted by the handler's exception
+
+    before = signal.getsignal(signal.SIGTERM)
+    code, _ = run_service_worker(tmp_path, serve_until_term)
+    assert code == 0
+    assert signal.getsignal(signal.SIGTERM) is before  # handler restored
+
+
 def test_service_flag_other_than_1_is_job_mode(tmp_path: Path) -> None:
     store = LocalStore(tmp_path)
     payload_uri = store.put("wf/j/payload", serialize.encode_payload(lambda: 5, (), {}))

@@ -6,13 +6,18 @@ the store itself is unreachable.
 
 Service mode (SK8S_SERVICE=1): the function must block forever serving requests.
 No result blob is ever written; returning or raising both exit 1 so the
-Deployment restarts the pod.
+Deployment restarts the pod. SIGTERM (pod deletion, scale-down, rollout) is a
+clean shutdown: the process is PID 1 in the container, where an unhandled
+SIGTERM is ignored, so without a handler every delete waits out the full
+termination grace period before SIGKILL.
 """
 from __future__ import annotations
 
 import logging
 import os
+import signal
 import sys
+import threading
 from typing import Mapping
 
 from sk8s import serialize
@@ -21,16 +26,33 @@ from sk8s.store import get_store
 log = logging.getLogger("sk8s.worker")
 
 
+class _Terminated(BaseException):
+    """Raised from the SIGTERM handler to unwind the service function."""
+
+
+def _on_sigterm(signum: int, frame: object) -> None:
+    raise _Terminated()
+
+
 def _run_service(environ: Mapping[str, str]) -> int:
     store = get_store(
         environ["SK8S_STORE"], namespace=environ.get("SK8S_NAMESPACE")
     )
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.signal(signal.SIGTERM, _on_sigterm)
     try:
         func, args, kwargs = serialize.decode_payload(store.get(environ["SK8S_PAYLOAD_URI"]))
         func(*args, **kwargs)
+    except _Terminated:
+        log.info("SIGTERM received; shutting down")
+        return 0
     except BaseException:  # noqa: BLE001 — any exit from a service function is a failure
         log.exception("service function raised")
         return 1
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
     log.error("service function returned; service functions must block")
     return 1
 
