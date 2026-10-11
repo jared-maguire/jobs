@@ -24,6 +24,10 @@ class VersionMismatch(Sk8sError):
     pass
 
 
+class ResultDecodeError(Sk8sError):
+    """The job succeeded but its pickled result cannot be loaded on this client."""
+
+
 class JobTimeout(Sk8sError, TimeoutError):
     def __init__(self, job_name: str, timeout: float) -> None:
         self.job_name = job_name

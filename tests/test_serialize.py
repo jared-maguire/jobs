@@ -1,10 +1,11 @@
+import decimal
 import json
 import sys
 
 import pytest
 
 from sk8s import serialize
-from sk8s.errors import RemoteException, RemoteTraceback, VersionMismatch
+from sk8s.errors import RemoteException, RemoteTraceback, ResultDecodeError, Sk8sError, VersionMismatch
 
 
 def test_payload_roundtrip() -> None:
@@ -56,3 +57,25 @@ def test_unimportable_exception_falls_back() -> None:
         serialize.decode_result(head + b"\n" + body)
     assert "boom" in str(exc_info.value)
     assert "Traceback" in exc_info.value.tb_text
+
+
+def test_undecodable_ok_result_raises_decode_error() -> None:
+    # A successful job whose result references a module the client lacks
+    # (e.g. numpy.float64 without numpy): corrupt the module name in the pickle.
+    blob = serialize.encode_result(decimal.Decimal("1.5"))
+    head, _, body = blob.partition(b"\n")
+    assert b"decimal" in body
+    body = body.replace(b"decimal", b"decimaX")
+    with pytest.raises(ResultDecodeError) as exc_info:
+        serialize.decode_result(head + b"\n" + body)
+    assert isinstance(exc_info.value, Sk8sError)
+    assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
+    msg = str(exc_info.value)
+    assert "job succeeded" in msg
+    assert "decimaX" in msg
+    assert "install the missing module" in msg
+
+
+def test_ok_result_with_builtin_types_unaffected() -> None:
+    v = {"a": [1, 2.5, (3, None)], 4: "x"}
+    assert serialize.decode_result(serialize.encode_result(v)) == v
