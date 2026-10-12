@@ -16,7 +16,8 @@ Job options (kwargs): `image`, `requests`, `limits` (e.g. `requests={"cpu":
 "500m", "memory": "1Gi"}`), `volumes`, `backoff_limit`, `service_account`,
 `name_prefix`, `privileged`, `pull_policy`, `keep_results`, `expect` (a QC gate run
 in the worker on the result: `None`/`True` passes, a string or a raise fails with
-`ExpectationFailed`; see references/advanced.md). `map`/`starmap`/`submit_map` add
+`ExpectationFailed`; see references/advanced.md), `dry_run` (see "Previewing and
+inspecting"). `map`/`starmap`/`submit_map` add
 `batch_size` (N items per job), `max_concurrent`, `pilot` (run the first N items,
 rest only if all N are green; else `PilotFailed`), and `map`/`starmap` also `timeout` — one overall
 deadline for the whole map, **not** a per-job kill; `submit`/`submit_map` accept
@@ -181,11 +182,56 @@ sk8s data describe gs://lab/runs/oct/ [--json] [--samples 5] [--max-objects 1000
   `sk8s[s3]` extra and ambient credentials; failures are typed `Sk8sError`s naming the fix.
 - Everything is JSON-serializable. Parquet, pysam-backed extras and lineage are not here yet.
 
+## Previewing and inspecting
+
+**`dry_run=True`** on `submit`, `map`, `starmap`, `submit_map`, `submit_starmap`,
+`run` and `submit_workflow` builds everything a submission would send —
+validation, mount parsing, image/store/namespace resolution, the pickled payload
+(unpicklable args and over-size ConfigMap blobs fail *now*), the full serialized
+`V1Job` — and creates **nothing**: no anchor, no payload upload, no API call.
+It returns a `sk8s.DryRun`:
+
+```python
+dr = sk8s.map(align, samples, dry_run=True, requests={"cpu": "4", "memory": "8Gi"})
+dr.n_jobs, dr.total_cpu_request, dr.total_memory_request   # 48, 192.0 cores, bytes
+dr.image, dr.store, dr.namespace                           # resolved, as submit would
+dr.jobs[0]                                                 # ONE representative Job body (dict)
+dr.notes                                                   # batching / clone / placeholder caveats
+json.dumps(dr.to_dict())
+```
+
+For fan-outs only the first job's body is serialized (`n_jobs` counts batches
+when `batch_size` is set). The owner reference / `SK8S_ANCHOR_*` env carry a
+placeholder uid (the anchor does not exist yet); read-only mounts show the
+volume itself as the claim (a RWO+ROX volume's hidden clone is chosen at real
+submit). `LocalCluster` raises `ValueError` (no Job to preview).
+
+**`sk8s.explain("wf-...")`** (CLI: `sk8s explain wf-...`, `--json` for the dict)
+rebuilds the whole picture from cluster + store state, from any process — an
+agent with zero context needs nothing else. Read-only. Keys: `workflow` (id,
+namespace, detached, age, retention), `driver` (phase, `logs_tail`), `jobs`
+(name, role, phase `pending|running|succeeded|failed`, timings, requests, pods,
+and for stuck pods `waiting_code`/`waiting_reason` — image-pull, unschedulable,
+volume attach/provision, crash loops — or `failure_reason` for failed jobs: OOM
+with the limit, exit codes), `counts`, `volumes` (owned volumes and clones),
+`store` (`blob_count`), **`blocking`** (plain-English statements of what is
+preventing progress; `[]` when healthy), `warnings` (sections it could not read,
+e.g. no events RBAC), and — only when derivable — `estimated_cost_usd` labelled
+`"rough"` (cpu requests x runtime x $0.04/vCPU-hour; nothing else). Unknown
+workflow: `Sk8sError` / CLI exit 1; an unhealthy workflow is still exit 0 (it is
+a report, not a check).
+
+`--json` also exists on `sk8s workflows` (list of `{id, detached, age,
+age_seconds, driver_job, driver}`), `sk8s doctor` (list of `{name, ok,
+fix_hint}`; exit code unchanged) and `sk8s clean` (`{deleted: [...], kept:
+[{workflow, reason}]}`). Errors stay on stderr with exit 1.
+
 ## CLI
 
 `sk8s config` (plan/apply + write config; `--dry-run`), `sk8s doctor`,
 `sk8s image build|push`, `sk8s workflows` (every anchored workflow, finished
-included, with driver phase), `sk8s logs <wf>` (prints the detached driver's log
+included, with driver phase), `sk8s explain <wf>` (everything about one
+workflow, see above), `sk8s logs <wf>` (prints the detached driver's log
 once — not a follow/tail), `sk8s kill <wf>`, `sk8s clean [--older-than 7d]`,
 `sk8s shell [--image IMG]`, `sk8s data describe <path|uri> [--json]`.
 

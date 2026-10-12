@@ -428,11 +428,12 @@ context's namespace if it names one, else `sk8s`.
 | Command | What it does |
 |---|---|
 | `sk8s config [--namespace NS] [--store URL] [--provider local\|generic\|gke] [--rwx-storage-class C [--rwx-provisioner P]] [--dry-run]` | Create the namespace, ServiceAccount, Role and RoleBinding; write the client config (including the StorageClass used for `ReadWriteMany` volumes: derived on `gke`, named by `--rwx-storage-class` on `generic`). `--dry-run` prints the plan only. |
-| `sk8s doctor` | Check cluster reachability, namespace, ServiceAccount, permissions and store; non-zero exit if any check fails. |
-| `sk8s workflows` | List workflows in the namespace (id, detached, age, driver phase). |
+| `sk8s doctor [--json]` | Check cluster reachability, namespace, ServiceAccount, permissions and store; non-zero exit if any check fails. |
+| `sk8s workflows [--json]` | List workflows in the namespace (id, detached, age, driver phase). |
+| `sk8s explain WORKFLOW [--json]` | Everything about one workflow in one report: driver, jobs with stuck pods explained, volumes, store blobs, rough cost, and what is blocking progress. Exit 0 even when unhealthy; 1 if the workflow does not exist. Same data as `sk8s.explain(id)`. |
 | `sk8s logs WORKFLOW` | Print a workflow driver's logs. |
 | `sk8s kill WORKFLOW` | Delete a workflow and everything it owns. |
-| `sk8s clean [--older-than 7d]` | Delete expired workflows (`7d`, `36h`, or bare days). |
+| `sk8s clean [--older-than 7d] [--json]` | Delete expired workflows (`7d`, `36h`, or bare days). `--json` lists what was deleted and what was kept, with the reason. |
 | `sk8s image build --tag TAG [--base IMG] [--pip PKG] [--conda PKG] [--channel CH] [--push]` | Build a worker image with extra dependencies layered on the official base image (published at release time) or on `--base IMG` (pip only). See [Custom images](#custom-images). |
 | `sk8s image push --tag TAG` | `docker push` an image. |
 | `sk8s shell [--image IMG]` | Open an interactive shell in a pod (needs `kubectl`). |
