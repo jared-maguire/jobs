@@ -73,6 +73,11 @@ def run(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
     ``limits``, ``name_prefix``) set job options and are not passed to ``func``.
     ``timeout`` bounds the wait and is never passed to ``func``. Every other
     keyword argument is forwarded to ``func``.
+
+    ``sk8s.Artifact`` arguments reach ``func`` as local ``Path`` s, a parameter annotated
+    ``sk8s.OutDir`` gets an output directory, and returned OutDir paths come back as Artifacts;
+    ``memo=True`` answers a repeat call from the recorded result without running anything
+    (see docs/artifacts.md).
     """
     return _cluster().run(func, *args, **kwargs)
 
@@ -325,7 +330,17 @@ def _fan_out(
     **opts: Any,
 ) -> list[JobFuture] | DryRun:
     """Entry of the submit_map family: ``dry_run`` is popped and answered FIRST, before the
-    ``pilot`` branch of ``_submit_many`` could submit and wait on anything for real."""
+    ``pilot`` branch of ``_submit_many`` could submit and wait on anything for real.
+
+    ``memo=True`` with ``batch_size > 1`` is refused HERE, before either path, so a preview
+    reports the same error a real run would (and a ``pilot`` head never submits first)."""
+    batch = opts.get("batch_size", 1)
+    if opts.get("memo") and isinstance(batch, int) and batch > 1:
+        raise ValueError(
+            "memo=True is not supported with batch_size > 1: a batch is one job whose result "
+            "mixes per-item successes and failures, and failures must never be recorded. "
+            "Use batch_size=1 to memoize each item."
+        )
     if opts.pop("dry_run", False):
         return _dry_run_many(func, list(iterable), star, opts)
     return _submit_many(func, iterable, star, deadline=deadline, timeout=timeout, **opts)

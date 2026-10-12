@@ -1,14 +1,37 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterator
 from urllib.parse import urlsplit
 
-from sk8s.errors import BlobNotFound, Sk8sError, StoreError
-from sk8s.store.base import BlobStore
+from sk8s.errors import BlobNotFound, Sk8sError, StoreError, VersionChanged
+from sk8s.store.base import CHUNK, BlobInfo, BlobStat, BlobStore, Hasher
+from sk8s.store.retry import retry_conflicts
 
 ENDPOINT_ENV = "SK8S_S3_ENDPOINT"
 _MAX_DELETE_BATCH = 1000  # S3 DeleteObjects limit
+
+
+def _error(exc: Exception) -> tuple[str, int]:
+    """(Error.Code, HTTP status) of a botocore ClientError; ("", 0) for anything else."""
+    response = getattr(exc, "response", None) or {}
+    return (
+        str(response.get("Error", {}).get("Code", "")),
+        int(response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0) or 0),
+    )
+
+
+_MISSING = ("NoSuchKey", "404", "NotFound")
+
+
+def _same_service(a: Any, b: Any) -> bool:
+    """True when two boto clients talk to the same endpoint (so CopyObject can span them)."""
+    if a is b:
+        return True
+    ea = getattr(getattr(a, "meta", None), "endpoint_url", None)
+    eb = getattr(getattr(b, "meta", None), "endpoint_url", None)
+    return ea is not None and ea == eb
 
 
 class S3Store(BlobStore):
@@ -66,6 +89,46 @@ class S3Store(BlobStore):
     def put(self, key: str, data: bytes, owner: Any | None = None) -> str:
         self._client.put_object(Bucket=self.bucket, Key=self._full_key(key), Body=data)
         return self.uri_for(key)
+
+    # --- conditional writes: PutObject If-None-Match / If-Match ---------------------------------
+    # Verified live against MinIO RELEASE.2026-09-22 (tests/integration/test_artifacts_s3.py):
+    # losers get 412 PreconditionFailed (If-None-Match on an existing key, stale If-Match) and 404
+    # NoSuchKey (If-Match on a missing key). NOT verified against AWS S3 proper. AWS documents a
+    # 409 ConditionalRequestConflict for a concurrent in-flight write on the key (never seen on
+    # MinIO); it is retried (bounded, jittered) until it resolves to a 412 or a win.
+    def _conditional_put(self, key: str, data: bytes, **condition: str) -> bool:
+        def attempt() -> bool | None:
+            try:
+                self._client.put_object(
+                    Bucket=self.bucket, Key=self._full_key(key), Body=data, **condition
+                )
+            except Exception as exc:  # noqa: BLE001 — botocore may be absent with an injected client
+                code, status = _error(exc)
+                if code == "ConditionalRequestConflict" or status == 409:
+                    return None  # retry
+                if code in ("PreconditionFailed", "NoSuchKey") or status in (404, 412):
+                    return False  # exists / changed / gone
+                raise
+            return True
+
+        return retry_conflicts(attempt, what=f"conditional put of {self.uri_for(key)}")
+
+    def put_if_absent(self, key: str, data: bytes, owner: Any | None = None) -> bool:
+        return self._conditional_put(key, data, IfNoneMatch="*")
+
+    def read_with_version(self, key: str) -> tuple[bytes, str]:
+        uri = self.uri_for(key)
+        try:
+            resp = self._client.get_object(Bucket=self.bucket, Key=self._full_key(key))
+        except Exception as exc:  # noqa: BLE001
+            if _error(exc)[0] in ("NoSuchKey", "404", "NotFound"):
+                raise BlobNotFound(uri) from exc
+            raise
+        body: bytes = resp["Body"].read()
+        return body, str(resp["ETag"])
+
+    def put_if_version(self, key: str, data: bytes, version: str) -> bool:
+        return self._conditional_put(key, data, IfMatch=version)
 
     def get(self, uri: str) -> bytes:
         try:
@@ -135,3 +198,98 @@ class S3Store(BlobStore):
             if not resp.get("IsTruncated"):
                 return count
             token = resp["NextContinuationToken"]
+
+    # --- object operations (verified against MinIO, not AWS S3 proper) -------------------------
+    def _stat_from(self, uri: str, resp: dict[str, Any]) -> BlobStat:
+        return BlobStat(
+            uri=uri, size=int(resp.get("ContentLength", 0)), version=str(resp["ETag"]),
+            updated=resp.get("LastModified"), metadata=dict(resp.get("Metadata") or {}),
+        )
+
+    def stat(self, uri: str) -> BlobStat | None:
+        try:
+            resp = self._client.head_object(Bucket=self.bucket, Key=self._key_of(uri))
+        except Exception as exc:  # noqa: BLE001
+            code, status = _error(exc)
+            if code in _MISSING or status == 404:
+                return None
+            raise
+        return self._stat_from(uri, resp)
+
+    def list_blobs(self, prefix: str) -> Iterator[BlobInfo]:
+        full = self._full_key(prefix) if prefix else self.prefix
+        strip = len(self.prefix) + 1 if self.prefix else 0
+        token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": full}
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = self._client.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []):
+                yield BlobInfo(
+                    key=obj["Key"][strip:], size=int(obj.get("Size", 0)),
+                    updated=obj.get("LastModified"),
+                )
+            if not resp.get("IsTruncated"):
+                return
+            token = resp["NextContinuationToken"]
+
+    def upload_file(
+        self, key: str, path: Path, *, metadata: dict[str, str] | None = None,
+        if_absent: bool = False,
+    ) -> bool:
+        # upload_file's ExtraArgs cannot carry If-None-Match, so if_absent is a HEAD check
+        # followed by the upload: NOT atomic. For content-addressed keys that is harmless (two
+        # racers write identical bytes); callers needing exclusion use put_if_absent.
+        full = self._full_key(key)
+        if if_absent and self.stat(self.uri_for(key)) is not None:
+            return False
+        extra = {"Metadata": dict(metadata)} if metadata else None
+        self._client.upload_file(str(path), self.bucket, full, ExtraArgs=extra)
+        return True
+
+    def download_file(
+        self, uri: str, dest: Path, *, version: str | None = None, hasher: Hasher | None = None,
+    ) -> BlobStat:
+        kwargs: dict[str, Any] = {"Bucket": self.bucket, "Key": self._key_of(uri)}
+        if version is not None:
+            kwargs["IfMatch"] = version
+        try:
+            resp = self._client.get_object(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            code, status = _error(exc)
+            if code == "PreconditionFailed" or status == 412:
+                raise VersionChanged(f"{uri} changed since it was pinned") from exc
+            if code in _MISSING or status == 404:
+                raise (VersionChanged(uri) if version is not None else BlobNotFound(uri)) from exc
+            raise
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as out:
+            for chunk in resp["Body"].iter_chunks(CHUNK):
+                out.write(chunk)
+                if hasher is not None:
+                    hasher.update(chunk)
+        return self._stat_from(uri, resp)
+
+    def server_copy(
+        self, src_uri: str, dst: BlobStore, dst_key: str, *, metadata: dict[str, str] | None,
+        if_absent: bool,
+    ) -> bool | None:
+        if not isinstance(dst, S3Store) or not _same_service(self._client, dst._client):
+            return None
+        if if_absent and dst.stat(dst.uri_for(dst_key)) is not None:  # HEAD-then-copy: not atomic
+            return False
+        extra: dict[str, Any] = {}
+        if metadata is not None:
+            extra = {"Metadata": dict(metadata), "MetadataDirective": "REPLACE"}
+        try:
+            self._client.copy(
+                CopySource={"Bucket": self.bucket, "Key": self._key_of(src_uri)},
+                Bucket=dst.bucket, Key=dst._full_key(dst_key), ExtraArgs=extra or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            code, status = _error(exc)
+            if code in _MISSING or status == 404:
+                raise BlobNotFound(src_uri) from exc
+            raise
+        return True

@@ -7,5 +7,8 @@ FROM python:${PYTHON_VERSION}-slim
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY sk8s ./sk8s
-# The s3 extra puts boto3 in the worker so s3:// stores work.
-RUN pip install --no-cache-dir ".[s3]"
+# The s3 extra puts boto3 in the worker so s3:// stores work. Pass
+#   --build-arg EXTRAS=s3,gcs
+# for a worker that can also reach gs:// stores and artifact locations.
+ARG EXTRAS=s3
+RUN pip install --no-cache-dir ".[${EXTRAS}]"
