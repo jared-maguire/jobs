@@ -193,8 +193,9 @@ def test_reaping_expired_sandboxes_respects_active_jobs(home: Path, core: client
         assert wait_until(lambda: not batch.list_namespaced_job(ns).items, timeout=60)
     finally:
         c.close(delete_workflow=False)
-    deleted = sk8s.clean(ns)  # cluster-wide sandbox sweep rides along the workflow sweep
-    assert deleted == []  # no workflow expired; the sandbox did
+    reaped = sandbox.ReapReport()
+    deleted = sk8s.clean(ns, sandbox_report=reaped)  # the cluster-wide sandbox sweep rides along
+    assert deleted == [] and reaped.deleted == ["itguard-old"]  # no workflow expired; the sandbox did
     assert wait_until(lambda: not _ns_exists(core, ns), timeout=180)
 
 
