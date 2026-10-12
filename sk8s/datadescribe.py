@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import codecs
 import csv
+import importlib
 import json
 import os
 import re
@@ -31,7 +32,8 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-from sk8s.errors import Sk8sError
+from sk8s.errors import BlobNotFound, Sk8sError, StoreError
+from sk8s.store.s3 import ENDPOINT_ENV
 
 HEAD_BYTES = 1 << 20  # how much of a file is read for sniffing (1 MiB)
 SMALL_FILE_BYTES = 10_000_000  # records are counted only for files smaller than this
@@ -633,9 +635,11 @@ def _headline(formats: dict[str, dict[str, Any]], patterns: dict[str, Any], entr
 
 def _describe_cohort(
     source: _Source, root: str, *, samples: int, max_objects: int, head_bytes: int, small_file_bytes: int,
-    extra_notes: list[str],
+    extra_notes: list[str], must_exist: bool = False,
 ) -> dict[str, Any]:
     entries, capped = source.list(max_objects)
+    if must_exist and not entries:
+        raise BlobNotFound(f"nothing at {root} (no such object, and no objects under that prefix)")
     notes = list(extra_notes)
     if capped:
         notes.append(
@@ -715,12 +719,166 @@ def describe(
     raise Sk8sError(f"no such file or directory: {target}")
 
 
+# --- remote sources (gs://, s3://) --------------------------------------------------------------
+
+_GCS_HINT = "no Google Cloud credentials found; run: gcloud auth application-default login (or set GOOGLE_APPLICATION_CREDENTIALS)"
+_AWS_HINT = "no AWS credentials found; configure them (aws configure, AWS_PROFILE, or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)"
+_DENIED_CODES = {"AccessDenied", "403", "Forbidden", "AllAccessDisabled"}
+_MISSING_CODES = {"NoSuchBucket", "NoSuchKey", "404", "NotFound"}
+
+
+def _translate(exc: Exception, uri: str, scheme: str) -> Sk8sError:
+    """Map an SDK exception (matched by shape, so no SDK import is needed) to a typed sk8s error."""
+    if isinstance(exc, Sk8sError):
+        return exc
+    name = type(exc).__name__
+    code = getattr(exc, "code", None)
+    response = getattr(exc, "response", None)
+    aws_code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+    if "Credentials" in name or name == "RefreshError":
+        return StoreError(f"{_GCS_HINT if scheme == 'gs' else _AWS_HINT} (reading {uri})")
+    if code == 403 or aws_code in _DENIED_CODES:
+        return StoreError(f"access denied reading {uri}: {exc}; the credentials need list and read access to the bucket")
+    if code == 404 or aws_code in _MISSING_CODES:
+        return BlobNotFound(f"nothing at {uri}: {exc}")
+    return StoreError(f"cannot read {uri}: {name}: {exc}")
+
+
+class _RemoteSource:
+    """Shared listing/range-read plumbing; subclasses speak one SDK."""
+
+    scheme = ""
+
+    def __init__(self, bucket: str, prefix: str, client: Any) -> None:
+        self.bucket, self.prefix, self.client = bucket, prefix, client
+
+    # SDK-specific -----------------------------------------------------------------------------
+    def _iter_objects(self, prefix: str, first_page: int | None = None) -> Any:
+        """Lazily yield (key, size) for keys under ``prefix`` in key order; ``first_page`` sizes the first request."""
+        raise NotImplementedError
+
+    def _read_range(self, key: str, length: int) -> bytes:
+        raise NotImplementedError
+
+    # common -----------------------------------------------------------------------------------
+    def uri_for_key(self, key: str) -> str:
+        return f"{self.scheme}://{self.bucket}/{key}"
+
+    def uri(self, entry: _Entry) -> str:
+        return self.uri_for_key(self.prefix + entry.rel)
+
+    def probe(self, key: str) -> int | None:
+        """Size of the object at exactly ``key``, or None. Key order puts an exact match first."""
+        try:
+            for k, size in self._iter_objects(key, first_page=1):
+                return size if k == key else None
+        except Exception as exc:  # noqa: BLE001
+            raise _translate(exc, self.uri_for_key(key), self.scheme) from exc
+        return None
+
+    def list(self, limit: int) -> tuple[list[_Entry], bool]:
+        entries: list[_Entry] = []
+        try:
+            for key, size in self._iter_objects(self.prefix):
+                if key.endswith("/"):  # console-style folder placeholder
+                    continue
+                if len(entries) == limit:
+                    return sorted(entries, key=lambda e: e.rel), True
+                entries.append(_Entry(key[len(self.prefix):], size))
+        except Exception as exc:  # noqa: BLE001
+            raise _translate(exc, self.uri_for_key(self.prefix), self.scheme) from exc
+        return sorted(entries, key=lambda e: e.rel), False
+
+    def read_head(self, entry: _Entry, head_bytes: int, small_file_bytes: int) -> bytes:
+        try:
+            return self._read_range(self.prefix + entry.rel, min(head_bytes, entry.size))
+        except Exception as exc:  # noqa: BLE001
+            raise _translate(exc, self.uri(entry), self.scheme) from exc
+
+
+class _GCSSource(_RemoteSource):
+    scheme = "gs"
+
+    def _iter_objects(self, prefix: str, first_page: int | None = None) -> Any:
+        extra = {"max_results": first_page} if first_page else {}
+        for blob in self.client.list_blobs(self.bucket, prefix=prefix, **extra):
+            yield blob.name, int(blob.size or 0)
+
+    def _read_range(self, key: str, length: int) -> bytes:
+        data: bytes = self.client.bucket(self.bucket).blob(key).download_as_bytes(start=0, end=length - 1)  # end inclusive
+        return data
+
+
+class _S3Source(_RemoteSource):
+    scheme = "s3"
+
+    def _iter_objects(self, prefix: str, first_page: int | None = None) -> Any:
+        token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": prefix}
+            if first_page:
+                kwargs["MaxKeys"] = first_page
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = self.client.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []):
+                yield obj["Key"], int(obj.get("Size", 0))
+            if not resp.get("IsTruncated"):
+                return
+            token = resp["NextContinuationToken"]
+
+    def _read_range(self, key: str, length: int) -> bytes:
+        resp = self.client.get_object(Bucket=self.bucket, Key=key, Range=f"bytes=0-{length - 1}")
+        data: bytes = resp["Body"].read()
+        return data
+
+
+def _make_client(scheme: str) -> Any:
+    """The SDK client for ``scheme`` (lazy import: the extras stay optional)."""
+    if scheme == "gs":
+        try:
+            storage = importlib.import_module("google.cloud.storage")
+        except ImportError as exc:
+            raise Sk8sError(
+                'describing gs:// paths needs google-cloud-storage; install with: pip install "sk8s[gcs]"'
+            ) from exc
+        try:
+            return storage.Client()
+        except Exception as exc:  # noqa: BLE001
+            raise _translate(exc, "gs://", "gs") from exc
+    try:
+        boto3 = importlib.import_module("boto3")
+    except ImportError as exc:
+        raise Sk8sError('describing s3:// paths needs boto3; install with: pip install "sk8s[s3]"') from exc
+    endpoint = os.environ.get(ENDPOINT_ENV)
+    return boto3.client("s3", **({"endpoint_url": endpoint} if endpoint else {}))
+
+
 def _describe_remote(
     target: str, scheme: str, *, samples: int, max_objects: int, client: Any | None, head_bytes: int,
     small_file_bytes: int,
 ) -> dict[str, Any]:
-    raise Sk8sError(
-        f"unsupported scheme {scheme!r} in {target!r}: describe takes a local path, gs://, or s3://"
+    if scheme not in ("gs", "s3"):
+        raise Sk8sError(f"unsupported scheme {scheme!r} in {target!r}: describe takes a local path, gs://, or s3://")
+    parts = urlsplit(target)
+    if not parts.netloc:
+        raise Sk8sError(f"{target!r} has no bucket: expected {scheme}://BUCKET/PATH")
+    bucket, key = parts.netloc, parts.path.lstrip("/")
+    cls = _GCSSource if scheme == "gs" else _S3Source
+    sdk = client if client is not None else _make_client(scheme)
+    kw: dict[str, Any] = {"head_bytes": head_bytes, "small_file_bytes": small_file_bytes}
+    if key and not key.endswith("/"):
+        size = cls(bucket, "", sdk).probe(key)
+        if size is not None:
+            folder, _, name = key.rpartition("/")
+            src = cls(bucket, folder + "/" if folder else "", sdk)
+            out = _describe_entry(src, _Entry(name, size), swallow=False, **kw)
+            return {"kind": "file", **out}
+    prefix = key.rstrip("/") + "/" if key.strip("/") else ""
+    src = cls(bucket, prefix, sdk)
+    return _describe_cohort(
+        src, src.uri_for_key(prefix), samples=samples, max_objects=max_objects, extra_notes=[],
+        must_exist=True, **kw,
     )
 
 

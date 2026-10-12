@@ -2,6 +2,8 @@
 import gzip
 import json
 import struct
+import sys
+import types
 import zlib
 from pathlib import Path
 from typing import Any
@@ -10,7 +12,7 @@ import pytest
 
 import sk8s
 from sk8s import datadescribe
-from sk8s.errors import BlobNotFound, Sk8sError
+from sk8s.errors import BlobNotFound, Sk8sError, StoreError
 
 # --- fixture builders (everything is synthesized in-test) ---------------------------------------
 
@@ -486,3 +488,274 @@ def test_human_rendering_mentions_key_facts(tmp_path: Path) -> None:
     assert "fastq" in out and "read length 8" in out
     single = datadescribe.format_description(sk8s.describe(str(write(tmp_path / "x.bam", make_bam()))))
     assert "bam" in single and "coordinate" in single and "chr1" in single
+
+
+# --- remote (gs:// and s3://) through fake SDK clients --------------------------------------------
+
+
+class _RangeLog:
+    """What the fake object stores were asked to read: (key, start, end_inclusive)."""
+
+    def __init__(self) -> None:
+        self.reads: list[tuple[str, int, int]] = []
+        self.served = 0
+
+    def record(self, key: str, start: int, end: int, served: int) -> None:
+        self.reads.append((key, start, end))
+        self.served += served
+
+
+class RangeBlob:
+    def __init__(self, client: "RangeGCS", bucket: str, name: str) -> None:
+        self.client, self.bucket, self.name = client, bucket, name
+        self.size = len(client.objects.get((bucket, name), b""))
+
+    def download_as_bytes(self, *, start: int | None = None, end: int | None = None, **_: Any) -> bytes:
+        data = self.client.objects[(self.bucket, self.name)]
+        if start is None and end is None:
+            self.client.log.record(self.name, 0, len(data) - 1, len(data))
+            return data
+        assert start is not None and end is not None
+        out = data[start : end + 1]  # GCS: end is inclusive
+        self.client.log.record(self.name, start, end, len(out))
+        return out
+
+
+class RangeBucket:
+    def __init__(self, client: "RangeGCS", name: str) -> None:
+        self.client, self.name = client, name
+
+    def blob(self, name: str) -> RangeBlob:
+        return RangeBlob(self.client, self.name, name)
+
+
+class RangeGCS:
+    def __init__(self, objects: dict[tuple[str, str], bytes]) -> None:
+        self.objects = objects
+        self.log = _RangeLog()
+        self.list_kwargs: list[dict[str, Any]] = []
+
+    def bucket(self, name: str) -> RangeBucket:
+        return RangeBucket(self, name)
+
+    def list_blobs(self, bucket: str, *, prefix: str | None = None, max_results: int | None = None, **_: Any) -> Any:
+        self.list_kwargs.append({"bucket": bucket, "prefix": prefix, "max_results": max_results})
+        keys = sorted(k for (b, k) in self.objects if b == bucket and k.startswith(prefix or ""))
+        if max_results is not None:
+            keys = keys[:max_results]
+        return iter([RangeBlob(self, bucket, k) for k in keys])
+
+
+class RangeS3:
+    def __init__(self, objects: dict[tuple[str, str], bytes], page_size: int = 1000) -> None:
+        self.objects = objects
+        self.page_size = page_size
+        self.log = _RangeLog()
+        self.list_calls = 0
+
+    def list_objects_v2(
+        self, *, Bucket: str, Prefix: str = "", MaxKeys: int = 1000, ContinuationToken: str | None = None, **_: Any
+    ) -> dict[str, Any]:
+        self.list_calls += 1
+        keys = sorted(k for (b, k) in self.objects if b == Bucket and k.startswith(Prefix))
+        if ContinuationToken:
+            keys = [k for k in keys if k > ContinuationToken]
+        n = min(MaxKeys, self.page_size)
+        page = keys[:n]
+        resp: dict[str, Any] = {
+            "Contents": [{"Key": k, "Size": len(self.objects[(Bucket, k)])} for k in page],
+            "KeyCount": len(page),
+            "IsTruncated": len(keys) > n,
+        }
+        if len(keys) > n:
+            resp["NextContinuationToken"] = page[-1]
+        return resp
+
+    def get_object(self, *, Bucket: str, Key: str, Range: str | None = None, **_: Any) -> dict[str, Any]:
+        import io
+
+        data = self.objects[(Bucket, Key)]
+        if Range is None:
+            self.log.record(Key, 0, len(data) - 1, len(data))
+            return {"Body": io.BytesIO(data)}
+        assert Range.startswith("bytes=")
+        lo, hi = (int(x) for x in Range[len("bytes="):].split("-"))
+        out = data[lo : hi + 1]
+        self.log.record(Key, lo, hi, len(out))
+        return {"Body": io.BytesIO(out)}
+
+
+def _cohort_objects(bucket: str, prefix: str) -> dict[tuple[str, str], bytes]:
+    objs: dict[tuple[str, str], bytes] = {}
+    for i in range(1, 4):
+        for r in (1, 2):
+            objs[(bucket, f"{prefix}S{i}_R{r}.fastq.gz")] = gzip.compress(fastq_text(60).encode(), mtime=0)
+    objs[(bucket, f"{prefix}S1.bam")] = make_bam()
+    objs[(bucket, f"{prefix}manifest.csv")] = b"sample,path\nS1,x\nS2,y\n"
+    objs[(bucket, f"{prefix}sub/")] = b""  # console-style folder placeholder
+    objs[(bucket, "other/ignore.txt")] = b"not in the prefix\n"
+    objs[(bucket, f"{prefix[:-1]}2/sibling.txt")] = b"sibling prefix, must be excluded\n"
+    return objs
+
+
+@pytest.fixture(params=["gs", "s3"])
+def remote(request: pytest.FixtureRequest) -> tuple[str, Any]:
+    objs = _cohort_objects("bkt", "runs/oct/")
+    if request.param == "gs":
+        return "gs", RangeGCS(objs)
+    return "s3", RangeS3(objs, page_size=4)
+
+
+def test_remote_cohort_summary(remote: tuple[str, Any]) -> None:
+    scheme, client = remote
+    d = sk8s.describe(f"{scheme}://bkt/runs/oct/", client=client)
+    assert d["kind"] == "cohort"
+    assert d["path"] == f"{scheme}://bkt/runs/oct/"
+    assert d["file_count"] == 8  # 6 fastq + bam + csv; placeholder, other/ and runs/oct2/ excluded
+    assert d["formats"]["fastq"]["count"] == 6
+    assert d["patterns"]["fastq"]["paired_end_pairs"] == 3
+    assert d["headline"].startswith("Found 3 samples (FASTQ, paired-end, 6 files")
+    assert d["samples"][0]["path"] == f"{scheme}://bkt/runs/oct/S1.bam"
+    assert d["samples"][0]["format"] == "bam"
+    assert d["listing_capped"] is False
+
+
+def test_remote_prefix_without_trailing_slash_is_a_prefix(remote: tuple[str, Any]) -> None:
+    scheme, client = remote
+    d = sk8s.describe(f"{scheme}://bkt/runs/oct", client=client)
+    assert d["kind"] == "cohort"
+    assert d["file_count"] == 8
+
+
+def test_remote_reads_are_ranges_of_sampled_files_only(remote: tuple[str, Any]) -> None:
+    scheme, client = remote
+    d = datadescribe.describe(f"{scheme}://bkt/runs/oct/", client=client, head_bytes=128)
+    assert len(d["samples"]) == 5
+    sampled_keys = {s["relative_path"] for s in d["samples"]}
+    read_keys = {k.removeprefix("runs/oct/") for k, _, _ in client.log.reads}
+    assert read_keys == sampled_keys  # nothing outside the first 5 was touched
+    assert all(start == 0 and end - start + 1 <= 128 for _, start, end in client.log.reads)
+    # a FASTQ larger than the head is sniffed but not counted
+    fq = next(s for s in d["samples"] if s["format"] == "fastq")
+    assert fq["facts"]["records"] == "not counted"
+    assert fq["facts"]["read_length"] == 8
+
+
+def test_remote_small_object_wholly_in_head_is_counted(remote: tuple[str, Any]) -> None:
+    scheme, client = remote
+    client.objects[("bkt", "tiny/s.fastq")] = fastq_text(7).encode()
+    d = sk8s.describe(f"{scheme}://bkt/tiny/s.fastq", client=client)
+    assert d["facts"]["records"] == 7
+
+
+def test_remote_single_file(remote: tuple[str, Any]) -> None:
+    scheme, client = remote
+    d = sk8s.describe(f"{scheme}://bkt/runs/oct/S1.bam", client=client)
+    assert d["kind"] == "file"
+    assert d["path"] == f"{scheme}://bkt/runs/oct/S1.bam"
+    assert d["format"] == "bam"
+    assert d["facts"]["sort_order"] == "coordinate"
+    assert d["size_bytes"] == len(client.objects[("bkt", "runs/oct/S1.bam")])
+    assert len(client.log.reads) == 1 and client.log.reads[0][1] == 0
+
+
+def test_remote_never_reads_more_than_head_bytes_of_a_big_object(remote: tuple[str, Any]) -> None:
+    scheme, client = remote
+    big = gzip.compress(fastq_text(20000).encode(), mtime=0)  # ~ 100s of KB
+    client.objects[("bkt", "big/x.fastq.gz")] = big
+    d = datadescribe.describe(f"{scheme}://bkt/big/x.fastq.gz", client=client, head_bytes=4096)
+    assert d["format"] == "fastq"
+    assert d["facts"]["records"] == "not counted"
+    assert client.log.served <= 4096 < len(big)
+
+
+def test_remote_listing_cap(remote: tuple[str, Any]) -> None:
+    scheme, client = remote
+    d = datadescribe.describe(f"{scheme}://bkt/runs/oct/", client=client, max_objects=3)
+    assert d["listing_capped"] is True
+    assert d["file_count"] == 3
+    assert any("capped" in n for n in d["notes"])
+
+
+def test_remote_missing_object_or_prefix(remote: tuple[str, Any]) -> None:
+    scheme, client = remote
+    with pytest.raises(BlobNotFound, match="nothing at"):
+        sk8s.describe(f"{scheme}://bkt/no/such/thing", client=client)
+
+
+def test_remote_result_is_json(remote: tuple[str, Any]) -> None:
+    scheme, client = remote
+    d = sk8s.describe(f"{scheme}://bkt/runs/oct/", client=client)
+    assert json.loads(json.dumps(d)) == d
+
+
+def test_remote_bad_uri() -> None:
+    with pytest.raises(Sk8sError, match="bucket"):
+        sk8s.describe("gs://", client=object())
+
+
+@pytest.mark.parametrize("scheme,module,extra", [("gs", "google.cloud.storage", "gcs"), ("s3", "boto3", "s3")])
+def test_missing_extra_names_the_pip_extra(
+    monkeypatch: pytest.MonkeyPatch, scheme: str, module: str, extra: str
+) -> None:
+    monkeypatch.setitem(sys.modules, module, None)  # makes `import module` raise ImportError
+    with pytest.raises(Sk8sError, match=rf"sk8s\[{extra}\]"):
+        sk8s.describe(f"{scheme}://bkt/x/")
+
+
+def test_gcs_missing_credentials_is_typed_with_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    from google.auth.exceptions import DefaultCredentialsError
+
+    def boom() -> Any:
+        raise DefaultCredentialsError("Your default credentials were not found")
+
+    monkeypatch.setitem(sys.modules, "google.cloud.storage", types.SimpleNamespace(Client=boom))
+    with pytest.raises(StoreError, match="application-default login"):
+        sk8s.describe("gs://bkt/x/")
+
+
+def test_s3_missing_credentials_is_typed_with_hint() -> None:
+    from botocore.exceptions import NoCredentialsError
+
+    class NoCreds:
+        def list_objects_v2(self, **_: Any) -> Any:
+            raise NoCredentialsError()
+
+    with pytest.raises(StoreError, match="AWS credentials"):
+        sk8s.describe("s3://bkt/x/", client=NoCreds())
+
+
+def test_s3_access_denied_is_typed() -> None:
+    from botocore.exceptions import ClientError
+
+    class Denied:
+        def list_objects_v2(self, **_: Any) -> Any:
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": "nope"}}, "ListObjectsV2")
+
+    with pytest.raises(StoreError, match="access denied"):
+        sk8s.describe("s3://bkt/x/", client=Denied())
+
+
+def test_gcs_forbidden_is_typed() -> None:
+    from google.api_core.exceptions import Forbidden
+
+    class Denied:
+        def list_blobs(self, *a: Any, **k: Any) -> Any:
+            raise Forbidden("caller does not have storage.objects.list")
+
+    with pytest.raises(StoreError, match="access denied"):
+        sk8s.describe("gs://bkt/x/", client=Denied())
+
+
+def test_s3_endpoint_env_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_client(service: str, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return RangeS3({("bkt", "x/a.txt"): b"hello\nworld\n"})
+
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=fake_client))
+    monkeypatch.setenv("SK8S_S3_ENDPOINT", "http://minio:9000")
+    d = sk8s.describe("s3://bkt/x/")
+    assert d["file_count"] == 1
+    assert seen == {"endpoint_url": "http://minio:9000"}
