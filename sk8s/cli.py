@@ -134,6 +134,8 @@ def _toml_scalar(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):  # repr is the shortest round-tripping form, and valid TOML
+        return repr(value)
     if isinstance(value, str):
         return toml_string(value)
     raise Sk8sError(f"config file holds a value this writer cannot preserve: {value!r}")

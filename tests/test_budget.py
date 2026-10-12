@@ -138,3 +138,15 @@ def test_config_budget_layers(tmp_path: Path) -> None:
 def test_config_budget_bad_env_is_a_value_error() -> None:
     with pytest.raises(ValueError, match="SK8S_BUDGET"):
         load_config(path=Path("/nonexistent"), env={"SK8S_BUDGET": "{nope"})
+
+
+def test_config_writer_preserves_a_budget_table_with_floats(tmp_path: Path) -> None:
+    """`sk8s config` rewrites the user's file; a [budget] table with floats must survive it."""
+    from sk8s.cli import write_config
+
+    f = tmp_path / "c.toml"
+    f.write_text("[budget]\nmax_estimated_usd = 0.25\nmax_cpu_hours = 1e-05\n")
+    write_config(f, {"namespace": "ns"})
+    cfg = load_config(path=f, env={})
+    assert cfg.namespace == "ns"
+    assert cfg.budget == Budget(max_estimated_usd=0.25, max_cpu_hours=1e-05)

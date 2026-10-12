@@ -123,6 +123,31 @@ class FakeCoreV1:
         self.namespaces[body.metadata.name] = body
         return body
 
+    def list_namespace(self, label_selector: str = "") -> Any:
+        """Honors the simple `k=v[,k=v...]` equality form of label selectors."""
+        wanted = dict(p.split("=", 1) for p in label_selector.split(",") if p)
+        items = [
+            ns for ns in self.namespaces.values()
+            if all((ns.metadata.labels or {}).get(k) == v for k, v in wanted.items())
+        ]
+        return SimpleNamespace(items=items)
+
+    def patch_namespace(self, name: str, body: Any) -> Any:
+        ns = self.read_namespace(name)
+        meta = body.get("metadata", {})
+        ns.metadata.labels = {**(ns.metadata.labels or {}), **meta.get("labels", {})}
+        ns.metadata.annotations = {**(ns.metadata.annotations or {}), **meta.get("annotations", {})}
+        return ns
+
+    def delete_namespace(self, name: str) -> Any:
+        """Deleting a namespace takes everything in it (what the real cascade does)."""
+        self.actions.append(("delete", "Namespace", name))
+        self.read_namespace(name)
+        del self.namespaces[name]
+        for table in (self.configmaps, self.services, self.service_accounts, self.pvcs, self.pods):
+            for key in [k for k in table if k[0] == name]:
+                del table[key]
+
     def get_api_resources(self) -> Any:
         return SimpleNamespace(resources=[])
 
@@ -300,6 +325,9 @@ class FakeAppsV1:
             raise ApiException(status=409, reason="Conflict")
         self.deployments[(namespace, body.metadata.name)] = body
         return body
+
+    def list_namespaced_deployment(self, namespace: str, **_: Any) -> Any:
+        return SimpleNamespace(items=[d for (ns, _n), d in self.deployments.items() if ns == namespace])
 
     def read_namespaced_deployment(self, name: str, namespace: str) -> Any:
         try:
