@@ -51,3 +51,14 @@ def test_map_failed_summary() -> None:
     e = MapFailed(failures, total=10)
     assert e.failures == failures
     assert "2/10" in str(e) and "ValueError" in str(e)
+
+
+def test_map_failed_carries_results() -> None:
+    e = MapFailed([(1, ValueError("bad"))], total=3, results={0: "a", 2: "c"})
+    assert e.results == {0: "a", 2: "c"}
+    # the message is unchanged by the successes
+    assert str(e) == "1/3 map items failed; first failure at index 1: ValueError: bad"
+
+
+def test_map_failed_results_default_empty() -> None:
+    assert MapFailed([(0, ValueError("x"))], total=1).results == {}

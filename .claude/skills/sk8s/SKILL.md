@@ -55,8 +55,9 @@ and are self-sufficient for agents.
    futures). Close the laptop ⇒ orphaned work. `submit_workflow` detaches; attach
    from anywhere later — and collect with `result(delete=False)` if you'll look
    again.
-5. **`sk8s.map` raises `MapFailed` carrying only the failures** — completed
-   values are not on the exception. When partial results matter, keep the futures
+5. **`sk8s.map` raises `MapFailed` on any failed item, but the successes ride along**
+   — `e.results` is `{index: value}`, `e.failures` is `[(index, exc), ...]`. For
+   streaming results as they land, or per-item timeout control, keep the futures
    (`submit_map`) and harvest per-future (pattern in references/advanced.md).
 
 ## Quick reference
@@ -83,6 +84,6 @@ and are self-sufficient for agents.
 | `OSError: Read-only file system` in your function | mounts default ro → `{"access_mode": "rw"}` for the writer |
 | Everything gone after closing the laptop | tethered `submit` → `submit_workflow` |
 | Workflow gone when you attach the next day | `result()` deletes on success by default → `result(delete=False)` |
-| 47 good results lost because 3 failed | `MapFailed` carries failures only → per-future harvest pattern |
+| `map` raised and you want the 47 good results | they are on the exception: `e.results[i]`; use `submit_map` + per-future harvest for streaming/timeout control |
 | `sk8s doctor` red right after `--apply-cloud` on GKE | IAM propagation (~60s) → retry before debugging |
 | Writes to the config file clobbered another session | global default path → set `SK8S_CONFIG` per agent/CI run |

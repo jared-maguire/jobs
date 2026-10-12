@@ -335,10 +335,13 @@ def _gather(
         deadline = _deadline(timeout)
     results: list[Any] = []
     failures: list[tuple[int, BaseException]] = []
+    succeeded: dict[int, Any] = {}
     for i, fut in enumerate(futures):
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
         try:
-            results.append(fut.result(timeout=remaining))
+            value = fut.result(timeout=remaining)
+            results.append(value)
+            succeeded[i] = value
         except Exception as exc:
             if (
                 deadline is not None
@@ -349,7 +352,7 @@ def _gather(
             results.append(None)
             failures.append((i, exc))
     if failures:
-        raise MapFailed(failures, total=len(futures))
+        raise MapFailed(failures, total=len(futures), results=succeeded)
     return results
 
 
@@ -359,7 +362,8 @@ def map(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[
     ``timeout`` (optional) is one overall deadline for the whole call, covering
     submission (including waiting on ``max_concurrent``) and collection. Other
     ``opts`` are split as in ``submit``. Every future is collected before
-    returning; if any failed, raises ``MapFailed`` with the failing indices.
+    returning; if any failed, raises ``MapFailed`` with the failing indices in
+    ``.failures`` and every success in ``.results`` (``{index: value}``).
     """
     timeout = opts.pop("timeout", None)
     deadline = _deadline(timeout)

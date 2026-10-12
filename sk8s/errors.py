@@ -220,9 +220,22 @@ class RemoteException(Sk8sError):
 
 
 class MapFailed(Sk8sError):
-    def __init__(self, failures: list[tuple[int, BaseException]], total: int) -> None:
+    """``map``/``starmap`` finished with at least one failed item.
+
+    ``failures`` is ``[(index, exception), ...]``; ``results`` maps the index of every item that
+    completed successfully to its value (so the successes are not lost); ``total`` is the item
+    count. ``len(results) + len(failures) == total``.
+    """
+
+    def __init__(
+        self,
+        failures: list[tuple[int, BaseException]],
+        total: int,
+        results: dict[int, Any] | None = None,
+    ) -> None:
         self.failures = failures
         self.total = total
+        self.results: dict[int, Any] = {} if results is None else results
         first_i, first_e = failures[0]
         super().__init__(
             f"{len(failures)}/{total} map items failed; "

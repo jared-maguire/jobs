@@ -144,8 +144,9 @@ except ZeroDivisionError as e:  # the remote exception, re-raised as its real ty
 ```
 
 When some items of a `map` fail, every other item is still collected and
-`sk8s.MapFailed` lists the failing indices (`e.failures`). Use `submit_map` /
-`submit_starmap` to get the futures themselves.
+`sk8s.MapFailed` lists the failing indices (`e.failures`) and carries every success
+(`e.results`, `{index: value}`). Use `submit_map` / `submit_starmap` to get the futures
+themselves.
 
 **10. Start a detached workflow.** The driver function runs in the cluster as a Job and can
 submit its own Jobs. Your process does not need to stay alive:

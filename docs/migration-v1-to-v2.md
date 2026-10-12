@@ -56,7 +56,8 @@ against the v2 code in this repository.
    escaped as raw `kubernetes.client.ApiException`s), `StoreError`, `BlobNotFound`,
    `BlobTooLarge`, `VersionMismatch` and, for volumes, `VolumeError` (`VolumeNotFound`, `VolumeNotPopulated`, `VolumeWaitTimeout`) and the `PodFailed` subtypes `VolumeAttachBlocked` and `VolumeProvisioningFailed`. `map` raises
    `sk8s.MapFailed` after collecting every item; `e.failures` is a list of
-   `(index, exception)`.
+   `(index, exception)` and `e.results` maps the index of every item that succeeded to its
+   value (`e.total` is the item count).
 
 4. **The namespace is no longer whatever `kubectl` says.** v1 always used the kube
    context's namespace (so `default` unless you had pointed the context elsewhere). v2 resolves
@@ -143,6 +144,7 @@ try:
     sk8s.map(lambda x: 1 // x, [1, 0, 2])            # was: RuntimeError("Jobs ... failed")
 except sk8s.MapFailed as e:
     print(e.failures)                                # [(1, ZeroDivisionError(...))]
+    print(e.results)                                 # {0: 1, 2: 0}  (the successes, by index)
 ```
 
 ### Images
