@@ -418,7 +418,7 @@ class ArtifactStore:
                 notes.append(f"{uri}: not found")
                 continue
             if artifact.size is not None and st.size != artifact.size:
-                notes.append(f"{uri}: size {st.size} != expected {artifact.size}")
+                notes.append(f"{uri}: changed (size {st.size}, expected {artifact.size})")
                 continue
             if version is not None and st.version != version:
                 notes.append(f"{uri}: changed (version {st.version}, pinned {version})")
