@@ -646,7 +646,7 @@ def render(report: dict[str, Any]) -> str:
     wf = report["workflow"]
     lines = [
         f"workflow {wf['id']}  namespace {wf['namespace']}  "
-        f"{'detached' if wf['detached'] else 'attached'}  age {wf['age'] or '?'}"
+        f"{'detached' if wf['detached'] else 'tethered'}  age {wf['age'] or '?'}"
         + (f"  retention {wf['retention_days']}d" if wf["retention_days"] is not None else "")
     ]
     store = report["store"]
@@ -674,11 +674,16 @@ def render(report: dict[str, Any]) -> str:
     if shown:
         width = max(len(j["name"]) for j in shown)
         for j in shown:
-            note = j["waiting_reason"] or j["failure_reason"] or ""
-            note = note.splitlines()[0] if note else ""
+            # The full explanation is under "blocking:" below; a table row only needs a pointer.
+            if j["waiting_code"]:
+                note = f"  [{j['waiting_code']}]"
+            elif j["failure_reason"]:
+                first = j["failure_reason"].splitlines()[0]
+                note = f"  {first if len(first) <= 70 else first[:67] + '...'}"
+            else:
+                note = ""
             lines.append(
-                f"  {j['name']:<{width}}  {j['phase']:<9}  {_duration(j['duration_seconds']):>5}"
-                + (f"  [{j['waiting_code']}] {note}" if j["waiting_code"] else (f"  {note}" if note else ""))
+                f"  {j['name']:<{width}}  {j['phase']:<9}  {_duration(j['duration_seconds']):>5}{note}"
             )
         if len(ordered) > len(shown):
             lines.append(f"  ... and {len(ordered) - len(shown)} more (use --json for all of them)")
@@ -691,8 +696,10 @@ def render(report: dict[str, Any]) -> str:
             lines.append(f"  {v['name']}  {v['kind']}  {v['phase']}  {v['size'] or '?'}{extra}{gen}")
     if "estimated_cost_usd" in report:
         lines.append("")
+        cost = report["estimated_cost_usd"]
+        money = f"{cost:.2f}" if cost >= 0.01 else f"{cost:.4f}"
         lines.append(
-            f"estimated cost so far: ~${report['estimated_cost_usd']:.2f} "
+            f"estimated cost so far: ~${money} "
             f"({report['estimated_cost_label']}; {report['estimated_cpu_hours']:.2f} cpu-hours)"
         )
     lines.append("")

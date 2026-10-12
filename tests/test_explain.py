@@ -625,3 +625,17 @@ def test_render_truncates_huge_job_lists(tmp_path: Path) -> None:
     text = explaining.render(sk8s.explain(WF, cluster=h.cluster))
     assert "bad" in text  # the interesting ones are always shown
     assert "more" in text and text.count("ok-") < 60
+
+
+def test_render_rows_point_at_blocking_instead_of_repeating_the_explanation(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    make_anchor(h, detached=False)
+    make_job(h, "pull", active=1, start=ago(minutes=2), image="nope:1")
+    make_pod(h, "pull", phase="Pending", waiting=("ImagePullBackOff", "Back-off"), image="nope:1",
+             cpu="100m", start=ago(minutes=2))
+    text = explaining.render(sk8s.explain(WF, cluster=h.cluster))
+    assert "tethered" in text
+    row = next(line for line in text.splitlines() if line.strip().startswith("pull "))
+    assert "[ImagePullBackOff]" in row and "cannot pull image" not in row
+    assert text.count("cannot pull image") == 1  # said once, under "blocking:"
+    assert "estimated cost so far: ~$0.0001 (rough" in text  # sub-cent costs keep their digits
