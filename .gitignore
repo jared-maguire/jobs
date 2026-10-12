@@ -17,3 +17,8 @@ test/
 work/
 .venv/
 .superpowers/
+
+# per-clone cluster/config isolation files (never commit)
+.kubeconfig-*
+.sk8s-demo.toml
+.sk8s*.toml

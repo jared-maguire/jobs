@@ -1,0 +1,8 @@
+# Bio-tools layer for examples/na12878_brca2.py, on top of YOUR sk8s worker base.
+#   docker build -f examples/Dockerfile.na12878 --build-arg BASE=<registry>/sk8s-demo-base:py3.14-<sha> -t <registry>/sk8s-demo-bio:py3.14-<sha> .
+# Debian 13 (trixie) apt gives bwa 0.7.18, samtools 1.21, bcftools 1.21.
+ARG BASE
+FROM ${BASE}
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bwa samtools bcftools \
+ && rm -rf /var/lib/apt/lists/*

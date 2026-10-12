@@ -446,5 +446,7 @@ context's namespace if it names one, else `sk8s`.
 - [Conventions](docs/conventions.md): labels, reserved workflow ids, blob key layout, and
   who owns and deletes what.
 - [Developer setup](docs/dev-setup.md): minikube, the integration test suites, MinIO.
+- [Worked example](examples/README.md): NA12878/BRCA2 reads-to-VCF on GKE — a detached,
+  QC-gated pipeline, re-runnable verbatim.
 
 Licensed under the MIT License.
