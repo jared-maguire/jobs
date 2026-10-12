@@ -36,9 +36,11 @@ result = h.result(delete=False)          # blocks if still running; raises the d
 - `sk8s workflows` lists every anchored workflow (finished included) with the
   driver's phase; `sk8s logs <id>` prints the driver log once; `sk8s kill <id>`
   cascades the whole tree.
-- `keep_results=True` stops the client-side close from deleting the workflow —
-  it then **ages out via retention** (`retention_days`, default 7). It is "collect
-  later this week", not an archive; copy anything permanent out of the store.
+- `keep_results=True` stops the client-side close from deleting a workflow your
+  own client created; for the attach-later pattern it is NOT needed —
+  `result(delete=False)` alone suffices. Either way a surviving workflow **ages
+  out via retention** (`retention_days`, default 7): "collect later this week",
+  not an archive; copy anything permanent out of the store.
 
 ## Nested jobs (jobs submitting jobs)
 
@@ -55,9 +57,15 @@ def align(sample: str) -> dict:
 
 Nested submission is proven on the `k8s` (ConfigMap) store and on `gs://` with
 Workload Identity (the pod's identity covers the child's blobs). **It does NOT
-work on stores needing `store_env` credentials (e.g. MinIO `AWS_*`)** —
-`store_env` is deliberately never read from pod env, so children lose the creds.
-Depth is otherwise unlimited; everything hangs off one anchor.
+work out of the box on stores needing `store_env` credentials (e.g. MinIO
+`AWS_*`)** — `store_env` is deliberately never read from pod env, so children are
+built without the creds and their pods fail reaching the store (credential
+errors in the child's logs; the parent sees the child's future fail). Workaround:
+the parent pod *does* hold the creds as plain env (the client exported them), so
+re-propagate explicitly inside the parent before nested submits:
+`sk8s.configure(store_env={k: os.environ[k] for k in ("AWS_ACCESS_KEY_ID",
+"AWS_SECRET_ACCESS_KEY")})`. Depth is otherwise unlimited; everything hangs off
+one anchor.
 
 ## Shared reference volumes (ReadOnlyMany)
 

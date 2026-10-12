@@ -136,5 +136,17 @@ store = "gs://BUCKET/TEAM_NS/"
 image = "REGION-docker.pkg.dev/PROJECT/REPO/sk8s-base:py3.12"   # must match your Python minor!
 ```
 
-Then `sk8s doctor`, then submit. On a `gs://` store, a passing in-cluster probe
-proves Workload Identity, the image, and the store end-to-end.
+Then `sk8s doctor`, then submit.
+
+### What the in-cluster probe is
+
+Doctor's last check, `worker identity (in-cluster store probe)`, submits a tiny
+job that runs as the `sk8s` ServiceAccount with your worker image and does a
+**write, read-back, and delete** against the store *from inside a pod*. A PASS
+therefore proves, in one shot: the image pulls, Workload Identity hands the pod
+the GSA's credentials, and that GSA can read and write the bucket — the whole
+chain your laptop's own credentials cannot prove. It runs **only when the
+cluster is reachable and the store is `gs://`** (skipped for `k8s` and `s3://`
+stores — their access doesn't ride pod identity: ConfigMaps use the SA's RBAC,
+and `s3://` credentials travel as env vars), and it reports "not attempted" when
+the namespace/ServiceAccount checks failed.

@@ -76,8 +76,8 @@ sk8s image build --tag YOURREG/science --base YOURREG/sk8s-base:py3.12 \
 ```
 
 From Python: `from sk8s import images` (not reachable as `sk8s.images`) —
-`images.generate_dockerfile(pip=[...])`, `images.build(tag, ...)`,
-`images.push(tag)`.
+`images.generate_dockerfile(pip=[...])` returns the Dockerfile text (a `str`);
+`images.build(tag, ...)`, `images.push(tag)`.
 
 **apt/system packages** (bwa, samtools, …) need a Dockerfile on your base:
 
