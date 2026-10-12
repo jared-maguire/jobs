@@ -20,6 +20,10 @@ class BlobTooLarge(StoreError):
     pass
 
 
+class RetryExhausted(StoreError):
+    """A conditional-write loop kept losing its race and gave up after its bounded retries."""
+
+
 class VersionMismatch(Sk8sError):
     pass
 

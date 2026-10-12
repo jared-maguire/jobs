@@ -13,6 +13,10 @@ def _is_not_found(exc: Exception) -> bool:
     return getattr(exc, "code", None) == 404
 
 
+def _is_precondition_failed(exc: Exception) -> bool:
+    return getattr(exc, "code", None) == 412  # PreconditionFailed (conditionNotMet)
+
+
 class GCSStore(BlobStore):
     """Google Cloud Storage object store. URI: gs://<bucket>/<key>.
 
@@ -54,6 +58,41 @@ class GCSStore(BlobStore):
     def put(self, key: str, data: bytes, owner: Any | None = None) -> str:
         self._bucket.blob(self._full_key(key)).upload_from_string(data)
         return self.uri_for(key)
+
+    # --- conditional writes (SPIKE-CCW: generation preconditions; verified live) ----------
+    # ifGenerationMatch=0 is create-if-absent; =N is compare-and-swap on the generation. A
+    # missing object never satisfies N > 0 (also a 412), so "changed" and "gone" read alike.
+    def put_if_absent(self, key: str, data: bytes, owner: Any | None = None) -> bool:
+        try:
+            self._bucket.blob(self._full_key(key)).upload_from_string(data, if_generation_match=0)
+        except Exception as exc:  # noqa: BLE001 — google.api_core may be absent with an injected client
+            if _is_precondition_failed(exc):
+                return False
+            raise
+        return True
+
+    def read_with_version(self, key: str) -> tuple[bytes, str]:
+        blob = self._bucket.blob(self._full_key(key))  # a fresh handle: its generation comes from the GET
+        try:
+            data: bytes = blob.download_as_bytes()
+        except Exception as exc:  # noqa: BLE001
+            if _is_not_found(exc):
+                raise BlobNotFound(self.uri_for(key)) from exc
+            raise
+        return data, str(blob.generation)  # same response as the bytes (spike E6/X4)
+
+    def put_if_version(self, key: str, data: bytes, version: str) -> bool:
+        if not version.isdigit():
+            return False  # not a token this store issued: it cannot match anything
+        try:
+            self._bucket.blob(self._full_key(key)).upload_from_string(
+                data, if_generation_match=int(version)
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_precondition_failed(exc) or _is_not_found(exc):
+                return False
+            raise
+        return True
 
     def get(self, uri: str) -> bytes:
         try:

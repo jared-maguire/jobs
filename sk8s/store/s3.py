@@ -6,9 +6,19 @@ from urllib.parse import urlsplit
 
 from sk8s.errors import BlobNotFound, Sk8sError, StoreError
 from sk8s.store.base import BlobStore
+from sk8s.store.retry import retry_conflicts
 
 ENDPOINT_ENV = "SK8S_S3_ENDPOINT"
 _MAX_DELETE_BATCH = 1000  # S3 DeleteObjects limit
+
+
+def _error(exc: Exception) -> tuple[str, int]:
+    """(Error.Code, HTTP status) of a botocore ClientError; ("", 0) for anything else."""
+    response = getattr(exc, "response", None) or {}
+    return (
+        str(response.get("Error", {}).get("Code", "")),
+        int(response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0) or 0),
+    )
 
 
 class S3Store(BlobStore):
@@ -66,6 +76,44 @@ class S3Store(BlobStore):
     def put(self, key: str, data: bytes, owner: Any | None = None) -> str:
         self._client.put_object(Bucket=self.bucket, Key=self._full_key(key), Body=data)
         return self.uri_for(key)
+
+    # --- conditional writes: PutObject If-None-Match / If-Match (AWS docs; SPIKE-PENDING) -----
+    # NOT verified against a live server (SPIKE-CCW E8 never ran MinIO). Expected losers: 412
+    # PreconditionFailed; 409 ConditionalRequestConflict means a concurrent in-flight write on
+    # the key, so the call is retried (bounded, jittered) until it resolves to a 412 or wins.
+    def _conditional_put(self, key: str, data: bytes, **condition: str) -> bool:
+        def attempt() -> bool | None:
+            try:
+                self._client.put_object(
+                    Bucket=self.bucket, Key=self._full_key(key), Body=data, **condition
+                )
+            except Exception as exc:  # noqa: BLE001 — botocore may be absent with an injected client
+                code, status = _error(exc)
+                if code == "ConditionalRequestConflict" or status == 409:
+                    return None  # retry
+                if code in ("PreconditionFailed", "NoSuchKey") or status in (404, 412):
+                    return False  # exists / changed / gone
+                raise
+            return True
+
+        return retry_conflicts(attempt, what=f"conditional put of {self.uri_for(key)}")
+
+    def put_if_absent(self, key: str, data: bytes, owner: Any | None = None) -> bool:
+        return self._conditional_put(key, data, IfNoneMatch="*")
+
+    def read_with_version(self, key: str) -> tuple[bytes, str]:
+        uri = self.uri_for(key)
+        try:
+            resp = self._client.get_object(Bucket=self.bucket, Key=self._full_key(key))
+        except Exception as exc:  # noqa: BLE001
+            if _error(exc)[0] in ("NoSuchKey", "404", "NotFound"):
+                raise BlobNotFound(uri) from exc
+            raise
+        body: bytes = resp["Body"].read()
+        return body, str(resp["ETag"])
+
+    def put_if_version(self, key: str, data: bytes, version: str) -> bool:
+        return self._conditional_put(key, data, IfMatch=version)
 
     def get(self, uri: str) -> bytes:
         try:
