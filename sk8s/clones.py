@@ -24,7 +24,8 @@ Generation tracking, all as annotations on the primary PVC (so every client sees
   spike section 8): the read-only mount waits, bounded by ``Config.volume_wait_seconds``.
   A client that dies leaves its marker behind; the next reader reconciles it by looking at
   the Job itself, so a lost marker never blocks anyone for good.
-- ``sk8s/writer-generation``: the name of the last rw job that *completed* (succeeded).
+- ``sk8s/writer-generation``: the name of the last rw job that *succeeded or vanished*
+  (a cancelled writer counts; a failed one does not — see the design notes below).
   Job names are unique, so this is an idempotent token rather than a counter: two parties
   settling the same job write the same value and cause no spurious second re-clone.
 

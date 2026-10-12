@@ -244,7 +244,7 @@ A write through a read-only mount fails inside the job with `OSError` (`EROFS`).
 volume like this one is `ReadWriteOnce`: one node at a time, so jobs that mount it
 read-write run one after another. To fan out many concurrent readers on many nodes (a
 genome index, say), create it with `access_modes=["ReadWriteOnce", "ReadOnlyMany"]`; its
-read-only mounts are then served from a hidden clone, as of the last writer that finished.
+read-only mounts are then served from a hidden clone, cut after the last successful writer.
 That needs a storage provisioner that really clones volumes (GKE's persistent-disk driver
 does; minikube's default `standard` class silently serves an **empty** clone), so it is
 described, with a walkthrough, in the [GKE guide](docs/gke.md#6-read-many-volumes).

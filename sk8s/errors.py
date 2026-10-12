@@ -74,7 +74,12 @@ class ImagePullError(PodFailed):
 
 
 class VolumeError(Sk8sError):
-    """Something is wrong with a volume the job asked to mount (base of the volume errors)."""
+    """Something is wrong with a volume the job asked to mount (base of the volume errors).
+
+    Note: ``VolumeAttachBlocked`` and ``VolumeProvisioningFailed`` are NOT subclasses of
+    this — they surface through the pod-failure machinery and subclass ``PodFailed``.
+    Catch ``Sk8sError`` to cover both families.
+    """
 
 
 class VolumeNotFound(VolumeError):
