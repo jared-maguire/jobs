@@ -105,6 +105,18 @@ kubectl create role sk8s --verb=get,list,watch,create,delete,patch \
   --dry-run=client -o yaml | kubectl replace -f -
 ```
 
+Volume diagnostics read events: a job whose pod is stuck behind another node's
+`ReadWriteOnce` volume, or whose clone cannot be provisioned, is turned into a typed error
+(`VolumeAttachBlocked`, `VolumeProvisioningFailed`) from the pod's and claim's events.
+`sk8s config` grants that (read-only `events`); the hand-made role above does not. Without
+it the diagnostics log one warning and diagnose nothing (a stuck pod is then just
+`Pending`, as before) and `sk8s doctor` reports the missing permission. To add it:
+
+```
+kubectl patch role sk8s --type=json \
+  -p '[{"op":"add","path":"/rules/-","value":{"apiGroups":[""],"resources":["events"],"verbs":["get","list","watch"]}}]'
+```
+
 ## Running the suites
 
 ```
@@ -137,7 +149,15 @@ Suite notes:
   get/list/watch/create/delete/patch).
 - **Services.** Uses its own tag, built the same way as the dev image.
 - **Volumes.** Needs `persistentvolumeclaims` in the Role (already in the
-  command above) plus a default StorageClass (minikube's `standard`).
+  command above) plus a default StorageClass (minikube's `standard`). The read-only
+  *clone* lifecycle test (`test_clone_lifecycle_point_in_time_and_supersede`) needs a
+  provisioner that really clones PVCs, so it skips itself unless the default class is GKE's
+  `pd.csi.storage.gke.io` (or minikube's `csi-hostpath-driver` addon): minikube's default
+  provisioner accepts a clone claim and silently serves an empty volume. The clone
+  wiring tests still run on minikube; the data-carrying one runs on GKE (see
+  [the GKE guide](gke.md#6-read-many-volumes)). Against GKE set
+  `SK8S_NAMESPACE`, `SK8S_TEST_PULL_POLICY=IfNotPresent`, `SK8S_VOLUMES_TEST_IMAGE`
+  (the Artifact Registry image) and, for cold Autopilot nodes, `SK8S_TEST_TIMEOUT_SCALE=3`.
 - **Config / doctor / CLI.** Needs no hand-made RBAC: it creates and deletes its
   own namespaces (`sk8s-it-cfg*`) with `sk8s config`'s machinery, and runs the
   CLI with a temp `HOME` so your real `~/.config/sk8s/config.toml` is untouched.

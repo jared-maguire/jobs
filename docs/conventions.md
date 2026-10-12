@@ -80,7 +80,10 @@ On a volume created with `access_modes` including both `ReadWriteOnce` and `Read
 | `sk8s/writer-generation` | Name of the last read-write job that completed; a clone is re-taken when it changes |
 | `writers.sk8s/<job>` | One per read-write job in flight (value: start time); set before the Job is created, removed when it ends. A clone is never taken while one exists |
 
-On a clone PVC: `sk8s/clone-generation` holds the `sk8s/writer-generation` it was taken at.
+On a clone PVC: `sk8s/clone-generation` holds the `sk8s/writer-generation` it was taken at, and
+`sk8s/clone-last-used` the time (ISO 8601) a read-only mount last adopted it. A superseded clone
+created or used within the last 120 seconds is not swept by a reader's end (a submit may be
+between resolving it and creating its Job); `close()` and `delete_volume` do not wait for that.
 
 On a blob ConfigMap: `sk8s/key` holds the original blob key, because the ConfigMap *name*
 is a lossy sanitization of it.
@@ -144,7 +147,7 @@ segment>` (so a doctor probe is briefly labeled `sk8s/workflow-id=doctor`).
 `sk8s/store` and `sk8s/store-prefix`, and every sk8s code path that deletes an anchor also
 deletes that prefix from the store. Deleting an anchor by hand (`kubectl delete configmap`)
 is not an sk8s code path, so in an object store its blobs stay behind until you remove them
-(see [GKE guide](gke.md#8-known-behavior-deleting-an-anchor-by-hand)).
+(see [GKE guide](gke.md#9-known-behavior-deleting-an-anchor-by-hand)).
 
 **Owned by nothing**: services (Deployment, Service, pod, payload blob), `keep=True`
 volumes and their read-only clones. No workflow label, no ownerReference, never selected by `clean`. They go away only

@@ -15,14 +15,14 @@ Contents: [1. Prerequisites](#1-prerequisites) -
 [2. Worker image](#2-worker-image) -
 [3. Bucket, identity and `sk8s config`](#3-bucket-identity-and-sk8s-config) -
 [4. `sk8s doctor`](#4-sk8s-doctor) - [5. First jobs](#5-first-jobs) -
-[6. Autopilot notes](#6-autopilot-notes) - [7. What it costs](#7-what-it-costs) -
-[8. Known behavior: raw anchor deletion](#8-known-behavior-deleting-an-anchor-by-hand) -
-[9. Teardown](#9-teardown)
+[6. Read-many volumes](#6-read-many-volumes) - [7. Autopilot notes](#7-autopilot-notes) - [8. What it costs](#8-what-it-costs) -
+[9. Known behavior: raw anchor deletion](#9-known-behavior-deleting-an-anchor-by-hand) -
+[10. Teardown](#10-teardown)
 
 > **Money first.** Almost everything here costs pennies. The one thing that does not is
 > a **Filestore** instance (ReadWriteMany volumes): a 1 TiB minimum, billed every hour it
 > exists. sk8s never creates one unless you ask for a `ReadWriteMany` volume. See
-> [What it costs](#7-what-it-costs) before you try it.
+> [What it costs](#8-what-it-costs) before you try it.
 
 ## 1. Prerequisites
 
@@ -80,7 +80,7 @@ file.googleapis.com                  Cloud Filestore API
 ### An Autopilot cluster
 
 If you do not have one, create it (a few minutes; a cluster costs money while it exists,
-see [What it costs](#7-what-it-costs)). Autopilot clusters have Workload Identity on by
+see [What it costs](#8-what-it-costs)). Autopilot clusters have Workload Identity on by
 default, which sk8s relies on:
 
 ```bash skip
@@ -241,6 +241,7 @@ annotate ServiceAccount sk8s in sk8s: iam.gke.io/gcp-service-account=sk8s-worker
 create-or-replace Role sk8s in sk8s: get/list/watch/create/delete/patch on pods,pods/log,configmaps,persistentvolumeclaims,services [core]
 create-or-replace Role sk8s in sk8s: get/list/watch/create/delete/patch on jobs [batch]
 create-or-replace Role sk8s in sk8s: get/list/watch/create/delete/patch on deployments [apps]
+create-or-replace Role sk8s in sk8s: get/list/watch on events [core]
 create-or-replace RoleBinding sk8s in sk8s: Role sk8s -> ServiceAccount sk8s
 
 cloud plan (not run):
@@ -465,7 +466,7 @@ If it is still red after five minutes, the signature is real; follow the hint.
 
 Run each of these as a script (they use your `SK8S_CONFIG`, so the same shell that ran
 doctor). Warm nodes make a job take roughly 10 to 20 seconds; a cold node adds the scale-up time
-described in [Autopilot notes](#6-autopilot-notes).
+described in [Autopilot notes](#7-autopilot-notes).
 
 A single job, then a future:
 
@@ -547,7 +548,8 @@ submitted wf-7qyo1c
 `sk8s workflows`, `sk8s logs <id>` and `sk8s kill <id>` list, read and delete workflows
 from the command line. Services (`sk8s.serve`) and `ReadWriteOnce` volumes
 (`sk8s.create_volume`) work on GKE as they do anywhere; the README tour covers them, and
-the integration suites run against this setup. Check that the session left nothing
+the integration suites run against this setup. Volumes that many pods on many nodes read
+at once are [section 6](#6-read-many-volumes). Check that the session left nothing
 behind:
 
 ```bash
@@ -563,7 +565,429 @@ configmap/kube-root-ca.crt   1      80m
 gs://my-project-sk8s/:
 ```
 
-## 6. Autopilot notes
+## 6. Read-many volumes
+
+A `ReadWriteOnce` volume (the default) attaches to one node at a time, so only the pods on
+that node can use it. For the case where you populate a big reference once (a genome index,
+a model) and then run **many readers at the same time, on many nodes**, sk8s offers a
+volume that is written once and read by any number of pods, at persistent-disk prices: no
+Filestore, no 1 TiB minimum. Ask for it when you create the volume (its access modes are fixed then):
+
+```python skip
+sk8s.create_volume("500Gi", name="index", access_modes=["ReadWriteOnce", "ReadOnlyMany"])
+```
+
+The rest of this section is that volume's life, run in order against the same cluster as
+the earlier sections (the commands assume the `NAMESPACE` and `SK8S_CONFIG` of
+[section 1](#credentials-without-disturbing-your-other-clusters)).
+
+### How it works
+
+Every `volumes=` mount says how it mounts the volume, and **the default is read-only**:
+
+| `volumes=` | Meaning |
+|---|---|
+| `"index"` | one read-only mount at `/mnt/index` |
+| `["index", "refs"]` | several read-only mounts |
+| `{"index": {"access_mode": "rw", "mountpoint": "/data"}}` | `access_mode` is `"ro"` (default) or `"rw"`; `mountpoint` defaults to `/mnt/<name>`; both are optional |
+
+A volume created with both `ReadWriteOnce` and `ReadOnlyMany` is a *logical* volume made of
+two persistent disks that sk8s keeps in step:
+
+- the **primary**, an ordinary `ReadWriteOnce` disk. `rw` mounts use it directly, so writing
+  works exactly as it does for any other volume (one writer node at a time);
+- a **clone** of the primary, a hidden `ReadOnlyMany` claim named `<volume>-ro-<hash>`
+  (label `sk8s/kind=volume-clone`). Every read-only mount uses it, from any number of nodes.
+  sk8s creates it when the first read-only job is submitted and replaces it after a `rw`
+  job has completed.
+
+The clone exists because GKE's persistent-disk driver cannot provision a `ReadOnlyMany`
+disk from scratch, nor one claim that is both `ReadWriteOnce` and `ReadOnlyMany`; the
+documented way to get a many-reader disk is to clone a populated one. You never name the
+clone, and `delete_volume` removes it with the volume.
+
+### Populate, then fan out
+
+Create the volume and populate it with one read-write job. The volume is `keep=True` so it
+outlives the script; the job writes eight 1 MiB files and a manifest of their digests:
+
+```python
+# rox_populate.py
+import sk8s
+
+
+def build_index():
+    # Runs in the cluster, with the volume mounted read-write at /mnt/index.
+    import hashlib, json, pathlib, random
+
+    manifest = {}
+    for i in range(8):
+        data = random.Random(i).randbytes(1024 * 1024)
+        pathlib.Path(f"/mnt/index/part-{i}.bin").write_bytes(data)
+        manifest[f"part-{i}.bin"] = hashlib.sha256(data).hexdigest()
+    pathlib.Path("/mnt/index/manifest.json").write_text(json.dumps(manifest))
+    return len(manifest)
+
+
+sk8s.create_volume("10Gi", name="index", keep=True, access_modes=["ReadWriteOnce", "ReadOnlyMany"])
+print(sk8s.run(build_index, volumes={"index": {"access_mode": "rw"}}))  # 8 files written
+```
+
+```bash
+python rox_populate.py
+kubectl -n $NAMESPACE get pvc -L sk8s/kind
+```
+
+```text
+8
+NAME    STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE   KIND
+index   Bound    pvc-92ddf0d2-00d8-4c0e-8300-28471de41b03   10Gi       RWO            standard-rwo   <unset>                 41s   volume-keep
+```
+
+(20 to 40 seconds, depending on whether a node is already warm.) There is no clone yet: nothing has read the volume.
+Now the readers. This script mounts the volume read-only in four jobs, each of which
+checks every file against the manifest and then stays alive for three minutes so that all
+four overlap (nodes come up at different times, and a reader only starts once its node has). Each asks for five CPUs, which is more than half of an Autopilot node, so **no
+two readers can share a node**: the fan-out has to span nodes, which is the point. (A real
+reader would ask for what it needs, and Kubernetes decides placement.)
+
+```python
+# rox_fanout.py
+import sk8s
+
+
+def check(i):
+    # Runs in the cluster, with the volume mounted READ-ONLY at /mnt/index.
+    import hashlib, json, pathlib, socket, time
+
+    manifest = json.loads(pathlib.Path("/mnt/index/manifest.json").read_text())
+    good = sum(
+        hashlib.sha256(pathlib.Path(f"/mnt/index/{name}").read_bytes()).hexdigest() == digest
+        for name, digest in manifest.items()
+    )
+    time.sleep(180)  # a real job would work from the index here; this keeps all four alive together, even while Autopilot is still adding nodes
+    return socket.gethostname(), good, len(manifest)
+
+
+# volumes="index" is a read-only mount at /mnt/index. Five CPUs per reader means no two fit on one
+# node, so this fan-out has to span nodes (an ordinary reader would ask for much less).
+for pod, good, total in sk8s.map(check, range(4), volumes="index", requests={"cpu": "5"}):
+    print(pod, good, "of", total, "files verified")
+```
+
+Run it in the background and look at the cluster while the readers are running:
+
+```bash
+python rox_fanout.py > fanout.out &
+sleep 20
+kubectl -n $NAMESPACE wait pod -l app.kubernetes.io/managed-by=sk8s --for=condition=Ready --timeout=600s
+kubectl -n $NAMESPACE get pods -o wide
+kubectl -n $NAMESPACE get pvc -L sk8s/kind,sk8s/clone-of -o wide
+kubectl get volumeattachments
+kubectl -n $NAMESPACE get pod -l app.kubernetes.io/managed-by=sk8s -o jsonpath='{.items[0].spec.containers[0].resources}{"\n"}'
+wait
+cat fanout.out
+```
+
+```text
+pod/job-k7g3eu-6q9wt condition met
+pod/job-o0nw4f-7t8wn condition met
+pod/job-vilyp6-dtps2 condition met
+pod/job-ygja8g-knw8d condition met
+NAME               READY   STATUS    RESTARTS   AGE     IP              NODE                                           NOMINATED NODE   READINESS GATES
+job-k7g3eu-6q9wt   1/1     Running   0          2m48s   10.27.129.195   gk3-autopilot-cluster-1-pool-1-06d9103d-8496   <none>           <none>
+job-o0nw4f-7t8wn   1/1     Running   0          2m47s   10.27.129.140   gk3-autopilot-cluster-1-pool-1-06d9103d-4gdz   <none>           <none>
+job-vilyp6-dtps2   1/1     Running   0          2m46s   10.27.129.67    gk3-autopilot-cluster-1-pool-1-06d9103d-s25d   <none>           <none>
+job-ygja8g-knw8d   1/1     Running   0          2m49s   10.27.129.3     gk3-autopilot-cluster-1-pool-1-06d9103d-456w   <none>           <none>
+NAME                STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE     VOLUMEMODE   KIND           CLONE-OF
+index               Bound    pvc-92ddf0d2-00d8-4c0e-8300-28471de41b03   10Gi       RWO            standard-rwo   <unset>                 3m34s   Filesystem   volume-keep    
+index-ro-f0d15941   Bound    pvc-39e9f8ef-ab1d-49c4-bfdd-c0bd14fe289a   10Gi       ROX            standard-rwo   <unset>                 2m50s   Filesystem   volume-clone   index
+NAME                                                                   ATTACHER                PV                                         NODE                                           ATTACHED   AGE
+csi-3cebb529...1fd8   pd.csi.storage.gke.io   pvc-39e9f8ef-ab1d-49c4-bfdd-c0bd14fe289a   gk3-autopilot-cluster-1-pool-1-06d9103d-456w   true       89s
+csi-aede580b...9978   pd.csi.storage.gke.io   pvc-39e9f8ef-ab1d-49c4-bfdd-c0bd14fe289a   gk3-autopilot-cluster-1-pool-1-06d9103d-s25d   true       102s
+csi-c81cdf81...496a   pd.csi.storage.gke.io   pvc-39e9f8ef-ab1d-49c4-bfdd-c0bd14fe289a   gk3-autopilot-cluster-1-pool-1-06d9103d-4gdz   true       2m37s
+csi-ee709362...5753   pd.csi.storage.gke.io   pvc-39e9f8ef-ab1d-49c4-bfdd-c0bd14fe289a   gk3-autopilot-cluster-1-pool-1-06d9103d-8496   true       75s
+{"limits":{"ephemeral-storage":"1Gi"},"requests":{"cpu":"5","ephemeral-storage":"1Gi","memory":"5Gi"}}
+job-ygja8g-knw8d 8 of 8 files verified
+job-k7g3eu-6q9wt 8 of 8 files verified
+job-o0nw4f-7t8wn 8 of 8 files verified
+job-vilyp6-dtps2 8 of 8 files verified
+```
+
+(Trimmed: the attachment names are shortened; the `get pods` and `get pvc` ages are the
+moment of the command, and `wait` returned after the last reader was up. Your names, IPs and
+times will differ.)
+
+What it shows. Four readers ran **at the same time on four different nodes**; the
+`volumeattachments` list has four attachments of the one clone's disk (`pvc-39e9f8ef-...`),
+one per node; and every reader read all eight files and got the digests the writer
+recorded. In the claim list `index` is the `ReadWriteOnce` primary and `index-ro-f0d15941`
+the `ReadOnlyMany` clone that all four mounted. The jsonpath line is what a reader's pod
+really got: Autopilot filled in 5 GiB of memory to go with the 5 CPUs (and an ephemeral-storage
+request) and you pay for it ([Autopilot notes](#7-autopilot-notes)). The clone was
+created in about 5 seconds (the clone claim went `Pending` to `Bound` as the first reader was
+scheduled). The readers were all up after about 2 minutes 50 seconds (the `AGE` column), nearly
+all of it Autopilot adding four nodes big enough for 5-CPU pods; a fan-out of small readers on
+a cluster that needs fewer new nodes is up in about a minute and a half.
+
+### Point-in-time reads
+
+**A read-only mount shows the volume as of the last `rw` job that completed.** That is the
+contract, and it follows from the clone: a reader does not see a writer's changes until the
+writer has finished, and does not see them live afterwards either; the *next* read-only
+job after a writer completes gets a new clone.
+
+```python
+# rox_update.py
+import sk8s
+
+
+def publish(version):
+    import pathlib
+
+    pathlib.Path("/mnt/index/VERSION").write_text(version)
+
+
+def read_version():
+    import pathlib
+
+    return pathlib.Path("/mnt/index/VERSION").read_text()
+
+
+def try_to_write():
+    import pathlib
+
+    pathlib.Path("/mnt/index/oops").write_text("x")
+
+
+sk8s.run(publish, "v1", volumes={"index": {"access_mode": "rw"}})
+print(sk8s.run(read_version, volumes="index"))  # v1
+sk8s.run(publish, "v2", volumes={"index": {"access_mode": "rw"}})
+print(sk8s.run(read_version, volumes="index"))  # v2: a new clone, taken once the writer had finished
+try:
+    sk8s.run(try_to_write, volumes="index")
+except OSError as e:
+    print("read-only:", e)
+```
+
+```bash
+python rox_update.py
+```
+
+```text
+v1
+v2
+read-only: [Errno 30] Read-only file system: '/mnt/index/oops'
+```
+
+The rules, stated plainly:
+
+- Readers see the volume as of the last `rw` job that **succeeded**. A writer that is still
+  running is invisible; one that failed or was cancelled never becomes visible as a
+  generation of its own.
+- **A clone is never taken while a writer is running** (a copy of a disk that is mounted
+  read-write is a dirty copy). A read-only job submitted while a `rw` job is running
+  therefore *waits inside `submit()`* for the writer to finish, up to
+  `volume_wait_seconds` (300), then raises `sk8s.VolumeWaitTimeout`. So
+  `submit(writer)` followed straight by `map(readers)` blocks until the writer is done; call
+  `writer.result()` first if you would rather see the writer's own error.
+- A read-only job on a volume that no `rw` job has ever completed on raises
+  `sk8s.VolumeNotPopulated` (a clone of a blank disk is not a volume anyone can mount).
+- A write through a read-only mount fails in your function with `OSError` (`EROFS`), as
+  above. It is the kernel refusing, not a hang.
+- The clone for the previous generation is deleted once no job uses it. A client that
+  closes (or exits) removes the superseded clones of the volumes it read; anything it had to
+  leave (a clone an active job still holds) is removed by the next read-only submit or
+  reader end on that volume, or at the latest by `delete_volume`.
+
+### What it costs
+
+The clone is a **second persistent disk of the same size as the volume**, billed at the
+full provisioned size (not the data in it) from the moment it exists, and a replaced clone
+is deleted after its readers finish, so there are two clones only briefly after a writer.
+A 500 GiB index is therefore two 500 GiB disks (1,000 GiB of `pd-balanced`, which is on the
+order of $100 a month at list prices) while it is in use; a 100 GiB index is about $20. The
+alternative for many readers, a `ReadWriteMany` Filestore volume, is $150 to $220 a month
+at its 1 TiB minimum whatever you store ([What it costs](#8-what-it-costs)). Readers add
+nothing: any number of pods attach one clone. The disk is billed until you
+`delete_volume` it (or its workflow ends, for a `keep=False` volume); see
+[Teardown](#teardown-of-a-read-many-volume).
+
+Cloning is quick: the 10 GiB clone above was `Bound` about 5 seconds after its first reader
+was scheduled. Larger disks take longer and the claim just stays `Pending` while the
+provisioner works; sk8s only fails it (`sk8s.VolumeProvisioningFailed`, with the
+provisioner's event text) if `ProvisioningFailed` events persist for
+`volume_provision_grace_seconds` (300), which is the kind of thing a quota or a
+rate-limited source disk looks like. Cloning of terabyte-scale disks was not measured.
+
+### Zone pinning
+
+A clone is created in the zone of its source disk, and a disk can only be attached to nodes
+in its own zone. The readers of a volume are therefore all in **one zone**, the zone the
+primary disk was provisioned in (the zone of the node that first ran a job on it, since
+the default class binds when a pod is first scheduled). Autopilot adds nodes in that zone as
+needed, so a fan-out still spans as many nodes as it wants, but not several zones. The
+disks from the run above:
+
+```bash
+gcloud compute disks list --filter="zone~$REGION" --format='table(name,zone.basename(),sizeGb,sourceDisk.basename())'
+```
+
+```text
+NAME                                      ZONE           SIZE_GB  SOURCE_DISK
+pvc-00e71f53-baf2-4012-8725-40e7d04196ce  us-central1-b  10       pvc-92ddf0d2-00d8-4c0e-8300-28471de41b03
+pvc-92ddf0d2-00d8-4c0e-8300-28471de41b03  us-central1-b  10
+```
+
+(Primary and clone: same zone, and the clone records its source. Other disks in the
+project are omitted here.)
+
+### Writers queue; a wedge is cut off
+
+Only the clone is many-reader. The primary is `ReadWriteOnce`, and two `rw` jobs on
+different nodes cannot hold it at once. Two cases, because Kubernetes treats them
+the same and sk8s must not:
+
+**A second writer waits its turn.** Kubernetes leaves the second pod in
+`ContainerCreating` (event `FailedAttachVolume ... Waiting for detach ... Volume is already
+used by pod(s) ...`) until the first pod is done, then attaches it, about 30 seconds
+later. sk8s waits too:
+
+```python
+# rox_queue.py
+import time
+
+import sk8s
+
+
+def hold(seconds):
+    import pathlib, time
+
+    pathlib.Path("/mnt/index/queued").write_text("x")
+    time.sleep(seconds)
+
+
+rw = {"index": {"access_mode": "rw"}}
+t0 = time.time()
+first = sk8s.submit(hold, 120, volumes=rw, requests={"cpu": "5"})
+second = sk8s.submit(hold, 1, volumes=rw, requests={"cpu": "5"})  # lands on another node: it waits
+first.result()
+print(f"first done after {time.time() - t0:.0f}s")
+second.result()
+print(f"second done after {time.time() - t0:.0f}s")
+```
+
+```bash
+python rox_queue.py
+```
+
+```text
+first done after 143s
+second done after 170s
+```
+
+**A fan-out of writers, or a reader fleet forgotten on the primary, never finishes.**
+Kubernetes has no timeout here: the blocked pods wait for ever. sk8s gives a *live* holder
+`volume_attach_grace_seconds` (default 300) to finish, and then fails the blocked job with
+`sk8s.VolumeAttachBlocked`, naming the holder and quoting the event, and deletes it. To see
+it without waiting five minutes, shorten the grace for one run: a holder takes the volume for
+seven minutes, and two more writers, each too big to share its node, try to start:
+
+```python
+# rox_wedge.py
+import os
+import subprocess
+
+import sk8s
+
+
+def hold(seconds):
+    import pathlib, time
+
+    pathlib.Path("/mnt/index/holder").write_text("x")
+    time.sleep(seconds)
+
+
+rw = {"index": {"access_mode": "rw"}}
+holder = sk8s.submit(hold, 420, volumes=rw, requests={"cpu": "5"})
+# Wait until the holder's pod is running, so it is the one that has the disk.
+subprocess.run(
+    ["kubectl", "-n", os.environ["NAMESPACE"], "wait", "pod", "-l", f"job-name={holder.job_name}",
+     "--for=condition=Ready", "--timeout=600s"],
+    check=True, capture_output=True,
+)
+# Two more writers, each too big to share the holder's node: they cannot attach the disk.
+late = [sk8s.submit(hold, 1, volumes=rw, requests={"cpu": "5"}) for _ in range(2)]
+for f in late:
+    try:
+        f.result()
+        print(f.job_name, "ran")
+    except sk8s.VolumeAttachBlocked as e:
+        print(e)
+holder.result()
+print(holder.job_name, "ran to completion")
+```
+
+```bash
+SK8S_VOLUME_ATTACH_GRACE_SECONDS=60 python rox_wedge.py
+```
+
+```text
+job job-vy8is8 failed: cannot start: its volume 'index' (PVC 'index') is still held by job-f8v08b-brhpq on another node, and a ReadWriteOnce disk attaches to one node at a time. Kubernetes reports FailedAttachVolume: Waiting for detach for volume "pvc-92ddf0d2-00d8-4c0e-8300-28471de41b03" Volume is already used by pod(s) job-f8v08b-brhpq
+This wait has no timeout of its own. Either wait for job-f8v08b-brhpq to finish and resubmit, or run these jobs one at a time. To fan out many concurrent readers, create the volume with access_modes=["ReadWriteOnce", "ReadOnlyMany"] and mount it read-only (the default): readers are then served from a read-only clone that any number of nodes can attach.
+job job-i5j1h4 failed: cannot start: its volume 'index' (PVC 'index') is still held by job-f8v08b-brhpq on another node, and a ReadWriteOnce disk attaches to one node at a time. Kubernetes reports FailedAttachVolume: Waiting for detach for volume "pvc-92ddf0d2-00d8-4c0e-8300-28471de41b03" Volume is already used by pod(s) job-f8v08b-brhpq
+This wait has no timeout of its own. Either wait for job-f8v08b-brhpq to finish and resubmit, or run these jobs one at a time. To fan out many concurrent readers, create the volume with access_modes=["ReadWriteOnce", "ReadOnlyMany"] and mount it read-only (the default): readers are then served from a read-only clone that any number of nodes can attach.
+job-f8v08b ran to completion
+```
+
+The holder ran to completion; the two blocked writers were failed and deleted (no `Pending`
+pod is left behind). The error fires about the grace plus up to a minute of probe delay
+after the pod was blocked. The three knobs, settable in the config file, as `SK8S_*`
+environment variables or as keyword arguments, are:
+
+| Setting | Default | What it bounds |
+|---|---|---|
+| `volume_wait_seconds` | 300 | a read-only submit waiting for a running `rw` job to finish (`VolumeWaitTimeout`) |
+| `volume_attach_grace_seconds` | 300 | a pod blocked behind a live holder of the `ReadWriteOnce` disk before `VolumeAttachBlocked`; make it longer than the longest writer you are willing to queue behind |
+| `volume_provision_grace_seconds` | 300 | the clone staying `Pending` with `ProvisioningFailed` events before `VolumeProvisioningFailed` |
+
+### The silent-empty-clone hazard on other clusters
+
+> **A StorageClass whose provisioner does not implement volume cloning can hand you an
+> empty volume with no error.** The read-many mechanism creates a claim with a
+> `dataSource`, and a provisioner that ignores `dataSource` simply provisions a blank disk
+> and says nothing. minikube's default `standard` class (`k8s.io/minikube-hostpath`) does
+> exactly that: the clone claim binds, the reader mounts it read-only, and every read finds
+> **no data**. GKE's persistent-disk driver (`pd.csi.storage.gke.io`, the `standard-rwo`
+> and `premium-rwo` classes) implements cloning and is what this guide ran on. sk8s cannot
+> detect the difference from inside a namespace. Before trusting read-many volumes on any
+> other cluster, run the populate-then-read walkthrough above and check that the readers see
+> your data; the repository's lifecycle test
+> (`test_clone_lifecycle_point_in_time_and_supersede`) skips itself on provisioners it
+> does not know to clone.
+
+### Teardown of a read-many volume
+
+`delete_volume` removes the volume and its clone(s). A claim waits for pods that still mount
+it before it goes (a clone whose readers have finished disappears when their pods do), and
+the disks go a little after the claims. Check the claims and the project's disks; the
+disks are named `pvc-<uid>` (not `sk8s-*`), so compare against the list from before:
+
+```bash
+python -c 'import sk8s; sk8s.delete_volume("index")'
+kubectl -n $NAMESPACE get pvc
+for i in $(seq 30); do [ -z "$(gcloud compute disks list --filter="zone~$REGION" --format='value(name)')" ] && break; sleep 5; done  # the disks go a little after the claims
+gcloud compute disks list --filter="zone~$REGION" --format='table(name,zone.basename(),sizeGb,sourceDisk.basename())'
+```
+
+```text
+No resources found in sk8s namespace.
+```
+
+(The two remaining disks are not sk8s's.) A volume that was never deleted keeps both disks
+billing: `kubectl get pvc -A -l sk8s/kind` lists every sk8s volume and clone.
+
+## 7. Autopilot notes
 
 Autopilot manages the nodes, so a few things differ from minikube.
 
@@ -645,7 +1069,16 @@ before the error reaches you. `JobRejected` also covers an RBAC `403` or an inva
 `sk8s` ServiceAccount in the namespace sk8s is configured for, and so does a workflow
 driver that submits jobs itself, so nested jobs reach the bucket with no extra setup.
 
-## 7. What it costs
+**Volumes and Autopilot.** The [read-many walkthrough](#6-read-many-volumes) turned up three
+Autopilot details. Requests are rewritten for memory too: asking for `cpu: 5` and no memory
+gave each reader 5 GiB, which is what you are billed for. A disk is created when the first pod
+that uses it is scheduled (the default classes wait for a consumer), so a volume's zone is
+the zone of the node that first ran a job on it, and a clone's readers are pinned to that zone.
+And Autopilot refuses a pod that uses pod anti-affinity unless it requests at least 500m of
+CPU (`autogke-pod-limit-constraints`); sk8s has no anti-affinity option, so this only matters if
+you add one yourself, as the live tests for this feature did to force readers onto different nodes.
+
+## 8. What it costs
 
 Rough, us-central1, list prices at the time of writing; check the
 [GKE](https://cloud.google.com/kubernetes-engine/pricing),
@@ -659,6 +1092,7 @@ Rough, us-central1, list prices at the time of writing; check the
 | Artifact Registry | storage per GiB-month beyond a small free tier | the worker image is about 95 MB: pennies or free |
 | Cloud Storage bucket | storage per GiB-month plus operations | blobs are deleted as workflows finish; an idle empty bucket costs nothing |
 | `ReadWriteOnce` volumes (`create_volume`) | a persistent disk (PD) per GiB-month while the claim exists | pennies; the disk goes with the claim, and a `keep=True` volume lives until you `delete_volume()` it |
+| Read-many volumes (`access_modes=["ReadWriteOnce", "ReadOnlyMany"]`) | **two** persistent disks of the volume's size: the volume and its read-only clone, each billed at full size | about twice the PD price of the same size; no Filestore. See [Read-many volumes](#6-read-many-volumes) |
 | Idle | no pods | sk8s runs nothing between jobs, so apart from the management fee above and the pennies of stored data, an idle setup costs nothing |
 | **Filestore (`ReadWriteMany`)** | **about $0.20 to $0.30 per hour, from the moment the instance exists** | **1 TiB minimum (Basic HDD tier). One test run, about 6.5 minutes of existence, cost about $0.025. Left running, it is about $150 to $220 a month.** |
 
@@ -695,7 +1129,7 @@ No resources found
 Instances created by the CSI driver are named `pvc-<uuid>` (not `sk8s-*`), so a `grep sk8s`
 will not find them; the empty list above is the check that matters.
 
-## 8. Known behavior: deleting an anchor by hand
+## 9. Known behavior: deleting an anchor by hand
 
 Every workflow is owned by one anchor ConfigMap (`sk8s-anchor-<id>`); deleting the anchor
 deletes the workflow's Jobs and, in the default `k8s` store, its blobs, by Kubernetes
@@ -789,12 +1223,13 @@ yourself, scoped to `sk8s/wf-` and **never** to `svc/` (a service's payload is r
 every time its pod restarts). The exact rules and why are in
 [conventions.md](conventions.md#object-store-lifecycle-rules-and-svc).
 
-## 9. Teardown
+## 10. Teardown
 
 Two kinds of things exist after this guide.
 
 **Transient**, created by your jobs and already cleaned up by sk8s when workflows finish:
-Jobs and pods, workflow anchors, blobs in the bucket, `keep=False` volumes. To confirm,
+Jobs and pods, workflow anchors, blobs in the bucket, `keep=False` volumes (and their read-only
+clones). `keep=True` volumes are not transient: delete them with `sk8s.delete_volume`. To confirm,
 or to sweep up after a crashed session:
 
 ```bash
