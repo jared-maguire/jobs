@@ -128,3 +128,9 @@ def delete_anchor(core_api: Any, store: Any, *, namespace: str, workflow_id: str
         store.delete_prefix(prefix)
     except Exception:  # noqa: BLE001
         log.exception("could not delete blobs under %r for workflow %s", prefix, workflow_id)
+    # The workflow's artifact reference set (GC roots) goes with it; its CAS objects become
+    # unreachable and the next `clean()` sweep collects them after the age floor.
+    try:
+        store.delete_prefix(f"workflows/{workflow_id}")
+    except Exception:  # noqa: BLE001
+        log.exception("could not delete the artifact reference set of workflow %s", workflow_id)
