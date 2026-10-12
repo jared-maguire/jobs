@@ -46,6 +46,8 @@ Races and how they are closed (Plan 10 fix round 1):
   clone is created immediately before its Job. Nothing slow (the payload upload, which can take
   seconds) sits between a clone's creation and the Job that references it, nor between a
   writer's guard and its marker.
+- The volume is **re-read** when the read-only mount is resolved (not the snapshot taken when the
+  submit began): a writer that started, or a generation that moved, during the upload is seen.
 - :meth:`CloneManager.sweep_stale` never deletes a clone created or *used* (adopted by a new
   read-only mount) within ``CLONE_MIN_AGE`` seconds, which is far above the reader's remaining
   gap (a handful of API calls) even on a slow API server. Adoption stamps ``sk8s/clone-last-used``.
@@ -303,6 +305,11 @@ class CloneManager:
         Waits (bounded) for running rw jobs, then ensures a clone of the current generation
         exists, sweeps superseded clones, and returns the clone's name.
         """
+        # ``pvc`` is the snapshot taken when the submit began; the payload upload since then can
+        # have taken seconds, in which time another client may have started a writer or moved the
+        # generation. Resolving from the snapshot would clone under that writer (or re-create a
+        # clone the other client just swept). Found live on GKE (Plan 10 T4); always re-read.
+        pvc = self.read_volume(volume)
         deadline = self.clock() + self.wait_seconds
         while True:
             pvc, running = self._reconcile(volume, pvc)

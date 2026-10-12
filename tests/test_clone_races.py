@@ -74,6 +74,23 @@ def test_a_reader_cloning_during_a_writers_upload_waits_for_it(h: H) -> None:
     assert h.clone_names() == []  # it waited for the writer instead of cloning under it
 
 
+def test_a_writer_that_starts_during_a_readers_upload_is_seen_when_the_reader_resolves(h: H) -> None:
+    """Found live on GKE (Plan 10 T4): the reader resolved its clone from the PVC snapshot taken
+    BEFORE its payload upload, so a writer another client started meanwhile was invisible and the
+    clone was cut under it. The fakes hid this by returning the stored object (now a snapshot)."""
+    h.volume()
+    h.populate()
+    writer_job = "job-other-writer"
+
+    def other_client_starts_a_writer() -> None:
+        h.cluster._clone_manager().mark_writer("idx", writer_job)
+
+    during_next_put(h, other_client_starts_a_writer)
+    with pytest.raises(VolumeWaitTimeout, match=writer_job):
+        h.reader()
+    assert h.clone_names() == []  # it waited for the writer instead of cloning under it
+
+
 @pytest.mark.parametrize("failure", ["store", "anchor", "create", "rejected"])
 def test_every_failure_after_the_marker_removes_it_without_a_generation(h: H, failure: str) -> None:
     h.volume()

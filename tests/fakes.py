@@ -1,6 +1,7 @@
 """In-memory fakes for the kubernetes client surface sk8s uses."""
 from __future__ import annotations
 
+import copy
 import datetime
 import uuid
 from types import SimpleNamespace
@@ -142,8 +143,11 @@ class FakeCoreV1:
         return body
 
     def read_namespaced_persistent_volume_claim(self, name: str, namespace: str) -> Any:
+        # A SNAPSHOT, like a real API server's response: a caller holding an earlier read must
+        # not see later patches (returning the stored object hid a stale-snapshot bug in the
+        # read-only mount path, found live on GKE in Plan 10 Task 4).
         try:
-            return self.pvcs[(namespace, name)]
+            return copy.deepcopy(self.pvcs[(namespace, name)])
         except KeyError:
             raise ApiException(status=404, reason="Not Found")
 
@@ -159,7 +163,10 @@ class FakeCoreV1:
     def patch_namespaced_persistent_volume_claim(self, name: str, namespace: str, body: Any) -> Any:
         """JSON merge-patch of metadata.annotations / metadata.labels; a None value deletes a key."""
         self.pvc_patches.append((name, body))
-        pvc = self.read_namespaced_persistent_volume_claim(name=name, namespace=namespace)
+        try:
+            pvc = self.pvcs[(namespace, name)]  # the stored object itself: patches mutate it
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found") from None
         for field in ("annotations", "labels"):
             patch = (body.get("metadata") or {}).get(field)
             if patch:
@@ -180,7 +187,7 @@ class FakeCoreV1:
             if ns == namespace
             and all((v.metadata.labels or {}).get(k) == val for k, val in wanted.items())
         ]
-        return SimpleNamespace(items=items)
+        return SimpleNamespace(items=copy.deepcopy(items))
 
     def read_namespaced_pod(self, name: str, namespace: str) -> Any:
         try:
