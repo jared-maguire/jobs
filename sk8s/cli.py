@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import json
 import os
 import re
 import shlex
@@ -26,7 +27,7 @@ from kubernetes.client import ApiException
 from kubernetes.config import ConfigException
 from urllib3.exceptions import HTTPError
 
-from sk8s import __version__, anchors, cleaning, images, k8s, spec, workflows
+from sk8s import __version__, anchors, cleaning, datadescribe, images, k8s, spec, workflows
 from sk8s import config as config_mod
 from sk8s import doctor as doctor_mod
 from sk8s import profile as profile_mod
@@ -623,6 +624,15 @@ def _cmd_shell(args: argparse.Namespace) -> int:
     return 0  # only reached when execvp is replaced (tests)
 
 
+def _cmd_data_describe(args: argparse.Namespace) -> int:
+    result = datadescribe.describe(args.target, samples=args.samples, max_objects=args.max_objects)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(datadescribe.format_description(result))
+    return 0
+
+
 # --- parser ------------------------------------------------------------------------------------
 
 
@@ -685,6 +695,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("shell", help="open a shell in a pod in the cluster (needs kubectl)")
     p.add_argument("--image", help="image for the shell pod (default: the worker image)")
     p.set_defaults(func=_cmd_shell)
+
+    data = sub.add_parser("data", help="inspect data (formats, sizes, cohorts)")
+    data_sub = data.add_subparsers(dest="data_command", metavar="ACTION", required=True)
+    p = data_sub.add_parser(
+        "describe", help="sniff the format of a file, or summarize a directory / gs:// / s3:// prefix",
+    )
+    p.add_argument("target", metavar="PATH_OR_URI", help="local file or directory, or a gs:// / s3:// object or prefix")
+    p.add_argument("--json", action="store_true", help="print the result as JSON")
+    p.add_argument("--samples", type=int, default=datadescribe.SAMPLES, metavar="N",
+                   help=f"cohort: files to sniff and report in detail (default: {datadescribe.SAMPLES})")
+    p.add_argument("--max-objects", type=int, default=datadescribe.MAX_OBJECTS, metavar="N",
+                   help=f"cohort: listing cap (default: {datadescribe.MAX_OBJECTS})")
+    p.set_defaults(func=_cmd_data_describe)
     return parser
 
 
