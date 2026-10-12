@@ -509,6 +509,18 @@ def test_sample_format_mismatch_listed(tmp_path: Path) -> None:
     ]
 
 
+def test_fasta_named_txt_gets_the_mismatch_note_and_cohort_entry(tmp_path: Path) -> None:
+    fa = b">chr_test\nACGTACGTACGT\nACGT\n"
+    write(tmp_path / "ref.txt", fa)
+    single = sk8s.describe(str(tmp_path / "ref.txt"))
+    assert single["format"] == "fasta"
+    assert any("looks like" in n or ".txt" in n for n in single["notes"])
+    cohort = sk8s.describe(str(tmp_path))
+    assert cohort["sample_format_mismatches"] == [
+        {"relative_path": "ref.txt", "by_extension": "text", "by_content": "fasta"}
+    ]
+
+
 def test_human_rendering_mentions_key_facts(tmp_path: Path) -> None:
     _fastq_cohort(tmp_path, samples=2)
     out = datadescribe.format_description(sk8s.describe(str(tmp_path)))

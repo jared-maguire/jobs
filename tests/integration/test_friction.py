@@ -27,7 +27,13 @@ from tests.integration.conftest import requires_cluster, suite_pull_policy
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(300)]
 
-IMAGE = os.environ.get("SK8S_FRIC_TEST_IMAGE", "sk8s-dev-fric:latest")
+# Fall back to the shared suite image so CI needs no per-suite env line (the class of
+# failure three branches hit tonight: a new suite's image var missing from ci.yml).
+IMAGE = (
+    os.environ.get("SK8S_FRIC_TEST_IMAGE")
+    or os.environ.get("SK8S_TEST_IMAGE")
+    or "sk8s-dev-fric:latest"
+)
 NS = "sk8s-it-fric"
 
 

@@ -66,7 +66,7 @@ _EXT_FORMATS = {
 _GZ_EXTS = (".gz", ".bgz")
 _PRIORITY = ("fastq", "bam", "cram", "vcf", "csv", "tsv", "fasta")  # headline tie-break, most interesting first
 _AUXILIARY_FORMATS = {"index", "unknown", "text"}
-_CHECKED_FORMATS = {"fastq", "bam", "cram", "vcf", "csv", "tsv", "fasta"}  # extensions we hold content to
+_CHECKED_FORMATS = {"fastq", "bam", "cram", "vcf", "csv", "tsv", "fasta", "text"}  # extensions we hold content to
 
 
 def extension_format(name: str) -> str:
