@@ -12,7 +12,9 @@ from sk8s.doctor import (
     probe_store_in_pod,
     submit_probe_job,
 )
-from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout, PodFailed, RemoteTraceback
+from sk8s.errors import (
+    BlobNotFound, ImageNotConfigured, ImagePullError, JobTimeout, PodFailed, RemoteTraceback,
+)
 from sk8s.profile import ClusterProfile, apply, profile_for
 from sk8s.store.base import BlobStore
 from sk8s.store.local import LocalStore
@@ -558,6 +560,12 @@ def test_worker_probe_image_pull_failure_gets_an_image_hint() -> None:
     c = _doctor_gs(Submitter(raises=ImagePullError("doctor-abc", "reg/x:1")))[WORKER]
     assert not c.ok and "image" in c.fix_hint and "reg/x:1" in c.fix_hint
     assert "Workload Identity" not in c.fix_hint
+
+
+def test_worker_probe_with_no_image_configured_says_so() -> None:
+    c = _doctor_gs(Submitter(raises=ImageNotConfigured()))[WORKER]
+    assert not c.ok and "no worker image" in c.fix_hint and "SK8S_IMAGE" in c.fix_hint
+    assert "Workload Identity" not in c.fix_hint and "client-side" not in c.fix_hint
 
 
 def test_worker_probe_timeout_gets_a_timeout_hint() -> None:

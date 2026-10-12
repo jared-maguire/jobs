@@ -14,7 +14,9 @@ from kubernetes import client
 from kubernetes.client import ApiException
 
 from sk8s import k8s
-from sk8s.errors import BlobNotFound, ImagePullError, JobTimeout, PodFailed, RemoteTraceback
+from sk8s.errors import (
+    BlobNotFound, ImageNotConfigured, ImagePullError, JobTimeout, PodFailed, RemoteTraceback,
+)
 from sk8s.profile import ClusterProfile, desired_role, missing_permissions
 from sk8s.store.base import BlobStore
 
@@ -144,6 +146,12 @@ def submit_probe_job(fn: Callable[[str], str], profile: ClusterProfile) -> str:
 def _worker_probe_hint(profile: ClusterProfile, exc: BaseException) -> str:
     ns, sa = profile.namespace, profile.service_account
     detail = f"probe error: {_describe(exc)}"
+    if isinstance(exc, ImageNotConfigured):
+        return (
+            "no worker image is configured, so the probe pod was never created: build one and "
+            "set SK8S_IMAGE (or `image` in your config); `sk8s config` writes an image_prefix "
+            f"only on GKE ({detail})"
+        )
     if isinstance(exc, ImagePullError):
         return (
             f"the probe pod could not pull its image ({detail}); push the worker image to "

@@ -7,7 +7,7 @@ from sk8s.cleaning import clean  # noqa: E402
 from sk8s.cluster import Cluster  # noqa: E402
 from sk8s.config import Config, load_config  # noqa: E402
 from sk8s.errors import (  # noqa: E402
-    BlobNotFound, BlobTooLarge, ImagePullError, JobRejected, JobTimeout, MapFailed, PodFailed,
+    BlobNotFound, BlobTooLarge, ImageNotConfigured, ImagePullError, JobRejected, JobTimeout, MapFailed, PodFailed,
     RemoteException, RemoteTraceback, ResultDecodeError, Sk8sError, StoreError, VersionMismatch,
     VolumeAttachBlocked, VolumeError, VolumeNotFound, VolumeNotPopulated,
     VolumeProvisioningFailed, VolumeWaitTimeout,
@@ -25,7 +25,7 @@ __all__ = [
     "serve", "get_service", "Service",
     "create_volume", "delete_volume", "scratch_volume",
     "Sk8sError", "StoreError", "BlobNotFound", "BlobTooLarge", "VersionMismatch",
-    "JobTimeout", "JobRejected", "PodFailed", "ImagePullError", "RemoteException",
+    "JobTimeout", "JobRejected", "PodFailed", "ImagePullError", "ImageNotConfigured", "RemoteException",
     "RemoteTraceback", "MapFailed", "ResultDecodeError",
     "VolumeError", "VolumeNotFound", "VolumeNotPopulated", "VolumeWaitTimeout",
     "VolumeAttachBlocked", "VolumeProvisioningFailed",

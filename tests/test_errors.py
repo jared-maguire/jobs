@@ -3,7 +3,7 @@ import pytest
 from sk8s.errors import (
     BlobNotFound, BlobTooLarge, ImagePullError, JobTimeout, MapFailed,
     PodFailed, RemoteException, RemoteTraceback, Sk8sError, StoreError,
-    VersionMismatch,
+    VersionMismatch, ImageNotConfigured,
 )
 
 
@@ -62,3 +62,13 @@ def test_map_failed_carries_results() -> None:
 
 def test_map_failed_results_default_empty() -> None:
     assert MapFailed([(0, ValueError("x"))], total=1).results == {}
+
+
+def test_image_not_configured_explains_the_doctrine_in_five_lines() -> None:
+    e = ImageNotConfigured()
+    assert isinstance(e, Sk8sError)
+    text = str(e)
+    assert len(text.splitlines()) <= 5
+    assert "docker build -f docker/Dockerfile.worker" in text
+    assert "SK8S_IMAGE" in text and "image=" in text
+    assert "publish" in text  # why: nothing is published anywhere, build your own

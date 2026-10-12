@@ -1076,6 +1076,7 @@ def _shell_env(
     monkeypatch: pytest.MonkeyPatch, pods: list[Any]
 ) -> tuple[FakeBatchV1, list[list[str]]]:
     core, batch, _ = _fakes(monkeypatch)
+    monkeypatch.setenv("SK8S_IMAGE", "me/worker:1")  # the worker image is build-your-own
     seq = iter(pods)
     last: list[Any] = [None]
 
@@ -1124,7 +1125,19 @@ def test_shell_default_image_is_worker_image(monkeypatch: pytest.MonkeyPatch) ->
     batch, _ = _shell_env(monkeypatch, [_pod("Running")])
     cli.run(["shell"])
     (job,) = batch.jobs.values()
-    assert job.spec.template.spec.containers[0].image.startswith("ghcr.io/jared-maguire/sk8s:")
+    assert job.spec.template.spec.containers[0].image == "me/worker:1"
+
+
+def test_shell_with_no_image_anywhere_fails_fast_and_creates_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    batch, execs = _shell_env(monkeypatch, [_pod("Running")])
+    monkeypatch.delenv("SK8S_IMAGE")
+    monkeypatch.setenv("SK8S_CONFIG", str(tmp_path / "absent.toml"))
+    assert cli.run(["shell"]) == 1
+    assert "Dockerfile.worker" in capsys.readouterr().err
+    assert batch.jobs == {} and execs == []
+    assert cli.run(["shell", "--image", "alpine"]) == 0  # an explicit image still works
 
 
 def test_shell_without_kubectl_exits_1_and_creates_nothing(

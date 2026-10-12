@@ -141,3 +141,8 @@ def test_run_timeout_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Clean up the still-running job so the test does not leave a 30s worker behind.
     assert submitted[0].cancel() is True
+
+
+def test_local_cluster_needs_no_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SK8S_IMAGE", raising=False)
+    assert LocalCluster().submit(lambda: 7).result(timeout=60) == 7

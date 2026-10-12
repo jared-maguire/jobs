@@ -30,7 +30,7 @@ from sk8s import __version__, anchors, cleaning, images, k8s, spec, workflows
 from sk8s import config as config_mod
 from sk8s import doctor as doctor_mod
 from sk8s import profile as profile_mod
-from sk8s.cluster import default_image, job_phase
+from sk8s.cluster import job_phase, resolve_image
 from sk8s.config import Config, load_config
 from sk8s.errors import Sk8sError
 from sk8s.store import get_store
@@ -594,7 +594,7 @@ def _cmd_shell(args: argparse.Namespace) -> int:
         )
     cfg = _load_cfg()
     namespace = _namespace(None, cfg)
-    image = args.image or default_image(cfg)
+    image = resolve_image(cfg, args.image)
     batch: Any = k8s.batch_api()
     core: Any = k8s.core_api()
     name = spec.job_name("sk8s-shell")

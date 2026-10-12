@@ -16,7 +16,7 @@ def test_public_exports() -> None:
     for name in (
         "LocalCluster", "Sk8sError", "StoreError", "BlobNotFound", "BlobTooLarge",
         "VersionMismatch", "JobTimeout", "PodFailed", "ImagePullError",
-        "RemoteException", "RemoteTraceback", "MapFailed",
+        "RemoteException", "RemoteTraceback", "MapFailed", "ImageNotConfigured",
     ):
         assert name in sk8s.__all__
         assert getattr(sk8s, name).__name__ == name

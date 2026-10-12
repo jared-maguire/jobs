@@ -7,7 +7,7 @@ from kubernetes.client import ApiException
 import sk8s
 from sk8s.cluster import Cluster
 from sk8s.config import Config
-from sk8s.errors import BlobNotFound, Sk8sError
+from sk8s.errors import BlobNotFound, ImageNotConfigured, Sk8sError
 from sk8s.serialize import decode_payload
 from sk8s.services import Service, get_service, serve
 from sk8s.store.local import LocalStore
@@ -74,6 +74,20 @@ def test_no_owner_references(h: Harness) -> None:
 
 def test_url_string_exact(h: Harness) -> None:
     assert _serve(h).url == "http://api.ns1.svc.cluster.local:8080"
+
+
+def test_serve_without_any_image_fails_fast_and_creates_nothing(h: Harness) -> None:
+    h.cluster.config = Config(namespace="ns1", store=h.cluster.config.store)  # no image
+    with pytest.raises(ImageNotConfigured):
+        _serve(h)
+    assert h.apps.deployments == {}
+    assert not h.payload_exists("api")
+
+
+def test_serve_image_argument_suffices_without_a_configured_image(h: Harness) -> None:
+    h.cluster.config = Config(namespace="ns1", store=h.cluster.config.store)
+    _serve(h, image="custom:3")
+    assert h.apps.deployments[("ns1", "api")].spec.template.spec.containers[0].image == "custom:3"
 
 
 def test_image_override(h: Harness) -> None:

@@ -73,6 +73,26 @@ class ImagePullError(PodFailed):
         self.image = image
 
 
+class ImageNotConfigured(Sk8sError):
+    """No worker image is configured, and sk8s publishes none (you build your own).
+
+    Raised before anything is created, when ``image`` is unset in the job options, ``Config`` /
+    ``SK8S_IMAGE``, and no ``image_prefix`` is set to compose a name from.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "no worker image is configured, and sk8s publishes none: build your own and name it.\n"
+            "  docker build -f docker/Dockerfile.worker --build-arg PYTHON_VERSION=<your client's "
+            "minor> -t REGISTRY/sk8s-worker:TAG .\n"
+            "  docker push REGISTRY/sk8s-worker:TAG\n"
+            "then pass image='REGISTRY/sk8s-worker:TAG' per job, or set it once: export "
+            "SK8S_IMAGE=... (or `image = \"...\"` in config.toml; `image_prefix` composes the "
+            "name instead).\n"
+            "See the README quickstart, \"Build the worker image and push it\"."
+        )
+
+
 class VolumeError(Sk8sError):
     """Something is wrong with a volume the job asked to mount (base of the volume errors).
 
