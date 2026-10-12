@@ -74,3 +74,11 @@ def test_data_without_action_is_a_usage_error(capsys: pytest.CaptureFixture[str]
 
 def test_gz_roundtrip_sanity() -> None:  # keeps the helper imports honest
     assert gzip.decompress(gzip.compress(fastq_text(1).encode())).startswith(b"@read0")
+
+
+@pytest.mark.parametrize("flag", ["--samples", "--max-objects"])
+@pytest.mark.parametrize("value", ["0", "-3", "abc"])
+def test_count_flags_must_be_positive_integers(flag: str, value: str, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as e:
+        cli.run(["data", "describe", str(tmp_path), flag, value])
+    assert e.value.code == 2

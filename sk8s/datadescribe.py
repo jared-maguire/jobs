@@ -249,42 +249,70 @@ def _find_aligner(pgs: list[dict[str, str]]) -> dict[str, str] | None:
     return None
 
 
-def _bam_facts(data: bytes) -> Facts:
-    """Parse the BAM header from inflated bytes (which may end mid-header)."""
-    truncated = False
+def _bam_facts(data: bytes, notes: list[str]) -> Facts:
+    """Parse the BAM header from inflated bytes (which may end mid-header, or be corrupt).
+
+    Never raises and always terminates: every length field is validated against the bytes in hand and
+    the reference loop is bounded by what the data could hold. A violation stops parsing, keeps what was
+    parsed so far and appends a note.
+    """
+    truncated = False  # ran out of sniffed bytes (benign: the head is only a prefix)
+    corrupt = False  # a field was invalid (the file itself is suspect)
     text_bytes = b""
     refs: list[dict[str, Any]] = []
     n_ref: int | None = None
-    if len(data) >= 8:
-        l_text = struct.unpack_from("<i", data, 4)[0]
-        text_bytes = data[8 : 8 + max(l_text, 0)]
-        truncated = len(text_bytes) < l_text
-        pos = 8 + l_text
-        if not truncated and len(data) >= pos + 4:
-            n_ref = struct.unpack_from("<i", data, pos)[0]
-            pos += 4
-            for _ in range(max(n_ref, 0)):
-                if len(data) < pos + 4:
-                    truncated = True
-                    break
-                l_name = struct.unpack_from("<i", data, pos)[0]
-                if len(data) < pos + 4 + l_name + 4:
-                    truncated = True
-                    break
-                name = data[pos + 4 : pos + 4 + l_name].rstrip(b"\x00").decode("utf-8", "replace")
-                length = struct.unpack_from("<i", data, pos + 4 + l_name)[0]
-                refs.append({"name": name, "length": length})
-                pos += 4 + l_name + 4
-        else:
-            truncated = True
-    else:
+
+    def bad(why: str) -> None:
+        nonlocal corrupt
+        corrupt = True
+        notes.append(f"BAM header looks corrupt ({why}); stopped parsing it")
+
+    if len(data) < 8:
         truncated = True
+    else:
+        l_text = struct.unpack_from("<i", data, 4)[0]
+        if l_text < 0:
+            bad(f"negative header text length {l_text}")
+        else:
+            text_bytes = data[8 : 8 + l_text]
+            pos = 8 + l_text
+            if len(text_bytes) < l_text or len(data) < pos + 4:
+                truncated = True
+            else:
+                declared = struct.unpack_from("<i", data, pos)[0]
+                pos += 4
+                if declared < 0:
+                    bad(f"negative reference count {declared}")
+                else:
+                    n_ref = declared
+                    for _ in range(min(declared, len(data) // 9)):  # each reference needs >= 9 bytes
+                        if len(data) < pos + 4:
+                            truncated = True
+                            break
+                        l_name = struct.unpack_from("<i", data, pos)[0]
+                        if l_name < 0 or l_name > len(data):
+                            bad(f"reference name length {l_name}")
+                            break
+                        end = pos + 4 + l_name + 4  # > pos always, so the loop strictly advances
+                        if end > len(data):
+                            truncated = True
+                            break
+                        name = data[pos + 4 : pos + 4 + l_name].rstrip(b"\x00").decode("utf-8", "replace")
+                        refs.append({"name": name, "length": struct.unpack_from("<i", data, end - 4)[0]})
+                        pos = end
+                    if len(refs) < declared and not corrupt:
+                        truncated = True
     text = text_bytes.decode("utf-8", "replace")
     if truncated and "\n" in text:
         text = text[: text.rindex("\n") + 1]  # drop a header line cut in half
     header = _parse_sam_header(text)
     if not refs and header["SQ"]:  # references from @SQ when the binary table was not reached
-        refs = [{"name": sq.get("SN", ""), "length": int(sq.get("LN", 0))} for sq in header["SQ"] if sq.get("LN", "0").isdigit()]
+        refs = [
+            {"name": sq.get("SN", ""), "length": int(sq["LN"])}
+            for sq in header["SQ"]
+            if sq.get("LN", "").isascii() and sq.get("LN", "").isdigit()
+        ]
+    exact = n_ref is not None and not corrupt
     hd = header["HD"][0] if header["HD"] else {}
     rgs = [
         {k: v for k, v in (("id", rg.get("ID")), ("sample", rg.get("SM")), ("platform", rg.get("PL")), ("library", rg.get("LB"))) if v is not None}
@@ -293,16 +321,18 @@ def _bam_facts(data: bytes) -> Facts:
     facts: Facts = {
         "sam_version": hd.get("VN"),
         "sort_order": hd.get("SO"),
-        "reference_count": n_ref if n_ref is not None else len(refs),
+        "reference_count": n_ref if exact and n_ref is not None else len(refs),
         "references": refs[:_FIRST_N],
         "read_group_count": len(rgs),
         "read_groups": rgs[:_FIRST_N],
         "aligner": _find_aligner(header["PG"]),
         "programs": [pg.get("ID", "") for pg in header["PG"]][:10],
-        "header_truncated": truncated,
+        "header_truncated": truncated or corrupt,
     }
-    if n_ref is None:
-        facts["reference_count_note"] = "reference table not reached in the sniffed bytes; count is from @SQ lines"
+    if not exact:
+        facts["reference_count_note"] = (
+            f"at least {len(refs)} references: the reference table was not fully read from the sniffed bytes"
+        )
     return facts
 
 
@@ -368,7 +398,10 @@ def _sniff_delimiter(lines: list[str]) -> str | None:
         return None
     best: tuple[float, int, str] | None = None
     for delim in (",", "\t", ";", "|"):
-        counts = [len(r) for r in _parse_table(rows_text, delim)]
+        try:
+            counts = [len(r) for r in _parse_table(rows_text, delim)]
+        except csv.Error:  # e.g. a field over csv's 128 KiB limit (an unwrapped FASTA line): not a table
+            return None
         mode, freq = Counter(counts).most_common(1)[0]
         frac = freq / len(counts)
         if mode >= 2 and frac >= 0.9 and (best is None or (frac, mode) > best[:2]):
@@ -439,7 +472,7 @@ def _sniff(
         if inflated.error:
             notes.append(inflated.error)
         if data[:4] == b"BAM\x01":
-            return _result("bam", "magic", compression, _bam_facts(data), notes)
+            return _result("bam", "magic", compression, _bam_facts(data, notes), notes)
 
     lines = _text_lines(data, data_complete)
     if lines is not None:
@@ -460,7 +493,10 @@ def _sniff(
             notes.append("too little content to confirm the format; identified from the file extension")
             facts = {}
             if ext_fmt in ("csv", "tsv") and not thin:
-                facts = _table_facts(lines, "," if ext_fmt == "csv" else "\t")
+                try:
+                    facts = _table_facts(lines, "," if ext_fmt == "csv" else "\t")
+                except csv.Error as exc:
+                    notes.append(f"could not parse as a table: {exc}")
             return _result(ext_fmt, "extension", compression, facts, notes)
         if not thin:
             return _result("text", "content", compression, {"lines_sampled": len(lines)}, notes)
@@ -541,7 +577,13 @@ def _describe_entry(
             raise
         base["error"] = f"{type(exc).__name__}: {exc}"
         return base
-    found = sniff(name, head, entry.size, small_file_bytes=small_file_bytes)
+    try:
+        found = sniff(name, head, entry.size, small_file_bytes=small_file_bytes)
+    except Exception as exc:  # noqa: BLE001 — a corrupt sampled file must not sink the cohort
+        if not swallow:
+            raise Sk8sError(f"could not parse header of {base['path']}: {type(exc).__name__}: {exc}") from exc
+        base["error"] = f"could not parse header: {type(exc).__name__}: {exc}"
+        return base
     base.update(found)
     base["sniffed_bytes"] = len(head)
     return base

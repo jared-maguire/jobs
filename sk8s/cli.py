@@ -85,6 +85,16 @@ def _namespace(explicit: str | None = None, cfg: Config | None = None) -> str:
 _DURATION = re.compile(r"(\d+(?:\.\d+)?)([dh]?)")
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid integer {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
+
+
 def parse_duration_days(text: str) -> float:
     """'7d' -> 7.0, '36h' -> 1.5, '3' (bare) -> 3.0 days. Anything else is rejected."""
     m = _DURATION.fullmatch(text.strip().lower())
@@ -703,9 +713,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("target", metavar="PATH_OR_URI", help="local file or directory, or a gs:// / s3:// object or prefix")
     p.add_argument("--json", action="store_true", help="print the result as JSON")
-    p.add_argument("--samples", type=int, default=datadescribe.SAMPLES, metavar="N",
+    p.add_argument("--samples", type=_positive_int, default=datadescribe.SAMPLES, metavar="N",
                    help=f"cohort: files to sniff and report in detail (default: {datadescribe.SAMPLES})")
-    p.add_argument("--max-objects", type=int, default=datadescribe.MAX_OBJECTS, metavar="N",
+    p.add_argument("--max-objects", type=_positive_int, default=datadescribe.MAX_OBJECTS, metavar="N",
                    help=f"cohort: listing cap (default: {datadescribe.MAX_OBJECTS})")
     p.set_defaults(func=_cmd_data_describe)
     return parser

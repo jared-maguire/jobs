@@ -778,3 +778,138 @@ def test_human_output_truncates_giant_values_but_json_keeps_them(tmp_path: Path)
     assert len(d["facts"]["aligner"]["command_line"]) > 1000
     human = datadescribe.format_description(d)
     assert "use --json for all" in human and len(human) < 2500
+
+
+# --- hardening: corrupt and hostile input must never raise or hang -----------------------------------
+
+
+def test_head_bytes_is_one_mebibyte() -> None:
+    assert datadescribe.HEAD_BYTES == 1 << 20
+
+
+def _bam_from_inflated(raw: bytes) -> bytes:
+    return bgzf_block(raw) + BGZF_EOF
+
+
+@pytest.mark.timeout(10)
+def test_bam_negative_text_length() -> None:
+    raw = b"BAM\x01" + struct.pack("<i", -5) + b"x" * 20
+    d = datadescribe.sniff("a.bam", _bam_from_inflated(raw), 1000)
+    assert d["format"] == "bam"
+    assert d["facts"]["header_truncated"] is True
+    assert any("negative header text length" in n for n in d["notes"])
+
+
+@pytest.mark.timeout(10)
+def test_bam_negative_name_length_with_huge_reference_count_terminates() -> None:
+    raw = b"BAM\x01" + struct.pack("<i", 0) + struct.pack("<i", 2**31 - 1) + (struct.pack("<i", -8) + b"\0" * 4) * 100
+    d = datadescribe.sniff("a.bam", _bam_from_inflated(raw), 1000)
+    assert d["format"] == "bam"
+    assert d["facts"]["references"] == []
+    assert any("reference name length -8" in n for n in d["notes"])
+    assert "at least" in d["facts"]["reference_count_note"]
+
+
+@pytest.mark.timeout(10)
+def test_bam_zero_length_names_with_huge_reference_count_terminates() -> None:
+    raw = b"BAM\x01" + struct.pack("<i", 0) + struct.pack("<i", 1_000_000) + (struct.pack("<ii", 0, 5)) * 100
+    d = datadescribe.sniff("a.bam", _bam_from_inflated(raw), 1000)
+    assert d["format"] == "bam"
+    assert len(d["facts"]["references"]) == 5
+
+
+def test_bam_huge_text_length_is_just_truncated() -> None:
+    raw = b"BAM\x01" + struct.pack("<i", 2**31 - 1) + b"@HD\tVN:1.6\n"
+    d = datadescribe.sniff("a.bam", _bam_from_inflated(raw), 1000)
+    assert d["facts"]["header_truncated"] is True
+    assert d["facts"]["sam_version"] == "1.6"
+
+
+def test_bam_unicode_digit_in_sq_length_does_not_crash() -> None:
+    raw = bam_header_bytes("@SQ\tSN:x\tLN:²\n@SQ\tSN:y\tLN:٣\n@SQ\tSN:z\tLN:7\n", [])
+    d = datadescribe.sniff("a.bam", _bam_from_inflated(raw), 1000)
+    assert d["format"] == "bam"
+
+
+def test_bam_reference_count_says_at_least_when_the_table_is_cut(tmp_path: Path) -> None:
+    refs = [(f"contig{i}", 5000 + i) for i in range(3000)]
+    raw = bam_header_bytes("@HD\tVN:1.6\n", refs)
+    data = b"".join(bgzf_block(raw[i : i + 20000]) for i in range(0, len(raw), 20000))
+    d = datadescribe.sniff("a.bam", data[: len(data) // 3], len(data))
+    f = d["facts"]
+    assert f["header_truncated"] is True
+    assert f["reference_count"] == len(refs)  # the header itself declares 3000
+    assert "at least" not in f.get("reference_count_note", "")  # ...so this one is exact
+    # and with the declared count unreachable, the figure is explicitly a lower bound
+    d2 = datadescribe.sniff("a.bam", bgzf_block(b"BAM\x01" + struct.pack("<i", 50) + b"@HD\n"[:4] * 5)[:60], 10**6)
+    assert "at least" in d2["facts"]["reference_count_note"]
+
+
+def test_single_line_400kb_fasta_is_text_not_a_crash(tmp_path: Path) -> None:
+    p = write(tmp_path / "chr.txt", ">chr1\n" + "ACGT" * 100_000 + "\n>chr2\nACGT\n")
+    d = sk8s.describe(str(p))
+    assert d["format"] == "text"
+    p2 = write(tmp_path / "chr.csv", ">chr1\n" + "ACGT" * 100_000 + "\n>chr2\nACGT\n")
+    assert sk8s.describe(str(p2))["format"] in ("text", "csv")  # extension fallback may claim csv; must not raise
+
+
+def test_corrupt_sampled_file_is_recorded_not_fatal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write(tmp_path / "a.bam", make_bam())
+    write(tmp_path / "b.fastq", fastq_text(2))
+    real = datadescribe.sniff
+
+    def exploding(name: str, head: bytes, size: int, **kw: Any) -> Any:
+        if name == "a.bam":
+            raise struct.error("unpack requires a buffer of 4 bytes")
+        return real(name, head, size, **kw)
+
+    monkeypatch.setattr(datadescribe, "sniff", exploding)
+    d = sk8s.describe(str(tmp_path))
+    assert "could not parse header" in d["samples"][0]["error"]
+    assert d["samples"][1]["format"] == "fastq"
+    with pytest.raises(Sk8sError, match="could not parse header"):
+        sk8s.describe(str(tmp_path / "a.bam"))
+
+
+def _mutations(seed: int, data: bytes, n: int) -> list[bytes]:
+    import random
+
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        b = bytearray(data)
+        for _ in range(rng.randint(1, 6)):
+            b[rng.randrange(len(b))] = rng.randrange(256)
+        if rng.random() < 0.3:
+            b = b[: rng.randrange(1, len(b))]
+        out.append(bytes(b))
+    return out
+
+
+@pytest.mark.timeout(60)
+def test_mini_fuzz_sniff_never_raises() -> None:
+    bam_raw = bam_header_bytes(BAM_TEXT, BAM_REFS)
+    cases: list[tuple[str, bytes, bool]] = [  # (name, seed bytes, wrap mutated bytes in BGZF)
+        ("x.bam", bam_raw, True),
+        ("x.vcf", VCF_TEXT.encode(), False),
+        ("x.vcf.gz", VCF_TEXT.encode(), True),
+        ("x.fastq", fastq_text(6).encode(), False),
+        ("x.csv", b"a,b,c\n1,2,3\n4,5,6\n", False),
+        ("x.tsv.gz", b"a\tb\n1\t2\n3\t4\n", True),
+        ("x.cram", b"CRAM\x03\x01" + b"id" * 10 + b"\x00" * 30, False),
+    ]
+    for seed, (name, raw, wrap) in enumerate(cases):
+        for mutated in _mutations(seed, raw, 60):
+            data = bgzf_block(mutated) + BGZF_EOF if wrap else mutated
+            if wrap and seed % 2 == 0:
+                data = data[: max(1, len(data) - seed * 3)]  # also cut the compressed stream
+            r = datadescribe.sniff(name, data, len(data))
+            json.dumps(r)  # and the result stays serializable
+    # and raw random bytes behind every magic
+    import random
+
+    rng = random.Random(99)
+    for _ in range(200):
+        junk = bytes(rng.randrange(256) for _ in range(rng.randint(0, 120)))
+        for prefix in (b"", b"\x1f\x8b\x08", b"CRAM", b"\x1f\x8b\x08\x04\x00\x00\x00\x00\x00\xff\x06\x00BC\x02\x00"):
+            datadescribe.sniff("x.bam", prefix + junk, len(prefix + junk))
