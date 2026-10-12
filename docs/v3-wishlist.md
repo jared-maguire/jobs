@@ -214,6 +214,60 @@ in-cluster interpreter (the driver's successor) + two frontends** (eager Python
 for humans; Starlark-or-direct-IR for agents). v2's job layer unchanged
 underneath — a new floor, not a teardown.
 
+## 10. The Star Trek goal (the organizing frame — Jared, 2026-10-11)
+
+The north star: *"Computer, make an analysis pipeline that looks at this data
+and produces these answers"* — and agents go do it, unattended, on workloads
+from millions of tiny tasks to 100GB BAM files. Items 8 and 9 are the floor;
+this is the building. Work backwards from the loop the computer must run —
+**understand the data → plan → build → execute → verify the answer → report** —
+and each stage names a missing layer. Each sub-item is independently shippable.
+
+1. **Self-describing data (the catalog).** `sk8s data describe <uri>` → sniffed
+   format (BAM/VCF headers, parquet schemas), sizes, lineage to producing
+   workflows, user-attached semantics. Genomics formats carry half of this in
+   their headers already; surface it. Without it, every agent run burns its
+   budget on reconnaissance.
+2. **A verified capability library (task cards).** Typed, contract-carrying task
+   definitions (bwa, samtools, GATK, …): input/output artifact types, providing
+   image, resource model. IR nodes with contracts — agents compose known-good
+   blocks and write novel leaf code only where it's genuinely novel. Prior art:
+   nf-core modules; difference: machine-checkable contracts the IR verifier
+   enforces. The skill idea graduated from documentation to components.
+3. **Resource autosizing.** Cheap version: auto-resubmit at 2× on OOM (we
+   already classify OOM kills). Real version: record input-size →
+   peak-RSS/runtime per task card from every run (the data already flows past
+   us), fit, predict requests with a margin. The #1 human babysitting task,
+   automated; with spot (item 4) it is most of the cost story.
+4. **Verification of ANSWERS, not exit codes.** QC gates as first-class IR nodes
+   (expectations: % mapped > X — semantic failure, not operational); golden-set
+   runs (validate the built pipeline against known answers before the real
+   cohort); `pipeline.pilot(n=3)` as a verb (the baseline agent reinvented this
+   by instinct); reports with provenance — every figure traceable to artifact
+   hashes. "Computer, show your work" is part of the UI.
+5. **Both scale regimes natively.** Tiny tasks: a second executor tier
+   (resident worker pods pulling a queue; `map` picks the tier adaptively —
+   k8s Jobs have a seconds-long pod floor). Huge files: node-local
+   content-addressed cache on local SSD (a 100GB BAM downloads once per node,
+   not once per task) + data-aware scheduling (prefer the node already holding
+   the artifact) — the HPC trick object storage took away, returned by the CAS.
+6. **The resident "computer" — mostly NOT sk8s's job.** The conversational
+   layer is an agent harness; sk8s owes it: item 9's surface, event-driven
+   wakeups (bucket trigger → agent evaluates new data; failure → agent
+   investigates within policy), the IR interpreter's **agent-in-the-driver
+   option** (mid-run dynamic decisions made by an LLM call, event-logged and
+   replayable like everything else), and an explicit **autonomy policy** —
+   what the computer may do unprompted (spend ceilings, never delete published
+   artifacts, never leave the project). Trust is a config file, not a vibe.
+
+**Removals this frame justifies:**
+- Laptop-tethered execution as a *primary* model: everything becomes a durable
+  workflow; eager `submit` is sugar over a one-node one (one code path; the
+  "closed my laptop, lost my work" failure class dies).
+- `serve`/services: keep, freeze — peripheral to the mission.
+- The ConfigMap store demoted in spirit to dev/simulator-only; real deployments
+  assume an object store (the 950KB caveat class leaves the main path).
+
 ## Candidate v2.x fixes (small, could land before any v3)
 
 - `MapFailed` should carry the successes (`e.results`), not just failures.
