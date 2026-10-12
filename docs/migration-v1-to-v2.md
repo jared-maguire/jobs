@@ -197,6 +197,7 @@ These keyword arguments are recognised by `run`, `submit`, `map`, `starmap`, `su
 | (none) | `keep_results` | Keep the result blob after it is fetched. |
 | (none) | `expect` | A QC gate: a callable run in the worker on the result. Returning `None`/`True` passes; returning a string (the explanation) or raising fails the job with `ExpectationFailed`. See [QC gates and pilots](../.claude/skills/sk8s/references/advanced.md#qc-gates-and-pilots-verifying-answers-not-exit-codes). |
 | (none) | `namespace` | Accepted, but must equal the cluster's namespace; per-job namespaces are not supported yet. |
+| (none) | `budget` | A `sk8s.Budget(max_concurrent_pods, max_cpu_hours, max_estimated_usd)`: client-side, estimate-based admission (`BudgetExceeded` before anything is created; `dry_run` reports a verdict instead) plus a cap on fan-out concurrency. Also a config field (`[budget]` table, `SK8S_BUDGET` JSON, `configure(budget=...)`). Not metering: see the [Budgets section of the API reference](../.claude/skills/sk8s/references/api.md#budgets-and-sandboxes). |
 | (none) | `batch_size`, `max_concurrent`, `pilot` | Fan-out controls for the `map` family only. `pilot=n` runs the first n items, waits for all n, and submits the rest only if every one passed (otherwise `PilotFailed`). |
 | `job_template`, `dryrun`, `state`, `config`, `export_config`, `test` | removed | Jobs are built from Kubernetes client models, there is no template to override. Memoization (`state`) is gone. |
 
@@ -217,7 +218,7 @@ These keyword arguments are recognised by `run`, `submit`, `map`, `starmap`, `su
 | `default_storageclass` | pass `storage_class=` to `create_volume`, or leave it unset for the cluster default |
 | `default_readwritemany_storageclass` | `rwx_storage_class`, written by `sk8s config` (derived for `--provider gke`; `--rwx-storage-class C` for `generic`) and read by `create_volume` when `ReadWriteMany` is requested; env `SK8S_RWX_STORAGE_CLASS` |
 | `docker_build_default_push_policy`, `ecr_create_repo_on_push` | removed; pass `push=True` / `--push` explicitly |
-| (none) | `namespace`, `store`, `store_env`, `ttl_seconds_after_finished` (3600), `retention_days` (7), `keep_results` (false), and for volumes `volume_wait_seconds`, `volume_attach_grace_seconds`, `volume_provision_grace_seconds` (300 each; see the [GKE guide](gke.md#6-read-many-volumes)) |
+| (none) | `namespace`, `store`, `store_env`, `budget`, `ttl_seconds_after_finished` (3600), `retention_days` (7), `keep_results` (false), and for volumes `volume_wait_seconds`, `volume_attach_grace_seconds`, `volume_provision_grace_seconds` (300 each; see the [GKE guide](gke.md#6-read-many-volumes)) |
 
 The v2 fields are exactly those of `sk8s.Config`. `store_env` (a TOML table of extra
 environment variables for worker pods, such as MinIO credentials) comes from the file or
@@ -241,7 +242,8 @@ installed by `pip`. Flags are double-dashed (`--dry-run`, not `-dryrun`).
 | `python -m sk8s kubewatch`, `dashboard` | `sk8s workflows`, `sk8s logs WORKFLOW`, or `kubectl` |
 
 New in v2: `sk8s workflows`, `sk8s logs`, `sk8s kill`, `sk8s clean`, `sk8s doctor`,
-`sk8s image push`.
+`sk8s image push`. Since v2.0: `sk8s sandbox create|list|delete` (a throwaway namespace with an
+isolated config, a default budget and a TTL; `sk8s clean` reaps expired ones).
 
 ## Removed with no replacement
 

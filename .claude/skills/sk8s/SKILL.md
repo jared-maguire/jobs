@@ -77,6 +77,7 @@ and are self-sufficient for agents.
 | Watch / kill / clean | `sk8s workflows`, `sk8s kill <id>`, `sk8s clean --older-than 7d` |
 | Understand a workflow in one call (jobs, stuck-pod reasons, what blocks it) | `sk8s explain <wf>` / `sk8s.explain("wf-...")` (add `--json` for a dict) |
 | Preview before touching the cluster | `sk8s.submit(f, dry_run=True)` (also `map`, `starmap`, `submit_map`, `submit_workflow`) → `sk8s.DryRun` |
+| Cap what a run may cost / isolate an experiment | `budget=sk8s.Budget(max_estimated_usd=...)` (raises `BudgetExceeded` before anything is created); `sk8s sandbox create --budget-usd 2 --ttl 6h` then `export SK8S_CONFIG=...` (references/api.md, Budgets and sandboxes) |
 | Machine-readable CLI | `--json` on `sk8s explain`, `workflows`, `doctor`, `clean` |
 
 ## Common mistakes

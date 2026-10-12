@@ -438,7 +438,9 @@ context's namespace if it names one, else `sk8s`.
 | `sk8s explain WORKFLOW [--json]` | Everything about one workflow in one report: driver, jobs with stuck pods explained, volumes, store blobs, rough cost, and what is blocking progress. Exit 0 even when unhealthy; 1 if the workflow does not exist. Same data as `sk8s.explain(id)`. |
 | `sk8s logs WORKFLOW` | Print a workflow driver's logs. |
 | `sk8s kill WORKFLOW` | Delete a workflow and everything it owns. |
-| `sk8s clean [--older-than 7d] [--json]` | Delete expired workflows (`7d`, `36h`, or bare days). `--json` lists what was deleted and what was kept, with the reason. |
+| `sk8s clean [--older-than 7d] [--json]` | Delete expired workflows (`7d`, `36h`, or bare days), and expired idle sandboxes. `--json` lists what was deleted and what was kept, with the reason. |
+| `sk8s sandbox create [--name N] [--budget-usd X] [--ttl 24h]` | Create namespace `sk8s-sbx-N` (RBAC applied), a store prefix, and an isolated `.sk8s-sandbox-N.toml`; prints the `export SK8S_CONFIG=...` line. |
+| `sk8s sandbox list [--json]` / `sk8s sandbox delete N` | List sandboxes (label `sk8s/kind=sandbox`); delete one with its namespace and store prefix. |
 | `sk8s image build --tag TAG [--base IMG] [--pip PKG] [--conda PKG] [--channel CH] [--push]` | Build a worker image with extra dependencies layered on the official base image (published at release time) or on `--base IMG` (pip only). See [Custom images](#custom-images). |
 | `sk8s image push --tag TAG` | `docker push` an image. |
 | `sk8s shell [--image IMG]` | Open an interactive shell in a pod (needs `kubectl`). |

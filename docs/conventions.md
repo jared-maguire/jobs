@@ -43,6 +43,7 @@ blob of some workflow" carry no `sk8s/kind`, only `sk8s/workflow-id`.
 | `volume-keep` | A PVC created with `keep=True` | none | `delete_volume` only |
 | `volume-clone` | The hidden read-only clone of a `ReadOnlyMany` volume (see [Annotations](#annotations)) | `sk8s/clone-of=<volume>`; plus `sk8s/workflow-id=<wf-id>` when the volume is workflow-owned | Its volume's anchor (ownerReference, same anchor as the volume), `delete_volume` of the volume, or the library when a newer clone supersedes it |
 | `shell` | The Job behind `sk8s shell` | none | Its own 4-hour deadline plus the Job TTL, or `kubectl delete job` |
+| `sandbox` | A **Namespace** `sk8s-sbx-<name>` made by `sk8s sandbox create` (annotations `sk8s/created-at`, `sk8s/expires-at`, `sk8s/store`, `sk8s/store-base`, `sk8s/store-prefix`, `sk8s/budget`) | none | `sk8s sandbox delete`, or `sk8s clean` / `sk8s.clean()` once expired, 300s old and idle (no active jobs or services) |
 
 `sk8s/workflow-id=<wf-id>` appears on: the anchor, the workflow's Jobs and their pods, its
 blob ConfigMaps, and its owned (`volume`) PVCs. It is deliberately **absent** from services,
