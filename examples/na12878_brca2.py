@@ -3,7 +3,9 @@
 
 The request, verbatim: "Fetch reads from NA12878 from some small tractable genomic region
 (e.g. the BRCA2 gene), align them, call SNVs and Indels there, and create a VCF."
-The napkin's last line: "Re-running tomorrow would cost $0 - it's all cached."  This is that.
+The napkin's last line: "Re-running tomorrow would cost $0 - it's all cached."  This is that,
+honestly framed: a detached re-run creates no stage jobs (one driver pod, ~$0.0002); a
+--tethered re-run creates no jobs at all.
 
 What it does (see examples/README.md for the one-page version):
 

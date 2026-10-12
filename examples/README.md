@@ -17,14 +17,15 @@ workers read it through Workload Identity.
 
 ```bash
 export KUBECONFIG=/path/to/kubeconfig-gke                  # 1. cluster
-export SK8S_CONFIG=/path/to/.sk8s-demo.toml                # 2. namespace + gs:// store (sk8s config ...)
+export SK8S_CONFIG=/path/to/.sk8s-demo.toml                # 2. namespace + gs:// store (setup below)
 export SK8S_IMAGE=us-central1-docker.pkg.dev/jared-genome-analysis/sk8s/sk8s-demo-bio:py3.14-2287959   # 3. image
 sk8s doctor                                                # all PASS first
 python examples/na12878_brca2.py --repeat 2                # run 1 computes, run 2 is all memo hits
 ```
 
 - `--repeat 2` (or just running it again tomorrow): every stage is `memo=True`, so the second run
-  is a memo-hit cascade. The detached driver pod is the only job it creates (about 20 s wall, ~$0.0001);
+  is a memo-hit cascade. The detached driver pod is the only job it creates (about 20 s wall,
+  ~$0.0001-0.0002 — the lower figure is `explain`'s CPU-only estimate);
   `--tethered` drives the pipeline from your process instead and creates **no** job at all.
 - `--memo-salt v2` changes every memo key: everything recomputes (proof the cache is not stuck).
 - `--preview-only` stops after the `describe` + `dry_run` plan. `--prove-gate` shows an `expect=` gate
@@ -88,3 +89,26 @@ driver prints one line per stage saying `computed` or `HIT`, visible in `sk8s lo
 - Variant count is deterministic run to run (same tools, same inputs, `bwa -K`); `--repeat 2`
   asserts it and also compares an md5 of the record bodies (headers carry dates, so a recomputed VCF
   has different bytes but identical records).
+
+**Cold setup** (one-time, cluster admin; already standing in this project as namespace `sk8s-demo`):
+
+```bash
+sk8s config --provider gke --project jared-genome-analysis --region us-central1 \
+  --namespace sk8s-demo --gsa sk8s-worker \
+  --store gs://jared-genome-analysis-sk8s/sk8s-demo/ --apply-cloud   # incl. the per-namespace WI member
+sk8s doctor    # red right after apply = IAM lag; retry ~60s
+```
+(`sk8s config --image <your bio tag>` writes the image line for you.)
+
+**Honest fine print.**
+- The 187 variants are raw, unfiltered `bcftools call -mv` output — deterministic on this input,
+  not filtered calls, and not compared to GIAB truth. The lifted VCF's `##reference=` header still
+  names the slice FASTA.
+- `DATA` and `RESULTS` are hardcoded to this project's bucket; a different store means editing them
+  in the script.
+- The artifact form trades cold-run speed for caching: a fresh compute is ~2x slower than the plain
+  gs:// version (~124s vs ~52s on this 3MB input — staging, hashing and CAS uploads; the tax
+  amortizes on real-sized data), and every re-run after that is seconds.
+- "$0 tomorrow" holds for ~`retention_days` (default 7): published results are kept forever, but
+  the *intermediate* CAS objects (FASTQ, BAM) age out, after which a re-run recomputes the chain
+  from stage 1. Tomorrow is free; next month recomputes.
