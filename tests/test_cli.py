@@ -224,9 +224,26 @@ def test_clean_wiring(
 
     monkeypatch.setattr(cleaning, "clean", fake_clean)
     assert cli.run(["clean", *flag]) == 0
-    assert calls == [("ctx-ns", {"older_than_days": expected})]
+    ((ns, kw),) = calls
+    report = kw.pop("report")  # clean() also sweeps the artifact CAS; the CLI collects its report
+    stores = kw.pop("extra_stores")  # ... of the configured store too
+    assert (ns, kw) == ("ctx-ns", {"older_than_days": expected}) and hasattr(report, "summary")
+    assert len(stores) == 1
     out = capsys.readouterr().out
     assert "wf-1" in out and "wf-2" in out
+
+
+def test_clean_prints_the_artifact_sweep_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_clean(namespace: str | None = None, **kw: Any) -> list[str]:
+        kw["report"].deleted.append("ab" * 32)
+        return []
+
+    monkeypatch.setattr(cleaning, "clean", fake_clean)
+    assert cli.run(["clean"]) == 0
+    out = capsys.readouterr().out
+    assert "artifact sweep: deleted 1 unreachable" in out and "nothing to clean" not in out
 
 
 def test_clean_nothing(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

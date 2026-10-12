@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import threading
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -28,15 +29,25 @@ class FakeCoreV1:
         self.events: list[Any] = []  # event-like objects served by list_namespaced_event
         self.pod_logs: dict[str, str] = {}  # pod name -> log text served by read_namespaced_pod_log
         self.events_forbidden = False  # list_namespaced_event answers 403 (Role predates the rule)
+        self.lock = threading.RLock()  # ConfigMap writes are atomic, like the API server's
+        self._rv = 1000  # monotonically increasing resourceVersion source
+
+    def _bump(self, cm: Any) -> None:
+        self._rv += 1
+        cm.metadata.resource_version = str(self._rv)
 
     def create_namespaced_config_map(self, namespace: str, body: Any) -> Any:
-        self.create_calls.append(body.metadata.name)
-        if (namespace, body.metadata.name) in self.configmaps:
-            raise ApiException(status=409, reason="Conflict")
-        if not body.metadata.uid:
-            body.metadata.uid = uuid.uuid4().hex
-        self.configmaps[(namespace, body.metadata.name)] = body
-        return body
+        with self.lock:
+            self.create_calls.append(body.metadata.name)
+            if (namespace, body.metadata.name) in self.configmaps:
+                raise ApiException(status=409, reason="Conflict")
+            if not body.metadata.uid:
+                body.metadata.uid = uuid.uuid4().hex
+            if body.metadata.creation_timestamp is None:
+                body.metadata.creation_timestamp = datetime.datetime.now(datetime.timezone.utc)
+            self._bump(body)
+            self.configmaps[(namespace, body.metadata.name)] = body
+            return body
 
     def read_namespaced_config_map(self, name: str, namespace: str) -> Any:
         try:
@@ -52,14 +63,30 @@ class FakeCoreV1:
         self.delete_policies[name] = propagation_policy
         del self.configmaps[(namespace, name)]
 
-    def patch_namespaced_config_map(self, name: str, namespace: str, body: Any) -> Any:
-        """Merge-patch of metadata.annotations / metadata.labels from a dict body."""
-        cm = self.read_namespaced_config_map(name=name, namespace=namespace)
-        for field in ("annotations", "labels"):
-            patch = (body.get("metadata") or {}).get(field)
-            if patch:
-                setattr(cm.metadata, field, {**(getattr(cm.metadata, field) or {}), **patch})
-        return cm
+    def patch_namespaced_config_map(self, name: str, namespace: str, body: Any, **_: Any) -> Any:
+        """Merge-patch of metadata.annotations / labels / binaryData from a dict body.
+
+        Like the API server, a body carrying metadata.resourceVersion is a precondition (409
+        when stale); one without is an unconditional blind write. A patch that changes
+        something bumps the resourceVersion."""
+        with self.lock:
+            cm = self.read_namespaced_config_map(name=name, namespace=namespace)
+            wanted = (body.get("metadata") or {}).get("resourceVersion")
+            if wanted is not None and wanted != cm.metadata.resource_version:
+                raise ApiException(status=409, reason="Conflict")
+            changed = False
+            for field in ("annotations", "labels"):
+                patch = (body.get("metadata") or {}).get(field)
+                if patch:
+                    setattr(cm.metadata, field, {**(getattr(cm.metadata, field) or {}), **patch})
+                    changed = True
+            binary = body.get("binaryData")
+            if binary:
+                cm.binary_data = {**(cm.binary_data or {}), **binary}
+                changed = True
+            if changed:
+                self._bump(cm)
+            return cm
 
     def list_namespaced_config_map(self, namespace: str, label_selector: str = "") -> Any:
         """Honors the simple `k=v[,k=v...]` equality form of label selectors."""

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import Any
+from typing import Any, Iterator
 
 from kubernetes import client
 from kubernetes.client import ApiException
 
 from sk8s.errors import BlobNotFound, BlobTooLarge
-from sk8s.store.base import BlobStore
+from sk8s.store.base import BlobInfo, BlobStat, BlobStore
 
 MAX_CONFIGMAP_BLOB = 950_000
 MANAGED_BY = {"app.kubernetes.io/managed-by": "sk8s"}
@@ -53,30 +53,75 @@ class ConfigMapStore(BlobStore):
     def uri_for(self, key: str) -> str:
         return f"k8s://{self.namespace}/{_sanitize(key)}"
 
-    def put(self, key: str, data: bytes, owner: Any | None = None) -> str:
+    def _check_size(self, key: str, data: bytes) -> None:
         check_blob_size(key, data)
+
+    def _body(self, key: str, data: bytes, owner: Any | None) -> Any:
         meta = client.V1ObjectMeta(
             name=_sanitize(key),
             labels=_blob_labels(key),
             annotations={KEY_ANNOTATION: key},
             owner_references=[owner] if owner is not None else None,
         )
-        body = client.V1ConfigMap(
+        return client.V1ConfigMap(
             metadata=meta, binary_data={"blob": base64.b64encode(data).decode()}
         )
+
+    def put(self, key: str, data: bytes, owner: Any | None = None) -> str:
+        self._check_size(key, data)
+        body = self._body(key, data, owner)
+        name = body.metadata.name
         try:
             self.core_api.create_namespaced_config_map(namespace=self.namespace, body=body)
         except ApiException as e:
             if e.status == 409:  # retried worker overwrites its previous attempt
-                self.core_api.delete_namespaced_config_map(
-                    name=meta.name, namespace=self.namespace
-                )
-                self.core_api.create_namespaced_config_map(
-                    namespace=self.namespace, body=body
-                )
+                self.core_api.delete_namespaced_config_map(name=name, namespace=self.namespace)
+                self.core_api.create_namespaced_config_map(namespace=self.namespace, body=body)
             else:
                 raise
         return self.uri_for(key)
+
+    # --- conditional writes: create-only = create-if-absent; resourceVersion = the version token.
+    # Spec Appendix B.1 (ConfigMap): replace/patch WITHOUT a resourceVersion is a blind write, so put_if_version
+    # always sends one (merge-patch with metadata.resourceVersion in the body: 409 when stale).
+    def put_if_absent(self, key: str, data: bytes, owner: Any | None = None) -> bool:
+        self._check_size(key, data)
+        body = self._body(key, data, owner)
+        try:
+            self.core_api.create_namespaced_config_map(namespace=self.namespace, body=body)
+        except ApiException as e:
+            if e.status == 409:  # AlreadyExists: the loser's create is a no-op
+                return False
+            raise
+        return True
+
+    def read_with_version(self, key: str) -> tuple[bytes, str]:
+        uri = self.uri_for(key)
+        ns, name = self._split(uri)
+        try:
+            cm = self.core_api.read_namespaced_config_map(name=name, namespace=ns)
+        except ApiException as e:
+            if e.status == 404:
+                raise BlobNotFound(uri) from None
+            raise
+        return base64.b64decode(cm.binary_data["blob"]), str(cm.metadata.resource_version)
+
+    def put_if_version(self, key: str, data: bytes, version: str) -> bool:
+        self._check_size(key, data)
+        body = {
+            "metadata": {"resourceVersion": version},
+            "binaryData": {"blob": base64.b64encode(data).decode()},
+        }
+        try:
+            self.core_api.patch_namespaced_config_map(
+                name=_sanitize(key), namespace=self.namespace, body=body,
+                _content_type="application/merge-patch+json",
+            )
+        except ApiException as e:
+            if e.status in (404, 409):  # gone, or modified since the version was read
+                return False
+            raise
+        return True
 
     def _split(self, uri: str) -> tuple[str, str]:
         assert uri.startswith("k8s://"), uri
@@ -92,6 +137,33 @@ class ConfigMapStore(BlobStore):
                 raise BlobNotFound(uri) from None
             raise
         return base64.b64decode(cm.binary_data["blob"])
+
+    def stat(self, uri: str) -> BlobStat | None:
+        ns, name = self._split(uri)
+        try:
+            cm = self.core_api.read_namespaced_config_map(name=name, namespace=ns)
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+        return BlobStat(
+            uri=uri, size=len(base64.b64decode(cm.binary_data["blob"])),
+            version=str(cm.metadata.resource_version), updated=cm.metadata.creation_timestamp,
+        )
+
+    def list_blobs(self, prefix: str) -> Iterator[BlobInfo]:
+        root = prefix.split("/", 1)[0]  # the first segment is a label (see _blob_labels)
+        selector = ",".join(f"{k}={v}" for k, v in _blob_labels(root).items())
+        cms = self.core_api.list_namespaced_config_map(
+            namespace=self.namespace, label_selector=selector
+        )
+        for cm in cms.items:
+            key = (cm.metadata.annotations or {}).get(KEY_ANNOTATION, "")
+            if key.startswith(prefix):
+                yield BlobInfo(
+                    key=key, size=len(base64.b64decode(cm.binary_data["blob"])),
+                    updated=cm.metadata.creation_timestamp,
+                )
 
     def delete(self, uri: str) -> None:
         ns, name = self._split(uri)

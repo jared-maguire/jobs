@@ -31,6 +31,7 @@ in-process for API experiments.
 | Install, set up minikube or GKE (user **or** cluster admin), config/env | references/setup.md |
 | Submit jobs/maps, futures, errors, images, services, volumes, CLI | references/api.md |
 | Detached workflows, nested jobs, shared reference volumes, partial-failure handling, ops | references/advanced.md |
+| Files between jobs: `sk8s.artifact`, `OutDir`, staging, `publish`, `memo=True`, CAS garbage collection | references/artifacts.md |
 
 The repo's `README.md` and `docs/` (esp. `docs/gke.md`, `docs/conventions.md`) are
 the narrative versions; the references above are the distilled operational truth
@@ -92,3 +93,5 @@ and are self-sufficient for agents.
 | `map` raised and you want the 47 good results | they are on the exception: `e.results[i]`; use `submit_map` + per-future harvest for streaming/timeout control |
 | `sk8s doctor` red right after `--apply-cloud` on GKE | IAM propagation (~60s) → retry before debugging |
 | Writes to the config file clobbered another session | global default path → set `SK8S_CONFIG` per agent/CI run |
+| Job output file vanished days later | unpublished artifacts are collectable → `artifact.publish(uri)` (references/artifacts.md) |
+| `memo=True` returned an old answer | the memo key cannot see volumes/libs/env/other modules → `memo_salt=` (references/artifacts.md) |
