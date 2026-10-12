@@ -10,8 +10,9 @@ description: Use when running Python functions on a Kubernetes cluster with sk8s
 sk8s runs ordinary Python functions as Kubernetes Jobs and returns real
 `concurrent.futures.Future`s. Functions and results travel by cloudpickle; results
 land in a pluggable blob store (in-cluster ConfigMaps by default, `gs://`/`s3://`
-for real clusters). One `sk8s config` sets a namespace up; `sk8s doctor` proves it
-works — including from *inside* a pod, which your laptop's credentials cannot prove.
+for real clusters). One `sk8s config` sets a namespace up; `sk8s doctor` verifies
+it check by check — and with a `gs://` store, proves the setup from *inside a pod*
+(the in-cluster probe), which your laptop's credentials cannot prove.
 
 ```python
 import sk8s
@@ -19,6 +20,9 @@ print(sk8s.run(lambda: 40 + 2))                    # one job, blocks for the res
 results = sk8s.map(f, inputs)                       # fan out; sk8s.submit_map for futures
 wf = sk8s.submit_workflow(main)                     # detached: survives laptop close
 ```
+
+No cluster handy? `sk8s.configure(cluster=sk8s.LocalCluster())` runs everything
+in-process for API experiments.
 
 ## Reading order
 
@@ -37,16 +41,20 @@ and are self-sufficient for agents.
 1. **Results are pickles, not JSON.** The *client* needs the modules of every
    returned type (`numpy` result ⇒ `pip install numpy` locally, or return
    builtins). Failure mode: `ResultDecodeError` *after* the job succeeded.
-2. **The worker's Python minor version must match the client's**, and the stock
-   worker image contains **no scientific stack** — a function using numpy needs a
-   custom image (`sk8s image build --pip numpy …`). Failure: `VersionMismatch` or
-   a remote `ModuleNotFoundError`.
+2. **You build the worker image yourself** — no image is published anywhere, by
+   design. Build the base from the checkout (`docker build -f
+   docker/Dockerfile.worker --build-arg PYTHON_VERSION=3.X .`), push it to *your*
+   registry, and layer deps on it. The worker's Python minor **must match the
+   client's**, and the base has **no scientific stack**. Failures:
+   `ImagePullError` (unconfigured image), `VersionMismatch`, remote
+   `ModuleNotFoundError`.
 3. **Volume mounts default to read-only.** Any job that writes passes
    `volumes={"name": {"access_mode": "rw"}}`. Failure: `OSError: Read-only file
    system` raised *by your function*.
 4. **A plain `submit`/`map` is tethered to your process** (the client resolves
    futures). Close the laptop ⇒ orphaned work. `submit_workflow` detaches; attach
-   from anywhere later.
+   from anywhere later — and collect with `result(delete=False)` if you'll look
+   again.
 5. **`sk8s.map` raises `MapFailed` carrying only the failures** — completed
    values are not on the exception. When partial results matter, keep the futures
    (`submit_map`) and harvest per-future (pattern in references/advanced.md).
@@ -57,11 +65,12 @@ and are self-sufficient for agents.
 |---|---|
 | Set up a namespace (any cluster) | `sk8s config --namespace NS --store STORE` (`--dry-run` first) |
 | GKE, with cloud IAM | `sk8s config --provider gke --project P --region R --gsa sk8s-worker --store gs://B/sk8s/ --apply-cloud` |
-| Verify, incl. from inside a pod | `sk8s doctor` (red first run on fresh IAM is normal; retry ~60s) |
+| Verify (in-pod probe runs for `gs://` stores) | `sk8s doctor` (red first run on fresh IAM is normal; retry ~60s) |
 | Point sk8s at a non-default config file | `SK8S_CONFIG=/path/to.toml` (agents/CI: always set this) |
 | Any config field via env | `SK8S_<FIELD>`, e.g. `SK8S_NAMESPACE`, `SK8S_IMAGE`, `SK8S_IMAGE_PREFIX` |
-| Build + push a worker image | `sk8s image build --pip numpy --pip pysam -t TAG --push` |
-| apt/system deps in an image | custom Dockerfile `FROM` the sk8s base (references/api.md) |
+| Layer Python deps on your base image | `sk8s image build --tag TAG --base YOURBASE --pip numpy --push` |
+| apt/system deps in an image | custom Dockerfile `FROM` your base (references/api.md) |
+| Try the API with no cluster | `sk8s.configure(cluster=sk8s.LocalCluster())` |
 | Watch / kill / clean | `sk8s workflows`, `sk8s kill <id>`, `sk8s clean --older-than 7d` |
 
 ## Common mistakes
@@ -69,10 +78,11 @@ and are self-sufficient for agents.
 | Symptom | Cause → fix |
 |---|---|
 | `ResultDecodeError` on a *successful* job | client lacks the result type's module → install it client-side, or return builtins |
-| Remote `ModuleNotFoundError` | stock image has no deps → build an image, set `image=`/`SK8S_IMAGE` |
+| `ImagePullError` with no image configured | nothing is published — build your own base, set `image=`/`SK8S_IMAGE` |
+| Remote `ModuleNotFoundError` | base image has no deps → `sk8s image build` or a Dockerfile layer |
 | `OSError: Read-only file system` in your function | mounts default ro → `{"access_mode": "rw"}` for the writer |
-| Pod Pending forever on minikube | image not in the cluster (`ImagePullError`/`ErrImageNeverPull`) → registry workflow in references/setup.md |
 | Everything gone after closing the laptop | tethered `submit` → `submit_workflow` |
+| Workflow gone when you attach the next day | `result()` deletes on success by default → `result(delete=False)` |
 | 47 good results lost because 3 failed | `MapFailed` carries failures only → per-future harvest pattern |
 | `sk8s doctor` red right after `--apply-cloud` on GKE | IAM propagation (~60s) → retry before debugging |
 | Writes to the config file clobbered another session | global default path → set `SK8S_CONFIG` per agent/CI run |

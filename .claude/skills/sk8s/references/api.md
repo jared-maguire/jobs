@@ -12,15 +12,23 @@ vals = sk8s.starmap(f, tuples)     # map with argument unpacking
 futs = sk8s.submit_map(f, items)   # the futures, when you need per-item control
 ```
 
-Job options (kwargs on any of the above): `image`, `requests`, `limits`
-(e.g. `requests={"cpu": "500m", "memory": "1Gi"}`), `volumes`, `timeout`,
-`backoff_limit`, `service_account`, `namespace`, `name_prefix`, `privileged`,
-`pull_policy`, `keep_results`. `map`/`submit_map` add `batch_size` (N items per
-job) and `max_concurrent`. `timeout` on `map` is one overall deadline, not
-per-item.
+Job options (kwargs): `image`, `requests`, `limits` (e.g. `requests={"cpu":
+"500m", "memory": "1Gi"}`), `volumes`, `backoff_limit`, `service_account`,
+`name_prefix`, `privileged`, `pull_policy`, `keep_results`. `map`/`starmap` add
+`batch_size` (N items per job), `max_concurrent`, and `timeout` — one overall
+deadline for the whole map, **not** a per-job kill; `submit`/`submit_map` accept
+and ignore `timeout` (bound the wait at `fut.result(timeout=...)` instead).
+`namespace` must equal the cluster's namespace (`ValueError` otherwise) — switch
+namespaces via config, not per-job.
 
 `sk8s.configure(namespace=..., image=..., store=...)` overrides config for the
-process; `sk8s.configure()` resets.
+process; `sk8s.configure()` resets; `sk8s.configure(cluster=sk8s.LocalCluster())`
+runs jobs in-process (no cluster — great for testing pipeline logic).
+
+Pickling rule: functions defined in the running script (`__main__`) or notebook
+pickle **by value**; functions imported from a module pickle **by reference**,
+so the worker image must contain that module. Run pipeline scripts directly, or
+bake your package into the image.
 
 ## Errors (all exported from `sk8s`)
 
@@ -36,42 +44,52 @@ process; `sk8s.configure()` resets.
   Autopilot, RBAC 403, invalid spec — carries the server's message + a gated
   hint); `VersionMismatch` (client/worker Python minor); `StoreError`,
   `BlobNotFound`, `BlobTooLarge`.
-- Volume family: `VolumeError` (base: `VolumeNotFound`, `VolumeNotPopulated`,
+- Volume family: `VolumeError` (base of `VolumeNotFound`, `VolumeNotPopulated`,
   `VolumeWaitTimeout`) and — subclassing `PodFailed`, *not* `VolumeError` —
   `VolumeAttachBlocked`, `VolumeProvisioningFailed`. Catch `Sk8sError` for all.
 
 ## Results and the store
 
 Results are **cloudpickle blobs** in the configured store; futures resolve by a
-watch on the Job plus a store read (no polling loop of yours). Pods are deleted
-and blobs reaped when a workflow completes (`keep_results=True` to retain).
-The client reads the store directly — on `gs://`/`s3://` it needs its own
-credentials (ADC / AWS chain) and the relevant extra (`sk8s[gcs]` / `sk8s[s3]`).
+watch on the Job plus a store read (no polling loop of yours). Result blobs are
+deleted on fetch; Jobs expire by TTL (1h default) and workflow cleanup removes
+the rest. The client reads the store directly — on `gs://`/`s3://` it needs its
+own credentials (ADC / AWS chain) and the relevant extra (`[gcs]` / `[s3]`).
 
 ## Images
 
-Python deps, no Dockerfile needed:
+**Nothing is published** — you build the base yourself from the checkout (one
+per Python minor, matching your client):
 
 ```bash
-sk8s image build --tag localhost:5000/science --pip numpy --pip pysam --push
-# conda flavor: --conda ... --channel bioconda (builds FROM a conda base, not valid with --base)
+docker build -f docker/Dockerfile.worker --build-arg PYTHON_VERSION=3.12 \
+  -t YOURREG/sk8s-base:py3.12 . && docker push YOURREG/sk8s-base:py3.12
 ```
 
-From Python: `sk8s.images.generate_dockerfile(pip=[...])`, `build(tag, ...)`,
-`push(tag)`.
+Layer Python deps on it, no Dockerfile needed:
 
-**apt/system packages** (bwa, samtools, …) need a Dockerfile layered on the sk8s
-base:
+```bash
+sk8s image build --tag YOURREG/science --base YOURREG/sk8s-base:py3.12 \
+  --pip numpy --pip pysam --push
+# conda flavor: --conda ... --channel bioconda builds FROM a conda base instead
+# (not valid with --base; note it pip-installs sk8s from PyPI, so pre-release it won't work)
+```
+
+From Python: `from sk8s import images` (not reachable as `sk8s.images`) —
+`images.generate_dockerfile(pip=[...])`, `images.build(tag, ...)`,
+`images.push(tag)`.
+
+**apt/system packages** (bwa, samtools, …) need a Dockerfile on your base:
 
 ```dockerfile
-FROM ghcr.io/jared-maguire/sk8s:VERSION-pyMINOR   # match your client's Python minor
+FROM YOURREG/sk8s-base:py3.12
 RUN apt-get update && apt-get install -y bwa samtools && rm -rf /var/lib/apt/lists/*
 RUN pip install numpy
 ```
 
-`docker build` + `docker push` to your registry/AR, then `image=` /
-`SK8S_IMAGE` / config `image`. The worker only unpickles and runs functions, so
-any image with sk8s installed at the same Python minor works.
+`docker build` + `docker push`, then `image=` / `SK8S_IMAGE` / config `image`.
+The worker only unpickles and runs functions, so any image with sk8s installed
+at the same Python minor works.
 
 ## Volumes
 
@@ -83,10 +101,13 @@ ref = sk8s.create_volume("100Gi", name="idx", keep=True,
 
 - `volumes=` on a job: `"idx"` (one, **read-only**, `/mnt/idx`) | `["a", "b"]`
   (many, ro) | `{"idx": {"access_mode": "rw", "mountpoint": "/scratch"}}` (both
-  inner keys optional; defaults `ro`, `/mnt/<name>`).
+  inner keys optional; defaults `ro`, `/mnt/<name>`; unknown keys and relative
+  mountpoints are `ValueError`s).
 - **Mounts default read-only**; exactly the writers say `"access_mode": "rw"`.
-- RWO+ROX volumes are *logical*: readers get a hidden clone, point-in-time as of
-  the last **successful** writer (details + patterns: references/advanced.md).
+- RWO+ROX volumes are *logical*: readers get a hidden clone — point-in-time as
+  of the last **completed** writer (succeeded, or cancelled/vanished; a *failed*
+  writer never becomes the generation). Details and patterns:
+  references/advanced.md.
 - `storage_class` resolves from modes via config (`ReadWriteMany` → the class
   `sk8s config` recorded; typed error with hint if unmapped); explicit always wins.
 - `scratch_volume("10Gi")` — context manager, deleted on exit. `keep=True`
@@ -96,23 +117,30 @@ ref = sk8s.create_volume("100Gi", name="idx", keep=True,
 ## Services
 
 ```python
-svc = sk8s.serve(make_app, name="scorer", port=8000)   # Deployment + Service, DNS-1035 name
-sk8s.get_service("scorer").url                          # from jobs: cluster DNS; reserved wf id "svc"
+svc = sk8s.serve(run_server, name="scorer", port=8000)   # Deployment + Service; DNS-1035 name
+sk8s.get_service("scorer").url                            # from jobs: cluster DNS; reserved wf id "svc"
 ```
+
+`run_server` must itself serve the port and block forever (it IS the server
+process, not a factory).
 
 ## Workflows vs plain submissions
 
 A plain `submit`'s future resolves in *your* process — the work is tethered to
 it. `submit_workflow(main)` runs `main` as a detached in-cluster driver that owns
 everything it submits; your laptop can vanish. `sk8s.attach(workflow_id)`
-(any machine with the same config) → `WorkflowHandle`: `.result()`, `.kill()`.
-See references/advanced.md.
+(any machine with the same config) → `WorkflowHandle` (`.id`, `.status()`,
+`.result()`, `.kill()`). **`.result()` deletes the workflow on success by
+default** — pass `delete=False` to collect again later. See
+references/advanced.md.
 
 ## CLI
 
 `sk8s config` (plan/apply + write config; `--dry-run`), `sk8s doctor`,
-`sk8s image build|push`, `sk8s workflows`, `sk8s logs <wf>`, `sk8s kill <wf>`,
-`sk8s clean [--older-than 7d]`, `sk8s shell [--image IMG]`.
+`sk8s image build|push`, `sk8s workflows` (every anchored workflow, finished
+included, with driver phase), `sk8s logs <wf>` (prints the detached driver's log
+once — not a follow/tail), `sk8s kill <wf>`, `sk8s clean [--older-than 7d]`,
+`sk8s shell [--image IMG]`.
 
 Cleanup rules: retention = older than `retention_days` AND no active jobs, with a
 300s minimum age — right after a crash `sk8s clean --older-than 0` may say
