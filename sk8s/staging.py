@@ -47,16 +47,19 @@ EPHEMERAL_FLOOR = 1024**3
 
 
 def find_artifacts(obj: Any) -> list[Artifact]:
-    """Every Artifact inside lists / tuples / dicts / sets of ``obj``, in order, de-duplicated."""
+    """Every Artifact inside plain lists / tuples / dicts / sets / frozensets of ``obj``, in
+    order, de-duplicated. Only these exact container types are walked (``map_tree`` rebuilds the
+    same ones), so a subclass, namedtuple or dataclass holding an Artifact is left alone
+    consistently rather than half-handled."""
     seen: dict[Artifact, None] = {}
 
     def walk(x: Any) -> None:
         if isinstance(x, Artifact):
             seen.setdefault(x)
-        elif isinstance(x, (list, tuple, set, frozenset)):
+        elif type(x) in (list, tuple, set, frozenset):
             for item in x:
                 walk(item)
-        elif isinstance(x, dict):
+        elif type(x) is dict:
             for item in x.values():
                 walk(item)
 
@@ -65,14 +68,18 @@ def find_artifacts(obj: Any) -> list[Artifact]:
 
 
 def map_tree(obj: Any, fn: Callable[[Any], Any], leaf: type | tuple[type, ...]) -> Any:
-    """Rebuild lists / tuples / dicts of ``obj`` with every ``leaf``-typed value replaced by fn(value)."""
+    """Rebuild the containers find_artifacts walks, with every ``leaf``-typed value replaced by
+    fn(value)."""
     if isinstance(obj, leaf):
         return fn(obj)
-    if type(obj) is list:
+    kind = type(obj)
+    if kind is list:
         return [map_tree(x, fn, leaf) for x in obj]
-    if type(obj) is tuple:
+    if kind is tuple:
         return tuple(map_tree(x, fn, leaf) for x in obj)
-    if type(obj) is dict:
+    if kind in (set, frozenset):
+        return kind(map_tree(x, fn, leaf) for x in obj)
+    if kind is dict:
         return {k: map_tree(v, fn, leaf) for k, v in obj.items()}
     return obj
 

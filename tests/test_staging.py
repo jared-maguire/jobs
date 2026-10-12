@@ -49,6 +49,17 @@ def test_find_artifacts_walks_containers_in_order_deduped() -> None:
     assert staging.find_artifacts(("plain", 3, [1, 2])) == []
 
 
+def test_only_plain_containers_are_walked_consistently() -> None:
+    import collections
+
+    a = artifact("gs://b/a")
+    Pair = collections.namedtuple("Pair", "x y")  # noqa: PYI024
+    assert staging.find_artifacts([a, {a}, frozenset({a})]) == [a]
+    assert staging.find_artifacts(Pair(a, 1)) == []  # not walked ...
+    assert staging.map_tree(Pair(a, 1), lambda x: "P", Artifact) == Pair(a, 1)  # ... and not rebuilt
+    assert staging.map_tree({a, 1}, lambda x: "P", Artifact) == {"P", 1}
+
+
 def test_map_tree_rebuilds_without_touching_other_values() -> None:
     a = artifact("gs://b/a")
     out = staging.map_tree((a, [a, "s", 3], {"k": a, "n": None}), lambda x: "P", Artifact)

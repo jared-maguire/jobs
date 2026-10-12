@@ -534,6 +534,27 @@ def test_config_memo_does_not_memoize_batch_wrapper_jobs(tmp_path: Path) -> None
         sk8s.configure()
 
 
+def test_memo_through_submit_map_hits_per_item(tmp_path: Path) -> None:
+    from sk8s import api
+
+    h = Harness(tmp_path)
+    sk8s.configure(cluster=h.cluster)
+    try:
+        futs = api.submit_map(double, [1, 2, 3], memo=True)
+        assert not any(f.memo_hit for f in futs)
+        for f in futs:
+            h.finish(f.job_name)
+        assert [f.result(timeout=10) for f in futs] == [2, 4, 6]
+        jobs = len(h.batch.jobs)
+        again = api.submit_map(double, [3, 1, 4], memo=True)  # 3 and 1 were answered before
+        assert [f.memo_hit for f in again] == [True, True, False]
+        assert len(h.batch.jobs) == jobs + 1
+        h.finish(again[2].job_name)
+        assert [f.result(timeout=10) for f in again] == [6, 2, 8]
+    finally:
+        sk8s.configure()
+
+
 def test_job_options_include_the_memo_names() -> None:
     from sk8s.cluster import JOB_OPTIONS
 

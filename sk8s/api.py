@@ -73,6 +73,11 @@ def run(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
     ``limits``, ``name_prefix``) set job options and are not passed to ``func``.
     ``timeout`` bounds the wait and is never passed to ``func``. Every other
     keyword argument is forwarded to ``func``.
+
+    ``sk8s.Artifact`` arguments reach ``func`` as local ``Path`` s, a parameter annotated
+    ``sk8s.OutDir`` gets an output directory, and returned OutDir paths come back as Artifacts;
+    ``memo=True`` answers a repeat call from the recorded result without running anything
+    (see docs/artifacts.md).
     """
     return _cluster().run(func, *args, **kwargs)
 
