@@ -83,6 +83,7 @@ jobs:
       SK8S_CONFIG_TEST_IMAGE: sk8s-dev-ci:ci
       SK8S_VOLUMES_TEST_IMAGE: sk8s-dev-ci:ci
       SK8S_SERVICES_TEST_IMAGE: sk8s-dev-ci:ci
+      SK8S_EXPLAIN_TEST_IMAGE: sk8s-dev-ci:ci
     steps:
       - uses: actions/checkout@v4
 

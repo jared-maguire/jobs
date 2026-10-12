@@ -19,17 +19,15 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
-import re
 from typing import Any, Callable
 
 from kubernetes.client import ApiException
 
 from sk8s import anchors, clones
-from sk8s.cluster import (
-    _ATTACH_BLOCKED, _NO_CONTENT_SOURCE, _WAITING_PULL_REASONS, Cluster, job_phase, match_pv,
-)
+from sk8s.cluster import _WAITING_PULL_REASONS, Cluster, job_phase
 from sk8s.config import Config, load_config
-from sk8s.errors import Sk8sError, VolumeAttachBlocked, VolumeProvisioningFailed
+from sk8s.diagnosis import SnapshotSightings, diagnose_pod_volumes, pod_holds_volumes, read_pvc
+from sk8s.errors import Sk8sError
 from sk8s.quantity import cpu_cores, effective_request, memory_bytes
 from sk8s.store import get_store
 from sk8s.store.base import BlobStore
@@ -187,76 +185,41 @@ def _pod_resource(pod: Any, resource: str) -> Any:
     return total if seen else None
 
 
-def _holds_volume(ctx: _Ctx, pod_name: str) -> bool:
-    """True unless the pod is over or gone (a finished pod releases its disk)."""
-    try:
-        pod = ctx.core.read_namespaced_pod(name=pod_name, namespace=ctx.namespace)
-    except ApiException as exc:
-        return bool(exc.status != 404)
-    phase = None if pod.status is None else pod.status.phase
-    return phase not in _TERMINAL_POD_PHASES
-
-
-def _blocked_mount(ctx: _Ctx, mounts: dict[str, str], pv: str | None) -> tuple[str, str]:
-    """(claim, volume) the attach event is about: the claim bound to PV ``pv`` if several."""
-    if pv is not None and len(mounts) > 1:
-        for claim, volume in mounts.items():
-            try:
-                bound = ctx.core.read_namespaced_persistent_volume_claim(
-                    name=claim, namespace=ctx.namespace
-                ).spec.volume_name
-            except ApiException:
-                continue
-            if bound == pv:
-                return claim, volume
-    return next(iter(mounts.items()))
-
-
 def _diagnose_volumes(ctx: _Ctx, pod: Any, events: _Events) -> _Diagnosis | None:
-    job = (pod.metadata.labels or {}).get("job-name", "?")
-    mounts = {
-        v.persistent_volume_claim.claim_name: v.name
-        for v in pod.spec.volumes or []
-        if v.persistent_volume_claim is not None
-    }
-    if not mounts:
+    """The shared volume-wedge rules (sk8s.diagnosis), in snapshot mode: no memory of how long a
+    wedge has lasted, so whatever is wedged right now is reported (grace 0)."""
+    if not any(v.persistent_volume_claim is not None for v in pod.spec.volumes or []):
+        return None  # nothing to diagnose; do not even fetch events
+    wedge = diagnose_pod_volumes(
+        pod, events.attach_failures(), events.provisioning_failures(),
+        read_pvc=lambda claim: read_pvc(ctx.core, ctx.namespace, claim),
+        holds=lambda name: pod_holds_volumes(ctx.core, ctx.namespace, name),
+        sightings=SnapshotSightings(), attach_grace=0.0, provision_grace=0.0,
+    )
+    if wedge is None:
         return None
-    for ev in events.provisioning_failures():
-        claim = ev.involved_object.name
-        if claim not in mounts:
-            continue
-        message = ev.message or ""
-        if _NO_CONTENT_SOURCE in message:
-            exc = VolumeProvisioningFailed(job, mounts[claim], claim, message)
-            return _Diagnosis("VolumeProvisioningFailed", exc.reason, True)
-        try:
-            pvc = ctx.core.read_namespaced_persistent_volume_claim(name=claim, namespace=ctx.namespace)
-        except ApiException:
-            continue
-        is_clone = (pvc.metadata.labels or {}).get(clones.KIND_LABEL) == clones.KIND_CLONE
-        if is_clone and pvc.status is not None and pvc.status.phase == "Pending":
-            return _Diagnosis(
-                "VolumeProvisioningFailed",
-                f"the read-only clone {claim!r} of its volume {mounts[claim]!r} is still Pending. "
-                f"Kubernetes reports ProvisioningFailed: {message}\n"
-                "The provisioner keeps retrying; typical causes are storage quota or the cloud "
-                "rate-limiting clones of one source disk: free quota or resubmit later.",
-                True,
-            )
-    for ev in events.attach_failures():
-        if ev.involved_object.name != pod.metadata.name:
-            continue
-        match = _ATTACH_BLOCKED.search(ev.message or "")
-        if match is None:
-            continue  # transient attach noise, not the persistent signature
-        holders = [h for h in re.split(r"[,\s]+", match.group("pods")) if h]
-        live = [h for h in holders if _holds_volume(ctx, h)]
-        if not live:
-            continue  # a detach in flight
-        claim, volume = _blocked_mount(ctx, mounts, match_pv(ev.message))
-        exc2 = VolumeAttachBlocked(job, volume, claim, live, ev.message)
-        return _Diagnosis("VolumeAttachBlocked", exc2.reason, True)
-    return None
+    if wedge.kind == "attach":
+        who = ", ".join(wedge.holders)
+        grace = ctx.config.volume_attach_grace_seconds
+        return _Diagnosis(
+            "VolumeAttachBlocked",
+            f"waiting for its volume {wedge.volume!r} (PVC {wedge.claim!r}): as of now it is "
+            f"held by {who} on another node, and a ReadWriteOnce disk attaches to one node at "
+            f"a time; it starts when the holder finishes. A live sk8s client fails the job "
+            f"with VolumeAttachBlocked if this lasts over {grace:g}s. Kubernetes reports "
+            f"FailedAttachVolume: {wedge.message}",
+            True,
+        )
+    if wedge.kind == "clone-provisioning":
+        return _Diagnosis(
+            "VolumeProvisioningFailed",
+            f"the read-only clone {wedge.claim!r} of its volume {wedge.volume!r} is still "
+            f"Pending. Kubernetes reports ProvisioningFailed: {wedge.message}\n"
+            "The provisioner keeps retrying; typical causes are storage quota or the cloud "
+            "rate-limiting clones of one source disk: free quota or resubmit later.",
+            True,
+        )
+    return _Diagnosis("VolumeProvisioningFailed", wedge.to_error().reason, True)
 
 
 def _diagnose_waiting(ctx: _Ctx, pod: Any, events: _Events | None) -> _Diagnosis | None:
@@ -293,7 +256,8 @@ def _diagnose_waiting(ctx: _Ctx, pod: Any, events: _Events | None) -> _Diagnosis
             msg = (cond.message or cond.reason or "no node fits").strip()
             return _Diagnosis(
                 "Unschedulable",
-                f"cannot be scheduled: {msg}. Reduce its requests, or add node capacity.",
+                f"not scheduled yet: {msg}. If the cluster autoscaler is adding a node this "
+                "clears by itself; if it never does, reduce the job's requests or add capacity.",
                 True,
             )
     if status.phase == "Pending" and events is not None:
@@ -492,7 +456,8 @@ def _volume_entries(pvcs: list[Any]) -> list[dict[str, Any]]:
 def _driver_logs(ctx: _Ctx, pods: list[Any], warnings: list[str]) -> list[str] | None:
     if not pods:
         return []
-    pod = sorted(pods, key=lambda p: p.metadata.name)[-1]
+    # The newest pod by creation time: a retried driver (backoff) leaves older failed pods behind.
+    pod = max(pods, key=lambda p: (_aware(p.metadata.creation_timestamp) or _MIN_TIME, p.metadata.name))
     try:
         text = ctx.core.read_namespaced_pod_log(
             name=pod.metadata.name, namespace=ctx.namespace, tail_lines=LOG_TAIL_LINES
@@ -599,11 +564,13 @@ def explain(workflow_id: str, cluster: Any | None = None) -> dict[str, Any]:
                 blocking.append(f"job {entry['name']} failed: {entry['failure_reason']}")
 
     blob_count: int | None = None
+    blob_note: str | None = None
     try:
         blob_count = ctx.store_for(store_url).count_prefix(prefix)
     except NotImplementedError:
-        pass
+        blob_note = "this store does not support counting blobs"
     except Exception as exc:  # noqa: BLE001
+        blob_note = f"could not count blobs: {type(exc).__name__}: {exc}"
         warnings.append(f"could not count blobs in store {store_url!r}: {type(exc).__name__}: {exc}")
 
     report: dict[str, Any] = {
@@ -621,7 +588,10 @@ def explain(workflow_id: str, cluster: Any | None = None) -> dict[str, Any]:
         "jobs": entries,
         "counts": counts_out,
         "volumes": _volume_entries(pvcs),
-        "store": {"url": store_url, "prefix": prefix, "blob_count": blob_count},
+        "store": {
+            "url": store_url, "prefix": prefix, "blob_count": blob_count,
+            **({"blob_count_note": blob_note} if blob_count is None else {}),
+        },
         "blocking": blocking,
         "warnings": warnings,
     }
@@ -650,8 +620,10 @@ def render(report: dict[str, Any]) -> str:
         + (f"  retention {wf['retention_days']}d" if wf["retention_days"] is not None else "")
     ]
     store = report["store"]
-    blobs = "?" if store["blob_count"] is None else str(store["blob_count"])
-    lines.append(f"store {store['url']}  {blobs} blob(s) under {store['prefix']}/")
+    if store["blob_count"] is None:
+        lines.append(f"store {store['url']}  blob count unavailable ({store.get('blob_count_note', '?')})")
+    else:
+        lines.append(f"store {store['url']}  {store['blob_count']} blob(s) under {store['prefix']}/")
     driver = report["driver"]
     if driver is not None:
         lines.append(f"driver {driver['job']}  {driver['phase']}")

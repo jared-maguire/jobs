@@ -350,6 +350,8 @@ def test_unschedulable_pod_is_blocking(tmp_path: Path) -> None:
     assert job["waiting_code"] == "Unschedulable"
     assert "Insufficient cpu" in job["waiting_reason"]
     assert any("big" in b and "Insufficient cpu" in b for b in report["blocking"])
+    assert "not scheduled yet" in job["waiting_reason"] and "autoscaler" in job["waiting_reason"]
+    assert "wedge" not in job["waiting_reason"]
 
 
 def test_volume_attach_blocked_by_a_live_pod(tmp_path: Path) -> None:
@@ -367,6 +369,8 @@ def test_volume_attach_blocked_by_a_live_pod(tmp_path: Path) -> None:
     assert job["waiting_code"] == "VolumeAttachBlocked"
     assert "data" in job["waiting_reason"] and "holder-pod" in job["waiting_reason"]
     assert any("holder-pod" in b for b in report["blocking"])
+    assert "as of now" in job["waiting_reason"] and "starts when the holder finishes" in job["waiting_reason"]
+    assert "resubmit" not in job["waiting_reason"].lower()
 
 
 def test_volume_attach_event_with_a_gone_holder_is_a_detach_in_flight(tmp_path: Path) -> None:
@@ -515,6 +519,7 @@ def test_store_trouble_is_a_warning_not_a_crash(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(h.store, "count_prefix", boom)
     report = sk8s.explain(WF, cluster=h.cluster)
     assert report["store"]["blob_count"] is None
+    assert "store down" in report["store"]["blob_count_note"]
     assert any("store" in w and "store down" in w for w in report["warnings"])
 
 
@@ -528,7 +533,9 @@ def test_store_without_counting_support_is_none(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(h.store, "count_prefix", unsupported)
     report = sk8s.explain(WF, cluster=h.cluster)
     assert report["store"]["blob_count"] is None
+    assert report["store"]["blob_count_note"] == "this store does not support counting blobs"
     assert report["warnings"] == []
+    assert "blob count unavailable (this store does not support counting blobs)" in explaining.render(report)
 
 
 def test_cost_is_rough_cpu_request_times_runtime(tmp_path: Path) -> None:
@@ -639,3 +646,16 @@ def test_render_rows_point_at_blocking_instead_of_repeating_the_explanation(tmp_
     assert "[ImagePullBackOff]" in row and "cannot pull image" not in row
     assert text.count("cannot pull image") == 1  # said once, under "blocking:"
     assert "estimated cost so far: ~$0.0001 (rough" in text  # sub-cent costs keep their digits
+
+
+def test_driver_logs_come_from_the_newest_pod_not_the_last_by_name(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    make_anchor(h, driver="drv")
+    make_job(h, "drv", active=1, start=ago(hours=1))
+    old = make_pod(h, "drv", phase="Failed", name="drv-zzzzz", terminated=("Error", 1), finished=ago(minutes=30))
+    new = make_pod(h, "drv", phase="Running", name="drv-aaaaa")
+    old.metadata.creation_timestamp = ago(hours=1)
+    new.metadata.creation_timestamp = ago(minutes=5)  # a backoff retry sorts FIRST by name
+    h.core.pod_logs["drv-zzzzz"] = "old attempt"
+    h.core.pod_logs["drv-aaaaa"] = "retry running"
+    assert sk8s.explain(WF, cluster=h.cluster)["driver"]["logs_tail"] == ["retry running"]

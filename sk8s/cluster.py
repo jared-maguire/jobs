@@ -8,7 +8,6 @@ import datetime
 import json
 import logging
 import os
-import re
 import sys
 import threading
 import time
@@ -22,10 +21,11 @@ import sk8s
 from sk8s import anchors, clones, serialize, spec, volumes
 from sk8s import expect as expectations
 from sk8s.config import Config, load_config
+from sk8s.diagnosis import ATTACH, diagnose_pod_volumes, pod_holds_volumes, read_pvc
 from sk8s.dryrun import DryRun, resource_totals, serialize_job
 from sk8s.errors import (
     BlobNotFound, ImageNotConfigured, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
-    VolumeAttachBlocked, VolumeError, VolumeProvisioningFailed,
+    VolumeError,
 )
 from sk8s.future import JobFuture
 from sk8s.store import get_store
@@ -39,19 +39,7 @@ JOB_OPTIONS = {
 }
 
 _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
-# Volume diagnoses (spike-report.md section 11). Both are events, not container waiting reasons:
-# the pod only ever says ContainerCreating / Pending. Match on the persistent signatures only; the
-# transient attach noise ("CSINode ... does not contain driver", "ControllerPublish not permitted
-# ... backoff condition") shares the FailedAttachVolume reason and must never be fatal.
-_ATTACH_BLOCKED = re.compile(r"Volume is already used by pod\(s\) (?P<pods>.+?)\s*$")
-_NO_CONTENT_SOURCE = "VolumeContentSource must be provided"
-_PV_IN_EVENT = re.compile(r'volume "(?P<pv>[^"]+)"')
-
-
-def match_pv(message: str) -> str | None:
-    m = _PV_IN_EVENT.search(message or "")
-    return m.group("pv") if m else None
-
+# Volume diagnoses (spike-report.md section 11) live in sk8s.diagnosis, shared with sk8s.explain.
 _STUCK_PHASES = ("imagepull", "volume-stuck")
 # Stands in for the anchor's uid in a dry run's owner reference / SK8S_ANCHOR_UID (no anchor exists).
 _DRY_RUN_UID = "<assigned-when-the-workflow-anchor-is-created>"
@@ -159,6 +147,23 @@ def job_phase(job: Any) -> str:
 
 def new_workflow_id() -> str:
     return "wf-" + spec.job_name("x").rsplit("-", 1)[1]
+
+
+class _ClusterSightings:
+    """The watcher's memory of how long each volume wedge has lasted (see sk8s.diagnosis)."""
+
+    def __init__(self, cluster: Cluster) -> None:
+        self._c = cluster
+
+    def _table(self, kind: str) -> dict[str, float]:
+        return self._c._attach_blocked_since if kind == ATTACH else self._c._provision_failing_since
+
+    def elapsed(self, kind: str, key: str) -> float:
+        since = self._table(kind).setdefault(key, self._c._clock())
+        return self._c._clock() - since
+
+    def forget(self, kind: str, key: str) -> None:
+        self._table(kind).pop(key, None)
 
 
 class Cluster:
@@ -504,82 +509,22 @@ class Cluster:
         return list(listing.items)
 
     def _diagnose_pod(self, pod: Any, attach: list[Any], provisioning: list[Any]) -> PodFailed | None:
-        job = pod.metadata.labels["job-name"]
-        mounts = {
-            v.persistent_volume_claim.claim_name: v.name
-            for v in pod.spec.volumes or []
-            if v.persistent_volume_claim is not None
-        }
-        for ev in provisioning:
-            involved = ev.involved_object
-            if involved.name not in mounts:
-                continue
-            if _NO_CONTENT_SOURCE in (ev.message or ""):  # infeasible: no grace period
-                return VolumeProvisioningFailed(
-                    job, mounts[involved.name], involved.name, ev.message
-                )
-            diagnosis = self._diagnose_clone(job, mounts[involved.name], involved.name, ev.message)
-            if diagnosis is not None:
-                return diagnosis
-        for ev in attach:
-            if ev.involved_object.name != pod.metadata.name:
-                continue
-            match = _ATTACH_BLOCKED.search(ev.message or "")
-            if match is None:
-                continue  # transient attach noise, not the persistent signature
-            holders = [h for h in re.split(r"[,\s]+", match.group("pods")) if h]
-            live = [h for h in holders if self._pod_holds_volumes(h)]
-            if not live:
-                self._attach_blocked_since.pop(pod.metadata.name, None)  # a detach in flight
-                return None
-            since = self._attach_blocked_since.setdefault(pod.metadata.name, self._clock())
-            if self._clock() - since < self.config.volume_attach_grace_seconds:
-                return None
-            claim, volume = self._blocked_mount(mounts, match_pv(ev.message))
-            return VolumeAttachBlocked(job, volume, claim, live, ev.message)
-        return None
+        wedge = diagnose_pod_volumes(
+            pod, attach, provisioning,
+            read_pvc=self._read_pvc, holds=self._pod_holds_volumes,
+            sightings=_ClusterSightings(self),
+            attach_grace=self.config.volume_attach_grace_seconds,
+            provision_grace=self.config.volume_provision_grace_seconds,
+        )
+        if wedge is None:
+            return None
+        return wedge.to_error(clone_grace=self.config.volume_provision_grace_seconds)
 
-    def _diagnose_clone(self, job: str, volume: str, claim: str, message: str) -> PodFailed | None:
-        """A ProvisioningFailed event on a clone sk8s created: fatal once it has stayed Pending
-        for the grace period (the provisioner retries transient causes by itself)."""
-        try:
-            pvc = self.core.read_namespaced_persistent_volume_claim(
-                name=claim, namespace=self.config.namespace
-            )
-        except ApiException:
-            return None
-        is_clone = (pvc.metadata.labels or {}).get(clones.KIND_LABEL) == clones.KIND_CLONE
-        if not is_clone or pvc.status is None or pvc.status.phase != "Pending":
-            self._provision_failing_since.pop(claim, None)  # provisioned since: the event is history
-            return None
-        since = self._provision_failing_since.setdefault(claim, self._clock())
-        grace = self.config.volume_provision_grace_seconds
-        if self._clock() - since < grace:
-            return None
-        return VolumeProvisioningFailed(job, volume, claim, message, clone_grace=grace)
-
-    def _blocked_mount(self, mounts: dict[str, str], pv: str | None) -> tuple[str, str]:
-        """(claim, volume) of the mount the attach event is about: the claim bound to PV ``pv``."""
-        if pv is not None and len(mounts) > 1:
-            for claim, volume in mounts.items():
-                try:
-                    bound = self.core.read_namespaced_persistent_volume_claim(
-                        name=claim, namespace=self.config.namespace
-                    ).spec.volume_name
-                except ApiException:
-                    continue
-                if bound == pv:
-                    return claim, volume
-        return next(iter(mounts.items()))
+    def _read_pvc(self, claim: str) -> Any | None:
+        return read_pvc(self.core, self.config.namespace or "", claim)
 
     def _pod_holds_volumes(self, name: str) -> bool:
-        """True unless the pod is over or gone (a finished pod releases its disk, spike section 7)."""
-        try:
-            pod = self.core.read_namespaced_pod(name=name, namespace=self.config.namespace)
-        except ApiException as exc:
-            return bool(exc.status != 404)
-        phase = None if pod.status is None else pod.status.phase
-        return phase not in ("Succeeded", "Failed")
+        return pod_holds_volumes(self.core, self.config.namespace or "", name)
 
     # --- submission --------------------------------------------------------
     @staticmethod
