@@ -649,3 +649,37 @@ def test_adopt_outputs_reports_a_collected_output(astore: ArtifactStore, tmp_pat
     assert memo.adopt_outputs(astore, "wf-x", hit) is True
     astore.store.delete(out.uri)  # swept between lookup and recording
     assert memo.adopt_outputs(astore, "wf-y", hit) is False
+
+
+# --- composition with expect= (envelope v2) ----------------------------------------------------------
+
+
+def _lax(r: Any) -> bool:
+    return True
+
+
+def _strict(r: Any) -> bool:
+    return bool(r < 10)
+
+
+def test_the_gate_is_part_of_the_key() -> None:
+    assert key(expect=_lax) != key() and key(expect=_lax) != key(expect=_strict)
+    assert key(expect=_lax) == key(expect=_lax)
+
+
+def test_a_gated_out_run_writes_no_entry_and_a_stricter_gate_misses(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    failing = h.cluster.submit(double, 8, memo=True, expect=lambda r: r < 10)  # 16 fails
+    h.finish(failing.job_name, "failed")
+    with pytest.raises(sk8s.ExpectationFailed):
+        failing.result(timeout=10)
+    assert h.entries() == []  # gated-out: nothing recorded
+
+    ok = h.cluster.submit(double, 3, memo=True, expect=_lax)
+    h.finish(ok.job_name)
+    assert ok.result(timeout=10) == 6 and len(h.entries()) == 1
+    assert h.cluster.submit(double, 3, memo=True, expect=_lax).memo_hit  # same gate: hit
+    again = h.cluster.submit(double, 3, memo=True, expect=_strict)  # a different gate must re-check
+    assert not again.memo_hit
+    h.finish(again.job_name)
+    assert again.result(timeout=10) == 6

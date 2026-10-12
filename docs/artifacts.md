@@ -56,6 +56,24 @@ request would evict the pod), and only when you did not set `ephemeral-storage` 
 Generic ephemeral volumes (for inputs beyond ~50 GiB) are **not implemented**: sk8s logs a
 warning, and you set `requests={"ephemeral-storage": ...}` yourself.
 
+## Composition with `expect=`, `pilot=` and `dry_run=`
+
+- **`expect=` gates BEFORE anything is uploaded.** The gate receives the function's return value
+  as returned: an `OutDir` path is a real, readable local file (open it and check it), not yet an
+  `Artifact`. Only if the gate passes are the outputs hashed, recorded and uploaded and the result
+  stored. A gated-out run leaves no CAS object, no reference-set entry for its outputs and no memo
+  entry; the only trace is the staged inputs' learned hashes (facts about the inputs).
+- **Memo keys include the gate.** An entry exists only for a run that passed its `expect=`, so a hit
+  is valid only for the same gate; a different or stricter `expect=` re-runs.
+- **`pilot=`** needs nothing special: pilot items are ordinary jobs and may be memo hits.
+- **`dry_run=True` touches nothing**: no pin (no stat), no hash, no reference-set write, no memo
+  lookup. It reflects staging from the Artifacts' *declared* metadata: `DryRun.n_artifacts`,
+  `artifact_input_bytes`, the `ephemeral-storage` request in the job body, and notes saying which
+  inputs have no declared size. `memo=True` with `batch_size > 1` is refused in a preview too.
+- Wire format: unchanged envelope v2. Artifact descriptors ride in an extra payload/result *header*
+  key; the pickled body is byte-identical to a payload without artifacts. A worker that predates
+  artifacts cannot unpickle `Artifact`/`OutDir` and fails loudly before running anything.
+
 ## Layout
 
 ```

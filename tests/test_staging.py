@@ -34,7 +34,7 @@ def run_worker(astore: ArtifactStore, func: Any, args: tuple[Any, ...] = (), kwa
                wf: str = "wf-1", job: str = "job-a") -> tuple[int, bytes]:
     store = astore.store
     prepared = staging.prepare_submission(astore, wf, args, kwargs or {})
-    uri = store.put(f"{wf}/{job}/payload", serialize.encode_payload(func, prepared.args, prepared.kwargs, prepared.header))
+    uri = store.put(f"{wf}/{job}/payload", serialize.encode_payload(func, prepared.args, prepared.kwargs, extra_header=prepared.header))
     env = {"SK8S_STORE": astore.spec, "SK8S_PAYLOAD_URI": uri, "SK8S_RESULT_KEY": f"{wf}/{job}/result"}
     code = worker.main(env)
     return code, store.get(store.uri_for(f"{wf}/{job}/result"))
