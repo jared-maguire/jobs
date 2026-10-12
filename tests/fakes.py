@@ -1,6 +1,8 @@
 """In-memory fakes for the kubernetes client surface sk8s uses."""
 from __future__ import annotations
 
+import copy
+import datetime
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +22,10 @@ class FakeCoreV1:
         self.actions: list[tuple[str, str, str]] = []
         self.pvcs: dict[tuple[str, str], Any] = {}  # (ns, name) -> V1PersistentVolumeClaim
         self.pvc_delete_policies: dict[str, str | None] = {}  # pvc name -> propagation policy
+        self.pvc_deleted: list[str] = []  # every PVC delete that was issued, in order
+        self.pvc_patches: list[tuple[str, dict[str, Any]]] = []  # (name, body), in order
+        self.pods: dict[tuple[str, str], Any] = {}  # (ns, name) -> pod-like object
+        self.events: list[Any] = []  # event-like objects served by list_namespaced_event
 
     def create_namespaced_config_map(self, namespace: str, body: Any) -> Any:
         self.create_calls.append(body.metadata.name)
@@ -131,12 +137,17 @@ class FakeCoreV1:
             raise ApiException(status=409, reason="Conflict")
         if not body.metadata.uid:
             body.metadata.uid = uuid.uuid4().hex
+        if body.metadata.creation_timestamp is None:
+            body.metadata.creation_timestamp = datetime.datetime.now(datetime.timezone.utc)
         self.pvcs[(namespace, body.metadata.name)] = body
         return body
 
     def read_namespaced_persistent_volume_claim(self, name: str, namespace: str) -> Any:
+        # A SNAPSHOT, like a real API server's response: a caller holding an earlier read must
+        # not see later patches (returning the stored object hid a stale-snapshot bug in the
+        # read-only mount path, found live on GKE in Plan 10 Task 4).
         try:
-            return self.pvcs[(namespace, name)]
+            return copy.deepcopy(self.pvcs[(namespace, name)])
         except KeyError:
             raise ApiException(status=404, reason="Not Found")
 
@@ -146,13 +157,68 @@ class FakeCoreV1:
         if (namespace, name) not in self.pvcs:
             raise ApiException(status=404, reason="Not Found")
         self.pvc_delete_policies[name] = propagation_policy
+        self.pvc_deleted.append(name)
         del self.pvcs[(namespace, name)]
 
-    def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
-        class R:
-            items: list[Any] = []
+    def patch_namespaced_persistent_volume_claim(self, name: str, namespace: str, body: Any) -> Any:
+        """JSON merge-patch of metadata.annotations / metadata.labels; a None value deletes a key."""
+        self.pvc_patches.append((name, body))
+        try:
+            pvc = self.pvcs[(namespace, name)]  # the stored object itself: patches mutate it
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found") from None
+        for field in ("annotations", "labels"):
+            patch = (body.get("metadata") or {}).get(field)
+            if patch:
+                merged = dict(getattr(pvc.metadata, field) or {})
+                for key, value in patch.items():
+                    if value is None:
+                        merged.pop(key, None)
+                    else:
+                        merged[key] = value
+                setattr(pvc.metadata, field, merged)
+        return pvc
 
-        return R()
+    def list_namespaced_persistent_volume_claim(self, namespace: str, label_selector: str = "") -> Any:
+        wanted = dict(p.split("=", 1) for p in label_selector.split(",") if p)
+        items = [
+            v
+            for (ns, _), v in self.pvcs.items()
+            if ns == namespace
+            and all((v.metadata.labels or {}).get(k) == val for k, val in wanted.items())
+        ]
+        return SimpleNamespace(items=copy.deepcopy(items))
+
+    def read_namespaced_pod(self, name: str, namespace: str) -> Any:
+        try:
+            return self.pods[(namespace, name)]
+        except KeyError:
+            raise ApiException(status=404, reason="Not Found")
+
+    def list_namespaced_event(self, namespace: str, field_selector: str = "") -> Any:
+        """Honors `a.b=v[,...]` field selectors over the event-like objects in ``self.events``."""
+        wanted = dict(p.split("=", 1) for p in field_selector.split(",") if p)
+
+        def get(ev: Any, path: str) -> Any:
+            cur = ev
+            for part in path.split("."):
+                if part == "involvedObject":
+                    part = "involved_object"
+                cur = getattr(cur, part, None)
+            return cur
+
+        items = [e for e in self.events if all(get(e, k) == v for k, v in wanted.items())]
+        return SimpleNamespace(items=items)
+
+    def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
+        wanted = dict(p.split("=", 1) for p in label_selector.split(",") if p)
+        items = [
+            p
+            for (ns, _), p in self.pods.items()
+            if ns == namespace
+            and all(((p.metadata.labels or {}) if p.metadata else {}).get(k) == v for k, v in wanted.items())
+        ]
+        return SimpleNamespace(items=items)
 
     def read_namespaced_pod_log(self, name: str, namespace: str) -> str:
         return ""
@@ -287,6 +353,17 @@ class FakeRbacV1:
 class FakeStorageV1:
     def __init__(self, classes: tuple[str, ...] = ()) -> None:
         self.classes = set(classes)
+        self.created: dict[str, Any] = {}  # name -> V1StorageClass body, as created
+        self.actions: list[tuple[str, str, str]] = []  # (verb, kind, name); 409s included
+
+    def create_storage_class(self, body: Any) -> Any:
+        name = body.metadata.name
+        self.actions.append(("create", "StorageClass", name))
+        if name in self.classes:
+            raise ApiException(status=409, reason="Conflict")
+        self.classes.add(name)
+        self.created[name] = body
+        return body
 
     def read_storage_class(self, name: str) -> Any:
         if name not in self.classes:

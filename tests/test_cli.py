@@ -21,7 +21,7 @@ import sk8s.workflows as workflows
 from sk8s import anchors, cli
 from sk8s.doctor import Check
 from sk8s.errors import Sk8sError
-from tests.fakes import FakeBatchV1, FakeCoreV1, FakeRbacV1
+from tests.fakes import FakeBatchV1, FakeCoreV1, FakeRbacV1, FakeStorageV1
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -51,6 +51,12 @@ def _fakes(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeCoreV1, FakeBatchV1, Fa
     monkeypatch.setattr(k8s, "batch_api", lambda: batch)
     monkeypatch.setattr(k8s, "rbac_api", lambda: rbac)
     return core, batch, rbac
+
+
+def _storage(monkeypatch: pytest.MonkeyPatch, classes: tuple[str, ...] = ()) -> FakeStorageV1:
+    storage = FakeStorageV1(classes)
+    monkeypatch.setattr(k8s, "storage_api", lambda: storage)
+    return storage
 
 
 # --- usage errors / parser wiring ----------------------------------------------------------------
@@ -446,6 +452,7 @@ def test_gke_without_apply_cloud_prints_the_plan_applies_k8s_and_runs_no_gcloud(
     assert sa.metadata.annotations == {WI_ANN: EMAIL}
     assert tomllib.loads(env.read_text()) == {
         "namespace": NS, "store": STORE, "image_prefix": "us-central1-docker.pkg.dev/my-proj/sk8s/",
+        "rwx_storage_class": "standard-rwx",
     }
 
 
@@ -706,6 +713,126 @@ def test_write_config_escapes_values(tmp_path: Path) -> None:
     assert tomllib.loads(path.read_text()) == {
         "namespace": nasty, "store": "k8s", "image_prefix": "reg/",
     }
+
+
+def test_write_config_none_removes_a_key_and_keeps_the_rest(tmp_path: Path) -> None:
+    path = tmp_path / "c.toml"
+    cli.write_config(path, {"namespace": "n", "rwx_storage_class": "nfs"})
+    cli.write_config(path, {"store": "k8s", "rwx_storage_class": None})
+    assert tomllib.loads(path.read_text()) == {"namespace": "n", "store": "k8s"}
+    cli.write_config(path, {"rwx_storage_class": None})  # absent key: still fine
+    assert "rwx_storage_class" not in tomllib.loads(path.read_text())
+
+
+# --- config: the rwx storage class ----------------------------------------------------------------
+
+RWX = ["config", "--provider", "generic", "--namespace", NS, "--rwx-storage-class", "nfs"]
+
+
+def test_config_persists_the_generic_profiles_rwx_class_and_creates_it_when_asked(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    _fakes(monkeypatch)
+    storage = _storage(monkeypatch)
+    assert cli.run([*RWX, "--rwx-provisioner", "example.com/nfs"]) == 0
+    assert tomllib.loads(env.read_text())["rwx_storage_class"] == "nfs"
+    assert storage.created["nfs"].provisioner == "example.com/nfs"
+    assert cli._load_cfg().rwx_storage_class == "nfs"
+
+
+def test_config_second_run_without_flags_keeps_the_class_and_creates_nothing(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    _fakes(monkeypatch)
+    storage = _storage(monkeypatch)
+    cli.run([*RWX, "--rwx-provisioner", "example.com/nfs"])
+    before = list(storage.actions)
+    assert cli.run(["config", "--provider", "generic", "--namespace", NS]) == 0
+    assert tomllib.loads(env.read_text())["rwx_storage_class"] == "nfs"  # carried over
+    assert storage.actions == before
+
+
+def test_config_dry_run_plans_the_storage_class_and_touches_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], env: Path
+) -> None:
+    _fakes(monkeypatch)
+    storage = _storage(monkeypatch)
+    assert cli.run([*RWX, "--rwx-provisioner", "example.com/nfs", "--dry-run"]) == 0
+    assert "ensure StorageClass nfs (provisioner example.com/nfs)" in capsys.readouterr().out
+    assert storage.actions == [] and not env.exists()
+
+
+def test_config_without_a_provisioner_names_the_class_but_creates_nothing(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    _fakes(monkeypatch)
+    storage = _storage(monkeypatch)
+    monkeypatch.setattr(k8s, "storage_api", lambda: pytest.fail("storage client built"))
+    assert cli.run(RWX) == 0
+    assert tomllib.loads(env.read_text())["rwx_storage_class"] == "nfs"
+    assert storage.actions == []
+
+
+def test_gke_config_persists_the_derived_standard_rwx(
+    monkeypatch: pytest.MonkeyPatch, env: Path, runner: Runner
+) -> None:
+    _fakes(monkeypatch)
+    monkeypatch.setattr(k8s, "storage_api", lambda: pytest.fail("GKE ships standard-rwx"))
+    assert cli.run(GKE) == 0
+    assert tomllib.loads(env.read_text())["rwx_storage_class"] == "standard-rwx"
+
+
+def test_local_config_has_no_rwx_key_and_drops_a_stale_one(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    _fakes(monkeypatch)
+    env.parent.mkdir(parents=True)
+    env.write_text('rwx_storage_class = "stale"\n')
+    assert cli.run(["config", "--namespace", NS]) == 0  # detected -> local (fixture)
+    assert "rwx_storage_class" not in tomllib.loads(env.read_text())
+
+
+@pytest.mark.parametrize("provider", ["local", "gke"])
+def test_rwx_flags_are_rejected_where_the_provider_owns_the_class(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], env: Path,
+    provider: str, runner: Runner,
+) -> None:
+    _fakes(monkeypatch)
+    argv = ["config", "--provider", provider, "--namespace", NS, "--rwx-storage-class", "nfs"]
+    if provider == "gke":
+        argv += ["--project", PROJ, "--region", REGION]
+    assert cli.run(argv) == 1
+    expected = "has no RWX storage class" if provider == "local" else "do not pass them"
+    assert expected in capsys.readouterr().err
+    assert not env.exists()
+
+
+def test_config_help_documents_the_rwx_flags(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.run(["config", "--help"])
+    out = capsys.readouterr().out
+    assert "--rwx-storage-class" in out and "--rwx-provisioner" in out
+
+
+def test_doctor_checks_the_persisted_rwx_class_on_a_generic_cluster(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    monkeypatch.setattr(profile_mod, "detect_provider", lambda context=None: "generic")
+    env.parent.mkdir(parents=True)
+    env.write_text('rwx_storage_class = "nfs"\n')
+    seen = _doctor_with(monkeypatch, [Check("x", True)])
+    assert cli.run(["doctor"]) == 0
+    assert seen[0].rwx_storage_class == "nfs"
+
+
+def test_doctor_on_local_ignores_a_stale_rwx_class(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    env.parent.mkdir(parents=True)
+    env.write_text('rwx_storage_class = "nfs"\n')
+    seen = _doctor_with(monkeypatch, [Check("x", True)])
+    assert cli.run(["doctor"]) == 0
+    assert seen[0].rwx_storage_class is None
 
 
 # --- doctor --------------------------------------------------------------------------------------

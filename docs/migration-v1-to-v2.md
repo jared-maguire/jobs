@@ -54,7 +54,7 @@ against the v2 code in this repository.
    `JobRejected` (the API server refused to create the Job — an admission denial such as
    `privileged=True` on GKE Autopilot, an RBAC `403`, or an invalid spec; in v1 these
    escaped as raw `kubernetes.client.ApiException`s), `StoreError`, `BlobNotFound`,
-   `BlobTooLarge` and `VersionMismatch`. `map` raises
+   `BlobTooLarge`, `VersionMismatch` and, for volumes, `VolumeError` (`VolumeNotFound`, `VolumeNotPopulated`, `VolumeWaitTimeout`) and the `PodFailed` subtypes `VolumeAttachBlocked` and `VolumeProvisioningFailed`. `map` raises
    `sk8s.MapFailed` after collecting every item; `e.failures` is a list of
    `(index, exception)`.
 
@@ -85,6 +85,12 @@ against the v2 code in this repository.
    image); v2 defaults to `IfNotPresent`. For locally built images set `pull_policy="Never"`
    (or `SK8S_PULL_POLICY=Never`).
 
+9. **Volume mounts are read-only by default.** v1 mounted every volume read-write. In v2
+   `volumes="data"` (or a list of names) is a **read-only** mount, and a job that writes
+   must say so: `volumes={"data": {"access_mode": "rw"}}`. A write through a read-only
+   mount fails inside the job with `OSError` (`EROFS`), not as a hang, so a ported call
+   site that forgot is easy to find. See the `volumes` rows below.
+
 ## API mapping
 
 | v1 | v2 | Notes |
@@ -109,10 +115,10 @@ against the v2 code in this repository.
 | `service(f, *args, name=, ports=[...], timeout=)` (returns a name, waits until ready) | `serve(f, *args, name=, port=, replicas=1, image=None)` | `name` and `port` are required keyword-only and there is exactly one port. Returns a `Service` handle (`.url`, `.logs()`, `.scale(n)`, `.delete()`) **without** waiting for readiness. Extra keyword arguments go to `f`. |
 | `shutdown_service(name)` | `svc.delete()` or `get_service(name).delete()` | Removes the Deployment, Service and payload blob. |
 | `forward(service, remote, local)` | `kubectl port-forward -n NS service/NAME PORT` | sk8s no longer shells out for this. `svc.url` is the in-cluster DNS name. |
-| `create_volume(size, name=None, accessModes=["ReadWriteMany"], **kw)` | `create_volume(size, *, name=None, access_modes=("ReadWriteOnce",), storage_class=None, keep=False)` | Returns the PVC name, as before. Generated names are `vol-xxxxxx` (was `volume-xxxxx`). The default access mode is now `ReadWriteOnce` on the cluster's default StorageClass; ask for RWX explicitly with `access_modes=["ReadWriteMany"], storage_class="..."`. Unless `keep=True` the volume is deleted with its workflow. |
+| `create_volume(size, name=None, accessModes=["ReadWriteMany"], **kw)` | `create_volume(size, *, name=None, access_modes=("ReadWriteOnce",), storage_class=None, keep=False)` | Returns the PVC name, as before. Generated names are `vol-xxxxxx` (was `volume-xxxxx`). **The default flipped from `ReadWriteMany` to `ReadWriteOnce`** on the cluster's default StorageClass, so a v2 volume no longer provisions a Filestore on GKE unless you ask. `access_modes` is fixed when the volume is created and says what jobs may later mount it as. Without `storage_class=` the class is resolved from the modes: `ReadWriteMany` selects the class `sk8s config` recorded (the v1 `default_readwritemany_storageclass`), with a typed error and a `sk8s config` hint if none is recorded; anything else uses the cluster default. `access_modes=["ReadWriteOnce", "ReadOnlyMany"]` makes a volume that many pods on many nodes can mount read-only at once (see the [GKE guide](gke.md#6-read-many-volumes)). Unless `keep=True` the volume is deleted with its workflow. |
 | `delete_volume(volume)` | `delete_volume(name)` | A no-op if absent; refuses PVCs sk8s did not create; does not wait for pods that still mount it. |
 | (no equivalent) | `with scratch_volume("10Gi") as name:` | Creates a volume and deletes it on exit. |
-| `run(..., volumes="name" \| ["a", "b"] \| {"name": "/path"})` | same | Shapes unchanged; a bare name still mounts at `/mnt/<name>`. |
+| `run(..., volumes="name" \| ["a", "b"] \| {"name": "/path"})` | `run(..., volumes="name" \| ["a", "b"] \| {"name": {"access_mode": "rw" \| "ro", "mountpoint": "/path"}})` | A bare name or a list still mounts at `/mnt/<name>`, but **read-only** (v1 mounted read-write; see behaviour change 9). The dict form is nested and both inner keys are optional: `access_mode` defaults to `"ro"`, `mountpoint` to `/mnt/<name>`. The v1 `{"name": "/path"}` form is rejected with a `ValueError` that shows its replacement. A volume that does not exist is `sk8s.VolumeNotFound` at submit time (v1 left a `Pending` pod). |
 | `docker_build(...)` | `sk8s image build --tag T [--pip P] [--conda C] [--channel CH] [--push]`, or `sk8s.images.build(...)` | `import sk8s.images` first; it is not loaded by `import sk8s`. See [Images](#images). |
 | `docker_build(..., dryrun=True)` | `sk8s.images.generate_dockerfile(...)` | Returns the Dockerfile text. |
 | `docker_build(ancestor=...)` | `sk8s.images.generate_dockerfile(base=...)` then `images.build(tag, dockerfile=text)` | Or write your own Dockerfile. `base` cannot be combined with conda dependencies. |
@@ -191,9 +197,10 @@ These keyword arguments are recognised by `run`, `submit`, `map`, `starmap`, `su
 | `docker_default_pull_policy` | `pull_policy` (default now `IfNotPresent`) |
 | `service_account_name` | `service_account` (default `sk8s`) |
 | `result_obs_prefix` (`s3://...`) | `store = "s3://bucket/prefix"` (plus `store_endpoint` for S3-compatible services); `gs://` also works |
-| `default_storageclass`, `default_readwritemany_storageclass` | pass `storage_class=` to `create_volume` |
+| `default_storageclass` | pass `storage_class=` to `create_volume`, or leave it unset for the cluster default |
+| `default_readwritemany_storageclass` | `rwx_storage_class`, written by `sk8s config` (derived for `--provider gke`; `--rwx-storage-class C` for `generic`) and read by `create_volume` when `ReadWriteMany` is requested; env `SK8S_RWX_STORAGE_CLASS` |
 | `docker_build_default_push_policy`, `ecr_create_repo_on_push` | removed; pass `push=True` / `--push` explicitly |
-| (none) | `namespace`, `store`, `store_env`, `ttl_seconds_after_finished` (3600), `retention_days` (7), `keep_results` (false) |
+| (none) | `namespace`, `store`, `store_env`, `ttl_seconds_after_finished` (3600), `retention_days` (7), `keep_results` (false), and for volumes `volume_wait_seconds`, `volume_attach_grace_seconds`, `volume_provision_grace_seconds` (300 each; see the [GKE guide](gke.md#6-read-many-volumes)) |
 
 The v2 fields are exactly those of `sk8s.Config`. `store_env` (a TOML table of extra
 environment variables for worker pods, such as MinIO credentials) comes from the file or

@@ -16,6 +16,7 @@ from kubernetes.client import ApiException
 from sk8s import k8s
 
 VERBS: tuple[str, ...] = ("get", "list", "watch", "create", "delete", "patch")
+EVENT_VERBS: tuple[str, ...] = ("get", "list", "watch")
 LOCAL_CONTEXTS: frozenset[str] = frozenset({"minikube", "docker-desktop"})
 TABLED_PROVIDERS: tuple[str, ...] = ("eks",)
 GKE_WI_ANNOTATION = "iam.gke.io/gcp-service-account"
@@ -39,6 +40,9 @@ ROLE_RULES: tuple[PolicyRule, ...] = (
     ),
     PolicyRule(("batch",), ("jobs",), VERBS),
     PolicyRule(("apps",), ("deployments",), VERBS),
+    # Read-only: the volume diagnostics read pod and PVC events (FailedAttachVolume,
+    # ProvisioningFailed) to turn a silent Pending hang into a typed error.
+    PolicyRule(("",), ("events",), EVENT_VERBS),
 )
 
 
@@ -49,6 +53,9 @@ class ClusterProfile:
     service_account: str = "sk8s"
     rules: tuple[PolicyRule, ...] = ROLE_RULES
     rwx_storage_class: str | None = None  # None for local
+    # Set (generic only) to have apply() create the rwx StorageClass if it is absent. Without it
+    # sk8s only names the class; the cluster must already provide it (doctor checks).
+    rwx_provisioner: str | None = None
     image_prefix: str = ""
     # ServiceAccount annotations apply() keeps present (e.g. GKE Workload Identity). Only the
     # declared keys are managed; others on the live object are left alone.
@@ -66,21 +73,36 @@ Adapter = Callable[..., ClusterProfile]
 
 
 def _local(
-    *, namespace: str, store: str, image_prefix: str, rwx_storage_class: str | None, **_: Any
+    *,
+    namespace: str,
+    store: str,
+    image_prefix: str,
+    rwx_storage_class: str | None,
+    rwx_provisioner: str | None,
+    **_: Any,
 ) -> ClusterProfile:
-    if rwx_storage_class is not None:
+    if rwx_storage_class is not None or rwx_provisioner is not None:
         raise ValueError("provider 'local' has no RWX storage class; use provider 'generic'")
     return ClusterProfile(namespace=namespace, store=store, image_prefix=image_prefix)
 
 
 def _generic(
-    *, namespace: str, store: str, image_prefix: str, rwx_storage_class: str | None, **_: Any
+    *,
+    namespace: str,
+    store: str,
+    image_prefix: str,
+    rwx_storage_class: str | None,
+    rwx_provisioner: str | None,
+    **_: Any,
 ) -> ClusterProfile:
+    if rwx_provisioner is not None and rwx_storage_class is None:
+        raise ValueError("an RWX provisioner needs an RWX storage class name to create with it")
     return ClusterProfile(
         namespace=namespace,
         store=store,
         image_prefix=image_prefix,
         rwx_storage_class=rwx_storage_class,
+        rwx_provisioner=rwx_provisioner,
     )
 
 
@@ -90,6 +112,7 @@ def _gke(
     store: str,
     image_prefix: str,
     rwx_storage_class: str | None,
+    rwx_provisioner: str | None,
     project: str | None,
     region: str | None,
     repo: str,
@@ -97,7 +120,7 @@ def _gke(
 ) -> ClusterProfile:
     if not project or not region:
         raise ValueError("provider 'gke' requires project and region")
-    if image_prefix or rwx_storage_class is not None:
+    if image_prefix or rwx_storage_class is not None or rwx_provisioner is not None:
         raise ValueError(
             "provider 'gke' derives image_prefix (Artifact Registry) and rwx_storage_class "
             "(standard-rwx) itself; do not pass them"
@@ -121,6 +144,7 @@ def profile_for(
     store: str,
     image_prefix: str = "",
     rwx_storage_class: str | None = None,
+    rwx_provisioner: str | None = None,
     project: str | None = None,
     region: str | None = None,
     repo: str = "sk8s",
@@ -141,6 +165,7 @@ def profile_for(
         store=store,
         image_prefix=image_prefix,
         rwx_storage_class=rwx_storage_class,
+        rwx_provisioner=rwx_provisioner,
         project=project,
         region=region,
         repo=repo,
@@ -206,6 +231,11 @@ def plan(profile: ClusterProfile) -> list[str]:
         f"create-or-replace RoleBinding {profile.role_name} in {ns}: "
         f"Role {profile.role_name} -> ServiceAccount {sa}"
     )
+    if profile.rwx_storage_class and profile.rwx_provisioner:
+        lines.append(
+            f"ensure StorageClass {profile.rwx_storage_class} "
+            f"(provisioner {profile.rwx_provisioner})"
+        )
     return lines
 
 
@@ -342,11 +372,33 @@ def _ensure_service_account(core: client.CoreV1Api, profile: ClusterProfile) -> 
     return f"ServiceAccount {sa}: annotated"
 
 
+def _ensure_storage_class(storage: client.StorageV1Api, name: str, provisioner: str) -> str:
+    """Create the StorageClass if missing; an existing one is never replaced (PVs may use it)."""
+    try:
+        storage.read_storage_class(name=name)
+        return f"StorageClass {name}: exists"
+    except ApiException as e:
+        if _status(e) != 404:
+            raise
+    body = client.V1StorageClass(
+        metadata=client.V1ObjectMeta(name=name, labels=dict(MANAGED_BY)),
+        provisioner=provisioner,
+    )
+    try:
+        storage.create_storage_class(body=body)
+    except ApiException as e:
+        if _status(e) != 409:
+            raise
+        return f"StorageClass {name}: exists"
+    return f"StorageClass {name}: created"
+
+
 def apply(
     profile: ClusterProfile,
     *,
     core_api: client.CoreV1Api | None = None,
     rbac_api: client.RbacAuthorizationV1Api | None = None,
+    storage_api: client.StorageV1Api | None = None,
 ) -> list[str]:
     """Converge the cluster on ``profile``; returns one line per object saying what happened.
 
@@ -424,4 +476,12 @@ def apply(
         out.append(f"RoleBinding {role}: replaced")
     else:
         out.append(f"RoleBinding {role}: unchanged")
+
+    # StorageClass is cluster-scoped, so this needs more than the namespace Role grants: it runs
+    # as whoever runs `sk8s config`, and only when the profile has a provisioner to create it with.
+    if profile.rwx_storage_class and profile.rwx_provisioner:
+        storage = storage_api if storage_api is not None else k8s.storage_api()
+        out.append(
+            _ensure_storage_class(storage, profile.rwx_storage_class, profile.rwx_provisioner)
+        )
     return out

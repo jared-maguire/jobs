@@ -208,8 +208,16 @@ print(sk8s.run(call, svc.url))  # hello from sk8s
 svc.delete()                    # services live until you delete them
 ```
 
-**12. Use a volume.** A volume is a PersistentVolumeClaim mounted at `/mnt/<name>`.
-`keep=True` makes it independent of any workflow (otherwise it is deleted with the
+**12. Use a volume.** A volume is a PersistentVolumeClaim; a job mounts it with `volumes=`.
+**Mounts are read-only unless you ask for read-write**, so a job that writes says so:
+
+| `volumes=` | Meaning |
+|---|---|
+| `"scratch"` | one read-only mount at `/mnt/scratch` |
+| `["a", "b"]` | several read-only mounts, at `/mnt/a` and `/mnt/b` |
+| `{"scratch": {"access_mode": "rw", "mountpoint": "/data"}}` | per volume: `access_mode` (`"ro"`, the default, or `"rw"`) and `mountpoint` (default `/mnt/<name>`), both optional |
+
+`keep=True` makes a volume independent of any workflow (otherwise it is deleted with the
 workflow that created it):
 
 ```python
@@ -227,10 +235,19 @@ def read():
 
 
 sk8s.create_volume("100Mi", name="scratch", keep=True)
-sk8s.run(write, volumes="scratch")      # mounted at /mnt/scratch
-print(sk8s.run(read, volumes="scratch"))  # written by one job
+sk8s.run(write, volumes={"scratch": {"access_mode": "rw"}})  # writing is explicit
+print(sk8s.run(read, volumes="scratch"))  # written by one job (read-only is the default)
 sk8s.delete_volume("scratch")
 ```
+
+A write through a read-only mount fails inside the job with `OSError` (`EROFS`). A plain
+volume like this one is `ReadWriteOnce`: one node at a time, so jobs that mount it
+read-write run one after another. To fan out many concurrent readers on many nodes (a
+genome index, say), create it with `access_modes=["ReadWriteOnce", "ReadOnlyMany"]`; its
+read-only mounts are then served from a hidden clone, cut after the last successful writer.
+That needs a storage provisioner that really clones volumes (GKE's persistent-disk driver
+does; minikube's default `standard` class silently serves an **empty** clone), so it is
+described, with a walkthrough, in the [GKE guide](docs/gke.md#6-read-many-volumes).
 
 That is the whole tour. To try the API with no cluster at all, swap in local
 subprocess workers (same pipeline, same serialization):
@@ -391,7 +408,7 @@ context's namespace if it names one, else `sk8s`.
 
 | Command | What it does |
 |---|---|
-| `sk8s config [--namespace NS] [--store URL] [--provider local\|generic] [--dry-run]` | Create the namespace, ServiceAccount, Role and RoleBinding; write the client config. `--dry-run` prints the plan only. |
+| `sk8s config [--namespace NS] [--store URL] [--provider local\|generic\|gke] [--rwx-storage-class C [--rwx-provisioner P]] [--dry-run]` | Create the namespace, ServiceAccount, Role and RoleBinding; write the client config (including the StorageClass used for `ReadWriteMany` volumes: derived on `gke`, named by `--rwx-storage-class` on `generic`). `--dry-run` prints the plan only. |
 | `sk8s doctor` | Check cluster reachability, namespace, ServiceAccount, permissions and store; non-zero exit if any check fails. |
 | `sk8s workflows` | List workflows in the namespace (id, detached, age, driver phase). |
 | `sk8s logs WORKFLOW` | Print a workflow driver's logs. |

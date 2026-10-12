@@ -139,15 +139,22 @@ def render_toml(data: dict[str, Any]) -> str:
     return "\n".join(lines).lstrip("\n") + "\n"
 
 
-def write_config(path: Path, updates: dict[str, str]) -> None:
-    """Set ``updates`` in the TOML file at ``path``, keeping any other keys already there."""
+def write_config(path: Path, updates: dict[str, str | None]) -> None:
+    """Set ``updates`` in the TOML file at ``path``, keeping any other keys already there.
+
+    A ``None`` value removes that key (so a stale setting does not outlive the profile).
+    """
     data: dict[str, Any] = {}
     if path.exists():
         try:
             data = tomllib.loads(path.read_text(encoding="utf-8"))
         except (tomllib.TOMLDecodeError, OSError) as e:
             raise Sk8sError(f"cannot update {path}: {e}; fix or remove it first") from e
-    data.update(updates)
+    for key, value in updates.items():
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
     text = render_toml(data)  # raises before touching the file if something is unpreservable
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".toml")
@@ -308,9 +315,18 @@ def _cmd_config(args: argparse.Namespace) -> int:
         extra: dict[str, Any] = dict(
             project=project, region=region, repo=args.repo, gsa=args.gsa
             and gsa_email(args.gsa, project),
+            # Never derived here: the adapter owns the class, and refuses an explicit one.
+            rwx_storage_class=args.rwx_storage_class, rwx_provisioner=args.rwx_provisioner,
         )
     else:
-        extra = {"image_prefix": cfg.image_prefix}
+        # A generic profile keeps the class a previous run persisted; local takes none (and says
+        # so if one is asked for).
+        carried = cfg.rwx_storage_class if provider == "generic" else None
+        extra = {
+            "image_prefix": cfg.image_prefix,
+            "rwx_storage_class": args.rwx_storage_class or carried,
+            "rwx_provisioner": args.rwx_provisioner,
+        }
     try:
         prof = profile_mod.profile_for(provider, namespace=namespace, store=store, **extra)
     except ValueError as e:
@@ -339,7 +355,13 @@ def _cmd_config(args: argparse.Namespace) -> int:
     print("\n".join(profile_mod.apply(prof)))
     path = config_mod.config_path()
     write_config(
-        path, {"namespace": prof.namespace, "store": prof.store, "image_prefix": prof.image_prefix}
+        path,
+        {
+            "namespace": prof.namespace,
+            "store": prof.store,
+            "image_prefix": prof.image_prefix,
+            "rwx_storage_class": prof.rwx_storage_class,  # None (local) drops a stale key
+        },
     )
     print(f"wrote {path}")
     return 0
@@ -359,9 +381,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         if cfg.image_prefix:  # what `sk8s config` persisted (e.g. a custom --repo) wins
             prof = dataclasses.replace(prof, image_prefix=cfg.image_prefix)
     else:
+        doctor_provider = "generic" if provider == "gke" else provider
         prof = profile_mod.profile_for(
-            "generic" if provider == "gke" else provider,
+            doctor_provider,
             namespace=namespace, store=cfg.store, image_prefix=cfg.image_prefix,
+            # What `sk8s config` persisted, so the storage-class check covers it; local has none.
+            rwx_storage_class=cfg.rwx_storage_class if doctor_provider == "generic" else None,
         )
     # Build the store here so a configured endpoint (MinIO etc.) is honoured; if it cannot be built
     # (or no client can be), leave it to doctor, which reports that as a failed check.
@@ -615,6 +640,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repo", default="sk8s", help="gke: Artifact Registry repo name (default: sk8s)")
     p.add_argument("--gsa", help="gke: Google service account (name or email) workers act as via Workload Identity")
     p.add_argument("--bucket-role", help=f"gke: role granted to the GSA on the store bucket (default: {DEFAULT_BUCKET_ROLE})")
+    p.add_argument("--rwx-storage-class", help="generic: StorageClass for ReadWriteMany volumes (persisted; gke derives standard-rwx itself)")
+    p.add_argument("--rwx-provisioner", help="generic: with --rwx-storage-class, CREATE that StorageClass with this provisioner if the cluster lacks it")
     p.add_argument("--apply-cloud", action="store_true", help="gke: also RUN the printed gcloud commands (default: print only)")
     p.add_argument("--dry-run", action="store_true", help="print the plan; apply nothing")
     p.set_defaults(func=_cmd_config)
