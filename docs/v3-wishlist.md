@@ -309,7 +309,9 @@ and each stage names a missing layer. Each sub-item is independently shippable.
    peak-RSS/runtime per task card from every run (the data already flows past
    us), fit, predict requests with a margin. The #1 human babysitting task,
    automated; with spot (item 4) it is most of the cost story.
-4. **Verification of ANSWERS, not exit codes.** QC gates as first-class IR nodes
+4. **Verification of ANSWERS, not exit codes.** *(v2.x first cut shipped on `feat/qc`: `expect=` job
+   option + typed `ExpectationFailed`, and `pilot=n` on the map family with typed `PilotFailed`.
+   Still open: QC gates as IR nodes, golden-set runs, provenance reports.)* QC gates as first-class IR nodes
    (expectations: % mapped > X — semantic failure, not operational); golden-set
    runs (validate the built pipeline against known answers before the real
    cohort); `pipeline.pilot(n=3)` as a verb (the baseline agent reinvented this

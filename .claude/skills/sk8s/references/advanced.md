@@ -127,6 +127,61 @@ error type. (Caveat: if a `submit` itself raises mid-fan-out, `submit_map`
 re-raises and you hold no futures — wrap the fan-out when even that must be
 survivable.)
 
+## QC gates and pilots (verifying answers, not exit codes)
+
+A job that exits 0 can still be wrong: 61% of reads mapped, a VCF with no variants. Put the
+check on the job with `expect=` and sk8s makes "wrong answer" a typed failure instead of a
+silently bad result.
+
+```python
+def pct_mapped(sample):                       # runs in the worker; returns a dict
+    ...                                       # e.g. {"sample": "S23", "mapped": 0.61}
+
+def mapped_over_90(r):                        # also runs in the worker, on the result
+    if r["mapped"] < 0.90:
+        return f"{r['sample']}: only {r['mapped']:.0%} mapped (need >= 90%)"
+    # returning None (or True) = pass
+
+try:
+    out = sk8s.map(align_and_stat, samples, pilot=3, expect=mapped_over_90, image=IMG)
+except sk8s.PilotFailed as e:                 # the first 3 are wrong: nothing else was submitted
+    for i, exc in e.failures:
+        print(samples[i], "-", exc)           # ExpectationFailed message, or the crash
+except sk8s.MapFailed as e:                   # pilot green; later samples failed
+    bad = [i for i, x in e.failures if isinstance(x, sk8s.ExpectationFailed)]
+    print("quarantine:", [samples[i] for i in bad])   # "1 failed their expectation, 0 errored"
+```
+
+- **`expect=`** takes a callable (shipped with the payload, run in the worker after the
+  function returns, receiving the result). Pass: return `None` or `True`. Fail: return a
+  string (it becomes the message), return `False`, or raise (an `AssertionError`'s text is
+  the message). Any other return value (a list of problems, say) is a failure too, never a
+  silent pass. A non-callable raises `TypeError` before anything is submitted. Works on
+  `run`/`submit`/`map`/`starmap`/`submit_map`; with `batch_size` it is applied to each item
+  separately.
+- **Failure shape:** `sk8s.ExpectationFailed` (`.message`, `.result_repr` truncated), re-raised
+  with a `RemoteTraceback` cause. It is distinct from your function raising: if the
+  function raises, the expectation never runs.
+- **The result is not discarded.** The rejected value is written to the result blob (kind
+  `expect_failed`) and, with `keep_results=True`, stays inspectable:
+  `sk8s.serialize.load_result_value(store.get(uri))`. In a batched map the rejected
+  item's value is not stored separately.
+- **`pilot=n`** on `map`/`starmap`/`submit_map`/`submit_starmap`: submit only the first n
+  items, wait for ALL n (results and expectations). All green: submit the rest and carry on
+  (results keep input order). Any failure, expectation or crash or timeout: raise
+  `PilotFailed` and submit nothing else. The pilot shares the call's `timeout`, and
+  `batch_size`/`max_concurrent` apply to it.
+- **`submit_map(pilot=n)` blocks** until the pilot finishes: the futures for the non-pilot
+  items are created only after it passes. If you need the call to return immediately, run
+  it inside a driver (`submit_workflow`). Its `timeout=` (ignored without `pilot`) bounds the
+  pilot wait only.
+- After a green pilot, a later item failing its expectation is an ordinary per-item
+  failure (`MapFailed`): the good values are in `e.results` (`{index: value}`) and the quarantined
+  indices in `e.failures`. `PilotFailed.results` likewise holds the pilot's successes.
+- Version note: `expect=` needs a worker image built from sk8s with wire envelope 2 (this
+  release). An older worker cannot unpack the payload and fails before running your function
+  (a `ValueError` about unpacking), never by skipping the check. Rebuild the image.
+
 ## Ops habits that matter at scale
 
 - One namespace per team/project; `SK8S_CONFIG` per agent/CI run; never share a

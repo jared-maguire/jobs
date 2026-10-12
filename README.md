@@ -150,6 +150,17 @@ When some items of a `map` fail, every other item is still collected and
 (`e.results`, `{index: value}`). Use `submit_map` / `submit_starmap` to get the futures
 themselves.
 
+To verify *answers*, not just exit codes, give the job a QC gate and pilot the fan-out. The
+check runs in the worker; a rejected result is a typed `sk8s.ExpectationFailed`, and
+`pilot=n` runs only the first n items before committing to the rest:
+
+```python
+def mapped_over_90(frac):
+    return None if frac >= 0.9 else f"only {frac:.0%} mapped"   # None = pass; str = fail
+
+sk8s.map(percent_mapped, samples, pilot=3, expect=mapped_over_90)  # PilotFailed: nothing else submitted
+```
+
 **10. Start a detached workflow.** The driver function runs in the cluster as a Job and can
 submit its own Jobs. Your process does not need to stay alive:
 

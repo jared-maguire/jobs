@@ -22,6 +22,7 @@ from typing import Any, Mapping
 
 from kubernetes import client
 
+from sk8s import expect as expectations
 from sk8s import serialize
 from sk8s.store import get_store
 
@@ -112,9 +113,19 @@ def main(environ: Mapping[str, str]) -> int:
             uid=environ["SK8S_ANCHOR_UID"], controller=False,
         )
     try:
-        func, args, kwargs = serialize.decode_payload(payload)
+        func, args, kwargs, expect = serialize.decode_payload_full(payload)
         value = func(*args, **kwargs)
-        blob = serialize.encode_result(value)
+        blob = serialize.encode_result(value)  # a result that cannot be pickled fails here
+        if expect is not None:
+            verdict = expectations.check(expect, value)
+            if verdict is not None:
+                # The rejected value rides along in the blob, so it stays inspectable.
+                store.put(
+                    result_key,
+                    serialize.encode_expect_failed(value, verdict.error, verdict.tb),
+                    owner=owner,
+                )
+                return 1
         store.put(result_key, blob, owner=owner)
         return 0
     except BaseException as exc:  # noqa: BLE001 — everything becomes an error result

@@ -903,3 +903,50 @@ def test_event_stream_never_runs_before_the_watcher_is_assigned() -> None:
                    watcher_events=lambda: iter(()))
     assert seen == [True]
     c.close()
+
+
+def test_expect_passes_through_the_worker(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda x: x * 2, 21, expect=lambda r: r == 42 or "wrong")
+    h.finish_job(fut.job_name)
+    assert fut.result(timeout=10) == 42
+
+
+def test_expect_failure_resolves_future_with_typed_error(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from sk8s.errors import ExpectationFailed, RemoteTraceback
+
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 0.61, expect=lambda r: f"mapped {r:.0%} < 90%")
+    h.finish_job(fut.job_name, phase="failed")  # the worker exits 1 on a failed expectation
+    with pytest.raises(ExpectationFailed, match=r"mapped 61% < 90%") as exc_info:
+        fut.result(timeout=10)
+    assert "0.61" in exc_info.value.result_repr
+    assert isinstance(exc_info.value.__cause__, RemoteTraceback)
+
+
+def test_expect_failed_result_blob_is_kept_with_keep_results(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from sk8s import serialize
+    from sk8s.errors import ExpectationFailed
+
+    h = Harness(tmp_path, keep_results=True)
+    fut = h.cluster.submit(lambda: {"mapped": 0.61}, expect=lambda r: "low")
+    h.finish_job(fut.job_name, phase="failed")
+    with pytest.raises(ExpectationFailed):
+        fut.result(timeout=10)
+    blob = h.store.get(h.store.uri_for(f"{h.cluster.workflow_id}/{fut.job_name}/result"))
+    assert serialize.load_result_value(blob) == {"mapped": 0.61}
+
+
+def test_expect_must_be_callable_and_submits_nothing(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    with pytest.raises(TypeError, match="callable"):
+        h.cluster.submit(lambda: 1, expect="r > 1")
+    assert not h.batch.jobs
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+def test_expect_is_not_forwarded_to_the_function(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda **kw: sorted(kw), a=1, expect=lambda r: None)
+    h.finish_job(fut.job_name)
+    assert fut.result(timeout=10) == ["a"]

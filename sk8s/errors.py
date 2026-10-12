@@ -239,6 +239,32 @@ class RemoteException(Sk8sError):
         return (type(self), (self.type_name, self.message, self.tb_text))
 
 
+class ExpectationFailed(Sk8sError):
+    """The job's function returned, but its ``expect=`` check rejected the result.
+
+    A semantic failure (the answer is wrong), as opposed to an operational one (the
+    function raised or the pod died). ``message`` is the expectation's own explanation;
+    ``result_repr`` is the (truncated) ``repr`` of the offending result. The result itself
+    is stored before the check runs, so it is still inspectable with ``keep_results``.
+    """
+
+    def __init__(self, message: str, result_repr: str) -> None:
+        self.message = message
+        self.result_repr = result_repr
+        super().__init__(f"expectation failed: {message} (result: {result_repr})")
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (type(self), (self.message, self.result_repr))
+
+
+def _failure_census(failures: list[tuple[int, BaseException]]) -> str:
+    """\"<n> failed their expectation, <m> errored\" when any failure was semantic, else \"\"."""
+    semantic = sum(isinstance(e, ExpectationFailed) for _, e in failures)
+    if not semantic:
+        return ""
+    return f"{semantic} failed their expectation, {len(failures) - semantic} errored"
+
+
 class MapFailed(Sk8sError):
     """``map``/``starmap`` finished with at least one failed item.
 
@@ -257,7 +283,39 @@ class MapFailed(Sk8sError):
         self.total = total
         self.results: dict[int, Any] = {} if results is None else results
         first_i, first_e = failures[0]
+        census = _failure_census(failures)
+        split = f" ({census})" if census else ""
         super().__init__(
-            f"{len(failures)}/{total} map items failed; "
+            f"{len(failures)}/{total} map items failed{split}; "
+            f"first failure at index {first_i}: {type(first_e).__name__}: {first_e}"
+        )
+
+
+class PilotFailed(Sk8sError):
+    """A ``pilot=`` run failed, so the remaining items were never submitted.
+
+    ``failures`` is ``[(index, exception), ...]`` over the pilot items (``index`` is the
+    position in the input); ``results`` maps the index of every pilot item that succeeded to
+    its value (as on ``MapFailed``); ``pilot`` is how many items the pilot ran and ``total``
+    how many the call was given.
+    """
+
+    def __init__(
+        self,
+        failures: list[tuple[int, BaseException]],
+        pilot: int,
+        total: int,
+        results: dict[int, Any] | None = None,
+    ) -> None:
+        self.failures = failures
+        self.results: dict[int, Any] = {} if results is None else results
+        self.pilot = pilot
+        self.total = total
+        first_i, first_e = failures[0]
+        census = _failure_census(failures)
+        split = f" ({census})" if census else ""
+        super().__init__(
+            f"{len(failures)}/{pilot} pilot items failed{split}; the other "
+            f"{total - pilot} items were not submitted; "
             f"first failure at index {first_i}: {type(first_e).__name__}: {first_e}"
         )

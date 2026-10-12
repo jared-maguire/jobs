@@ -57,7 +57,13 @@ against the v2 code in this repository.
    `BlobTooLarge`, `VersionMismatch` and, for volumes, `VolumeError` (`VolumeNotFound`, `VolumeNotPopulated`, `VolumeWaitTimeout`) and the `PodFailed` subtypes `VolumeAttachBlocked` and `VolumeProvisioningFailed`. `map` raises
    `sk8s.MapFailed` after collecting every item; `e.failures` is a list of
    `(index, exception)` and `e.results` maps the index of every item that succeeded to its
-   value (`e.total` is the item count).
+   value (`e.total` is the item count). Two errors belong to QC gates (new in v2, no v1
+   equivalent): `sk8s.ExpectationFailed` (the function returned, but its `expect=` check
+   rejected the result: a *semantic* failure, with `.message` and `.result_repr`) and
+   `sk8s.PilotFailed` (a `pilot=` run failed, so the rest of the `map` was never submitted;
+   `.failures` is `[(index, exception), ...]`, `.results` the pilot's successes). When a `map`
+   fails partly on expectations, the `MapFailed` message counts expectation failures
+   separately from errors.
 
 4. **The namespace is no longer whatever `kubectl` says.** v1 always used the kube
    context's namespace (so `default` unless you had pointed the context elsewhere). v2 resolves
@@ -189,8 +195,9 @@ These keyword arguments are recognised by `run`, `submit`, `map`, `starmap`, `su
 | `name="job-{s}"` | `name_prefix="job"` | A random six-character suffix is always appended. |
 | `timeout` | `timeout` | `run` / `map` / `starmap` only (`submit` discards it; pass it to `future.result()`). |
 | (none) | `keep_results` | Keep the result blob after it is fetched. |
+| (none) | `expect` | A QC gate: a callable run in the worker on the result. Returning `None`/`True` passes; returning a string (the explanation) or raising fails the job with `ExpectationFailed`. See [QC gates and pilots](../.claude/skills/sk8s/references/advanced.md#qc-gates-and-pilots-verifying-answers-not-exit-codes). |
 | (none) | `namespace` | Accepted, but must equal the cluster's namespace; per-job namespaces are not supported yet. |
-| (none) | `batch_size`, `max_concurrent` | Fan-out controls for the `map` family only. |
+| (none) | `batch_size`, `max_concurrent`, `pilot` | Fan-out controls for the `map` family only. `pilot=n` runs the first n items, waits for all n, and submits the rest only if every one passed (otherwise `PilotFailed`). |
 | `job_template`, `dryrun`, `state`, `config`, `export_config`, `test` | removed | Jobs are built from Kubernetes client models, there is no template to override. Memoization (`state`) is gone. |
 
 ## Configuration

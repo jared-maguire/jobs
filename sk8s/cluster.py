@@ -19,6 +19,7 @@ from kubernetes.client import ApiException
 
 import sk8s
 from sk8s import anchors, clones, serialize, spec, volumes
+from sk8s import expect as expectations
 from sk8s.config import Config, load_config
 from sk8s.errors import (
     BlobNotFound, ImageNotConfigured, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
@@ -32,7 +33,7 @@ from sk8s.watch import JobEvent, JobWatcher
 JOB_OPTIONS = {
     "image", "requests", "limits", "volumes", "timeout", "backoff_limit",
     "service_account", "namespace", "name_prefix", "privileged",
-    "pull_policy", "keep_results",
+    "pull_policy", "keep_results", "expect",
 }
 
 _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
@@ -578,6 +579,9 @@ class Cluster:
     def submit(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture:
         opts = {k: kwargs.pop(k) for k in list(kwargs) if k in JOB_OPTIONS}
         opts.pop("timeout", None)  # timeout is a run()/result() concern
+        expect = opts.get("expect")
+        if expect is not None:
+            expectations.require_callable(expect)  # before any side effect
         name = spec.job_name(opts.get("name_prefix", "job"))
         namespace = self.config.namespace
         assert namespace is not None
@@ -600,7 +604,7 @@ class Cluster:
             anchor = self._ensure_anchor()
             owner = anchors.owner_ref(anchor)
             payload_uri = self.store.put(
-                payload_key, serialize.encode_payload(func, args, kwargs), owner=owner
+                payload_key, serialize.encode_payload(func, args, kwargs, expect=expect), owner=owner
             )
             pod_mounts = self._resolve_pod_mounts(mounts, pvcs, plan)
             job = spec.build_job(

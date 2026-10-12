@@ -138,6 +138,12 @@ def serve(
     no conditional writes to close it. Do not serve the same name concurrently.
     """
     _validate_name(name)
+    if "expect" in kwargs:
+        raise ValueError(
+            "expect= is a QC gate on a job's result and has no meaning for a service (it never "
+            "returns a result); remove it. 'expect' is a reserved option name, not a keyword "
+            "for the service function"
+        )
     if port < 1 or port > 65535:
         raise ValueError(f"port must be in 1..65535, got {port!r}")
     if replicas < 0:
