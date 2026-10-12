@@ -17,7 +17,7 @@ workers read it through Workload Identity.
 
 ```bash
 export KUBECONFIG=/path/to/kubeconfig-gke                  # 1. cluster
-export SK8S_CONFIG=/path/to/.sk8s-demo.toml                # 2. namespace + gs:// store (sk8s config ...)
+export SK8S_CONFIG=/path/to/.sk8s-demo.toml                # 2. namespace + gs:// store (setup below)
 export SK8S_IMAGE=us-central1-docker.pkg.dev/jared-genome-analysis/sk8s/sk8s-demo-bio:py3.14-5fd7361   # 3. image
 sk8s doctor                                                # all PASS first
 python examples/na12878_brca2.py --repeat 2                # two fresh runs; asserts identical counts
@@ -25,6 +25,23 @@ python examples/na12878_brca2.py --repeat 2                # two fresh runs; ass
 
 `--preview-only` stops after the `describe` + `dry_run` plan. `--prove-gate gs://.../results/<run-id>/work/`
 shows an `expect=` gate rejecting a bad result.
+
+**Cold setup** (one-time, cluster admin; already standing in this project as namespace `sk8s-demo`):
+
+```bash
+sk8s config --provider gke --project jared-genome-analysis --region us-central1 \
+  --namespace sk8s-demo --gsa sk8s-worker \
+  --store gs://jared-genome-analysis-sk8s/sk8s-demo/ --apply-cloud   # incl. the per-namespace WI member
+echo 'image = "<the sk8s-demo-bio tag you pushed>"' >> "$SK8S_CONFIG" # sk8s config does not write image=
+sk8s doctor                                                           # red right after apply = IAM lag; retry ~60s
+```
+
+Notes: results land under `gs://jared-genome-analysis-sk8s/sk8s-demo/results/` — the prefix is
+hardcoded in the script, so a different store means editing `RESULTS` there. The image tag in step 3
+must be one you actually pushed (the standing one is `py3.14-5fd7361`; a rebuild tags with your
+current HEAD — keep them consistent). The 187 variants both runs produce are raw, unfiltered
+`bcftools call -mv` output, deterministic on this input — not filtered calls and not compared to
+GIAB truth; the lifted VCF's `##reference=` header line still names the slice FASTA.
 
 **Image.** The worker's Python minor must equal the client's (3.14 for this venv). Build a base from
 your checkout, then add the tools with `examples/Dockerfile.na12878` (Debian 13: bwa 0.7.18,
