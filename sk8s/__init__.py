@@ -9,6 +9,7 @@ from sk8s.cluster import Cluster  # noqa: E402
 from sk8s.config import Config, load_config  # noqa: E402
 from sk8s.datadescribe import describe  # noqa: E402
 from sk8s.errors import (  # noqa: E402
+    ArtifactChanged, ArtifactError, ArtifactNotFound, PublishConflict, RetryExhausted,
     BlobNotFound, BlobTooLarge, ExpectationFailed, ImageNotConfigured, ImagePullError, JobRejected,
     JobTimeout, MapFailed, PilotFailed, PodFailed, RemoteException, RemoteTraceback,
     ResultDecodeError, Sk8sError, StoreError, VersionMismatch,
@@ -29,6 +30,7 @@ __all__ = [
     "JobFuture", "LocalCluster", "submit_workflow", "attach", "WorkflowHandle",
     "serve", "get_service", "Service", "describe", "artifact", "Artifact", "OutDir",
     "create_volume", "delete_volume", "scratch_volume",
+    "ArtifactError", "ArtifactNotFound", "ArtifactChanged", "PublishConflict", "RetryExhausted",
     "Sk8sError", "StoreError", "BlobNotFound", "BlobTooLarge", "VersionMismatch",
     "JobTimeout", "JobRejected", "PodFailed", "ImagePullError", "ImageNotConfigured", "RemoteException",
     "RemoteTraceback", "MapFailed", "ResultDecodeError", "ExpectationFailed", "PilotFailed",
