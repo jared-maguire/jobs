@@ -5,11 +5,12 @@ import concurrent.futures
 import logging
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Literal, overload
 
 from sk8s import anchors
 from sk8s.api import _new_cluster
 from sk8s.cluster import Cluster, job_phase, new_workflow_id
+from sk8s.dryrun import DryRun
 from sk8s.errors import BlobNotFound, JobTimeout, Sk8sError
 from sk8s.future import JobFuture
 
@@ -26,10 +27,27 @@ def _check_cluster(cluster: Any) -> None:
         )
 
 
+@overload
+def submit_workflow(
+    func: Callable[..., Any], /, *args: Any, cluster: Any | None = ..., dry_run: Literal[True],
+    **job_opts: Any,
+) -> DryRun: ...
+
+
+@overload
+def submit_workflow(
+    func: Callable[..., Any], /, *args: Any, cluster: Any | None = ...,
+    dry_run: Literal[False] = ..., **job_opts: Any,
+) -> WorkflowHandle: ...
+
+
 def submit_workflow(
     func: Callable[..., Any], /, *args: Any, cluster: Any | None = None, **job_opts: Any
-) -> WorkflowHandle:
+) -> WorkflowHandle | DryRun:
     """Run ``func`` as the driver of a new, detached workflow and return immediately.
+
+    ``dry_run=True`` builds the driver Job and returns a :class:`sk8s.DryRun` without creating
+    the workflow (no anchor, no payload, no API call); a ``cluster`` you pass is left unbound.
 
     The driver's own submissions are owned by the workflow's anchor, which this
     process never deletes. Keyword arguments are split as in ``submit``.
@@ -45,6 +63,8 @@ def submit_workflow(
     it raises ``RuntimeError``. Pass a fresh ``Cluster`` to retry.
     """
     _check_cluster(cluster)
+    if job_opts.pop("dry_run", False):
+        return _preview_workflow(func, args, cluster, job_opts)
     owned = cluster is None
     c: Cluster = cluster if cluster is not None else _new_cluster()
     wf = new_workflow_id()
@@ -67,6 +87,25 @@ def submit_workflow(
             c.close(delete_workflow=False)
         raise
     return WorkflowHandle(wf, c, driver_future=fut, owns_cluster=owned)
+
+
+def _preview_workflow(
+    func: Callable[..., Any], args: tuple[Any, ...], cluster: Any | None, job_opts: dict[str, Any]
+) -> DryRun:
+    c: Cluster = cluster if cluster is not None else _new_cluster(watch=False)
+    try:
+        job_opts["name_prefix"] = "wfdriver"
+        job_opts["keep_results"] = True
+        preview: DryRun = c.dry_run(func, *args, **job_opts)
+    finally:
+        if cluster is None:
+            c.close(delete_workflow=False)
+    preview.notes.append(
+        "detached workflow: this is its driver Job. The workflow anchor that owns it (and a "
+        "fresh workflow id) are created at submit time; everything the driver submits is owned "
+        "by that anchor"
+    )
+    return preview
 
 
 def attach(workflow_id: str, cluster: Any | None = None) -> WorkflowHandle:

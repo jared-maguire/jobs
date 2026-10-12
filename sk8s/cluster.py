@@ -13,14 +13,16 @@ import sys
 import threading
 import time
 import weakref
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal, overload
 
+from kubernetes import client
 from kubernetes.client import ApiException
 
 import sk8s
 from sk8s import anchors, clones, serialize, spec, volumes
 from sk8s import expect as expectations
 from sk8s.config import Config, load_config
+from sk8s.dryrun import DryRun, resource_totals, serialize_job
 from sk8s.errors import (
     BlobNotFound, ImageNotConfigured, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
     VolumeAttachBlocked, VolumeError, VolumeProvisioningFailed,
@@ -33,7 +35,7 @@ from sk8s.watch import JobEvent, JobWatcher
 JOB_OPTIONS = {
     "image", "requests", "limits", "volumes", "timeout", "backoff_limit",
     "service_account", "namespace", "name_prefix", "privileged",
-    "pull_policy", "keep_results", "expect",
+    "pull_policy", "keep_results", "expect", "dry_run",
 }
 
 _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
@@ -51,6 +53,8 @@ def match_pv(message: str) -> str | None:
     return m.group("pv") if m else None
 
 _STUCK_PHASES = ("imagepull", "volume-stuck")
+# Stands in for the anchor's uid in a dry run's owner reference / SK8S_ANCHOR_UID (no anchor exists).
+_DRY_RUN_UID = "<assigned-when-the-workflow-anchor-is-created>"
 _SELECTOR = "app.kubernetes.io/managed-by=sk8s"
 # Workflow ids that collide with non-workflow key prefixes in the store.
 RESERVED_WORKFLOW_IDS = frozenset({"svc", "doctor"})
@@ -169,6 +173,7 @@ class Cluster:
         watcher_events: Callable[[], Iterator[JobEvent]] | None = None,
         detached: bool = False,
         workflow_id: str | None = None,
+        watch: bool = True,
         **overrides: Any,
     ) -> None:
         base = config if config is not None else load_config()
@@ -216,7 +221,8 @@ class Cluster:
             self._on_terminal,
             autostart=False,  # _k8s_events reads self._watcher: start only once it is assigned
         )
-        self._watcher.start()
+        if watch:  # watch=False: a cluster that only previews (dry_run) never opens a stream
+            self._watcher.start()
 
     def bind_workflow(self, workflow_id: str, *, adopt: bool, detached: bool = False) -> None:
         """Re-point an unused cluster at ``workflow_id`` (used by submit_workflow/attach).
@@ -576,12 +582,17 @@ class Cluster:
         return phase not in ("Succeeded", "Failed")
 
     # --- submission --------------------------------------------------------
-    def submit(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture:
-        opts = {k: kwargs.pop(k) for k in list(kwargs) if k in JOB_OPTIONS}
-        opts.pop("timeout", None)  # timeout is a run()/result() concern
+    @staticmethod
+    def _expectation(opts: dict[str, Any]) -> Any:
+        """The ``expect=`` gate of a submission (validated), or None."""
         expect = opts.get("expect")
         if expect is not None:
-            expectations.require_callable(expect)  # before any side effect
+            expectations.require_callable(expect)
+        return expect
+
+    def _job_settings(self, opts: dict[str, Any]) -> tuple[str, str, str, list[volumes.Mount]]:
+        """(job name, namespace, image, parsed mounts) for a submission; ValueError before any
+        side effect. Shared by ``submit`` and ``dry_run`` so a preview validates the same way."""
         name = spec.job_name(opts.get("name_prefix", "job"))
         namespace = self.config.namespace
         assert namespace is not None
@@ -591,7 +602,54 @@ class Cluster:
                 f"{namespace!r}: per-job namespaces arrive in a later release"
             )
         image = resolve_image(self.config, opts.get("image"))  # before anything is created
-        mounts = volumes.parse_mounts(opts.get("volumes"))  # ValueError before any side effect
+        mounts = volumes.parse_mounts(opts.get("volumes"))
+        return name, namespace, image, mounts
+
+    def _build_job(
+        self, name: str, *, image: str, namespace: str, opts: dict[str, Any], payload_uri: str,
+        result_key: str, pod_mounts: list[spec.PodMount], owner: Any, anchor_name: str,
+        anchor_uid: str,
+    ) -> Any:
+        return spec.build_job(
+            name,
+            image=image,
+            namespace=namespace,
+            workflow_id=self.workflow_id,
+            payload_uri=payload_uri,
+            result_key=result_key,
+            store=self.config.store,
+            store_endpoint=self.config.store_endpoint,
+            store_env=self.config.store_env,
+            service_account=opts.get("service_account", self.config.service_account),
+            pull_policy=opts.get("pull_policy", self.config.pull_policy),
+            requests=opts.get("requests", {}),
+            limits=opts.get("limits", {}),
+            volumes=pod_mounts,
+            backoff_limit=opts.get("backoff_limit", 0),
+            ttl=self.config.ttl_seconds_after_finished,
+            privileged=opts.get("privileged", False),
+            owner=owner,
+            anchor_name=anchor_name,
+            anchor_uid=anchor_uid,
+        )
+
+    @overload
+    def submit(
+        self, func: Callable[..., Any], /, *args: Any, dry_run: Literal[True], **kwargs: Any
+    ) -> DryRun: ...
+
+    @overload
+    def submit(
+        self, func: Callable[..., Any], /, *args: Any, dry_run: Literal[False] = ..., **kwargs: Any
+    ) -> JobFuture: ...
+
+    def submit(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture | DryRun:
+        opts = {k: kwargs.pop(k) for k in list(kwargs) if k in JOB_OPTIONS}
+        opts.pop("timeout", None)  # timeout is a run()/result() concern
+        if opts.pop("dry_run", False):
+            return self._dry_run(func, args, kwargs, opts)
+        expect = self._expectation(opts)  # before any side effect
+        name, namespace, image, mounts = self._job_settings(opts)
         # Order matters (see sk8s.clones, "Races"): writers are held back and MARKED first, before
         # anything slow; read-only mounts are resolved to a clone as LATE as possible, right before
         # the Job that references it. Everything after the markers cleans them up on failure.
@@ -607,27 +665,10 @@ class Cluster:
                 payload_key, serialize.encode_payload(func, args, kwargs, expect=expect), owner=owner
             )
             pod_mounts = self._resolve_pod_mounts(mounts, pvcs, plan)
-            job = spec.build_job(
-                name,
-                image=image,
-                namespace=namespace,
-                workflow_id=self.workflow_id,
-                payload_uri=payload_uri,
-                result_key=result_key,
-                store=self.config.store,
-                store_endpoint=self.config.store_endpoint,
-                store_env=self.config.store_env,
-                service_account=opts.get("service_account", self.config.service_account),
-                pull_policy=opts.get("pull_policy", self.config.pull_policy),
-                requests=opts.get("requests", {}),
-                limits=opts.get("limits", {}),
-                volumes=pod_mounts,
-                backoff_limit=opts.get("backoff_limit", 0),
-                ttl=self.config.ttl_seconds_after_finished,
-                privileged=opts.get("privileged", False),
-                owner=owner,
-                anchor_name=anchor.metadata.name,
-                anchor_uid=anchor.metadata.uid,
+            job = self._build_job(
+                name, image=image, namespace=namespace, opts=opts, payload_uri=payload_uri,
+                result_key=result_key, pod_mounts=pod_mounts, owner=owner,
+                anchor_name=anchor.metadata.name, anchor_uid=anchor.metadata.uid,
             )
             try:
                 self.batch.create_namespaced_job(namespace=namespace, body=job)
@@ -659,6 +700,65 @@ class Cluster:
         fut.add_done_callback(self._forget)
         self._watcher.register(name)
         return fut
+
+    def dry_run(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> DryRun:
+        """Build the Job ``submit`` would create and return it as a :class:`DryRun`, creating
+        nothing: no anchor, no payload upload, no API call (volumes are not even read)."""
+        opts = {k: kwargs.pop(k) for k in list(kwargs) if k in JOB_OPTIONS}
+        opts.pop("timeout", None)
+        opts.pop("dry_run", None)
+        return self._dry_run(func, args, kwargs, opts)
+
+    def _dry_run(
+        self, func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any],
+        opts: dict[str, Any],
+    ) -> DryRun:
+        from sk8s.store.configmap import ConfigMapStore, check_blob_size
+
+        expect = self._expectation(opts)  # same checks, same order as submit
+        name, namespace, image, mounts = self._job_settings(opts)  # same errors as submit
+        payload_key = f"{self.workflow_id}/{name}/payload"
+        # unpicklable args fail here too; expect rides in the payload exactly as in submit
+        payload = serialize.encode_payload(func, args, kwargs, expect=expect)
+        notes: list[str] = []
+        configmap_store = (
+            isinstance(self._store, ConfigMapStore) if self._store is not None
+            else self.config.store == "k8s"
+        )
+        if configmap_store:
+            check_blob_size(payload_key, payload)
+        try:
+            payload_uri = self.store.uri_for(payload_key)
+        except Exception as exc:  # noqa: BLE001 — resolving the store must not make a preview fail
+            payload_uri = f"<{self.config.store}>/{payload_key}"
+            notes.append(
+                f"the store could not be opened here ({type(exc).__name__}), so the payload URI "
+                "is a placeholder"
+            )
+        # Read-only mounts of a ReadWriteOnce+ReadOnlyMany volume are served from a hidden clone
+        # chosen at submit time; a preview does not read volumes, so every claim is the volume.
+        pod_mounts = [spec.PodMount(m.name, m.name, m.mountpoint, m.read_only) for m in mounts]
+        if any(m.read_only for m in mounts):
+            notes.append(
+                "read-only mounts show the volume itself as the claim; a ReadWriteOnce+ReadOnlyMany "
+                "volume is mounted from a hidden read-only clone, which is chosen when the job is "
+                "really submitted"
+            )
+        anchor_name = anchors.anchor_name(self.workflow_id)
+        owner = client.V1OwnerReference(
+            api_version="v1", kind="ConfigMap", name=anchor_name, uid=_DRY_RUN_UID, controller=True
+        )
+        job = self._build_job(
+            name, image=image, namespace=namespace, opts=opts, payload_uri=payload_uri,
+            result_key=f"{self.workflow_id}/{name}/result", pod_mounts=pod_mounts, owner=owner,
+            anchor_name=anchor_name, anchor_uid=_DRY_RUN_UID,
+        )
+        cpu, memory = resource_totals(opts.get("requests"), opts.get("limits"))
+        return DryRun(
+            jobs=[serialize_job(job)], image=image, store=self.config.store, namespace=namespace,
+            n_jobs=1, total_cpu_request=cpu, total_memory_request=memory,
+            workflow_id=self.workflow_id, payload_bytes=len(payload), notes=notes,
+        )
 
     def track_job(self, name: str, *, keep_results: bool) -> JobFuture:
         """Future for an already-submitted job of this workflow (e.g. a detached driver),
@@ -837,6 +937,8 @@ class Cluster:
     def run(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         timeout = kwargs.pop("timeout", None)
         fut = self.submit(func, *args, **kwargs)
+        if isinstance(fut, DryRun):  # run(..., dry_run=True): the preview is the answer
+            return fut
         try:
             return fut.result(timeout=timeout)
         except concurrent.futures.TimeoutError:

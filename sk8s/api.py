@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import threading
 import time
 import traceback
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Literal, overload
 
 import cloudpickle  # type: ignore[import-untyped]  # no py.typed marker upstream
 
 from sk8s import expect as expectations
+from sk8s.dryrun import DryRun
 from sk8s.errors import MapFailed, PilotFailed, RemoteException
 from sk8s.future import JobFuture
 
@@ -75,13 +77,45 @@ def run(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
     return _cluster().run(func, *args, **kwargs)
 
 
-def submit(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture:
+def _dry_run_with(call: Callable[[Any], DryRun]) -> DryRun:
+    """Run ``call(cluster)`` for a preview. Uses the default cluster when one already exists;
+    otherwise a throwaway ``Cluster`` that never opens a watch stream and is closed after, so a
+    preview from a cold start contacts nothing and leaves no thread or shared state behind."""
+    with _lock:
+        existing = _default_cluster
+    if existing is not None:
+        return call(existing)
+    cluster = _new_cluster(watch=False)
+    try:
+        return call(cluster)
+    finally:
+        cluster.close(delete_workflow=False)
+
+
+@overload
+def submit(
+    func: Callable[..., Any], /, *args: Any, dry_run: Literal[True], **kwargs: Any
+) -> DryRun: ...
+
+
+@overload
+def submit(
+    func: Callable[..., Any], /, *args: Any, dry_run: Literal[False] = ..., **kwargs: Any
+) -> JobFuture: ...
+
+
+def submit(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture | DryRun:
     """Submit ``func`` as a job and return a ``JobFuture`` without waiting.
 
     Keyword arguments are split as in ``run``: names in
     ``sk8s.cluster.JOB_OPTIONS`` become job options, all others go to ``func``.
     ``timeout`` is accepted and discarded here; pass it to ``future.result()``.
+
+    ``dry_run=True`` builds everything (validation, mounts, image/store/namespace, the full
+    serialized Job body) but creates nothing, and returns a :class:`sk8s.DryRun` instead.
     """
+    if kwargs.get("dry_run"):
+        return _dry_run_with(lambda c: c.dry_run(func, *args, **kwargs))
     fut: JobFuture = _cluster().submit(func, *args, **kwargs)
     return fut
 
@@ -202,7 +236,7 @@ def _submit_many(
                 expired = True
                 return None
         try:
-            fut = submit(fn, *args, **kw)
+            fut: JobFuture = _cluster().submit(fn, *args, **kw)
         except BaseException:
             if sem is not None:
                 sem.release()
@@ -281,6 +315,87 @@ def _submit_piloted(
     )
 
 
+def _fan_out(
+    func: Callable[..., Any],
+    iterable: Iterable[Any],
+    star: bool,
+    *,
+    deadline: float | None = None,
+    timeout: float | None = None,
+    **opts: Any,
+) -> list[JobFuture] | DryRun:
+    """Entry of the submit_map family: ``dry_run`` is popped and answered FIRST, before the
+    ``pilot`` branch of ``_submit_many`` could submit and wait on anything for real."""
+    if opts.pop("dry_run", False):
+        return _dry_run_many(func, list(iterable), star, opts)
+    return _submit_many(func, iterable, star, deadline=deadline, timeout=timeout, **opts)
+
+
+def _dry_run_many(
+    func: Callable[..., Any], items: list[Any], star: bool, opts: dict[str, Any],
+) -> DryRun:
+    """Preview a fan-out: ONE representative job body plus counts and totals for the rest.
+
+    Mirrors ``_submit_many``'s job shapes (unbatched: ``func(*item)``; batched: ``_run_batch``
+    with ``expect`` riding as the conditional fifth positional) so ``payload_bytes`` is honest.
+    ``pilot`` is validated and noted but changes nothing: the whole fan-out is previewed.
+    """
+    from sk8s.cluster import JOB_OPTIONS
+
+    pilot = opts.pop("pilot", None)
+    if pilot is not None:
+        _positive("pilot", pilot)
+    batch_size: int = opts.pop("batch_size", 1)
+    max_concurrent: int | None = opts.pop("max_concurrent", None)
+    _positive("batch_size", batch_size)
+    _positive("max_concurrent", max_concurrent)
+    if batch_size == 1:
+        args: tuple[Any, ...] = ()
+        if items:
+            args = tuple(items[0]) if star else (items[0],)
+        one = _dry_run_with(lambda c: c.dry_run(func, *args, **opts))
+    else:
+        job_opts = {k: v for k, v in opts.items() if k in JOB_OPTIONS}
+        expect = job_opts.pop("expect", None)
+        if expect is not None:
+            expectations.require_callable(expect)
+        extra = (expect,) if expect is not None else ()
+        func_kwargs = {k: v for k, v in opts.items() if k not in JOB_OPTIONS}
+        chunk = items[:batch_size]
+        one = _dry_run_with(
+            lambda c: c.dry_run(_run_batch, func, chunk, star, func_kwargs, *extra, **job_opts)
+        )
+    n_jobs = -(-len(items) // batch_size)  # ceil
+    notes = list(one.notes)
+    if batch_size > 1:
+        notes.append(
+            f"batch_size={batch_size}: {len(items)} item(s) are packed into {n_jobs} job(s) of up "
+            "to that many items each"
+        )
+    if n_jobs > 1:
+        notes.append(
+            f"only the first job's body is shown; the other {n_jobs - 1} differ in name, payload "
+            "and result keys"
+        )
+    if max_concurrent:
+        notes.append(f"max_concurrent={max_concurrent}: at most that many jobs are unresolved at once")
+    if pilot is not None:
+        notes.append(
+            f"pilot={pilot}: a real run submits the first {min(pilot, len(items))} item(s) and "
+            "waits for all of them to pass (results and expect=) before submitting the rest; "
+            "nothing was submitted here"
+        )
+    return dataclasses.replace(
+        one,
+        jobs=one.jobs if n_jobs else [],
+        n_jobs=n_jobs,
+        total_cpu_request=one.total_cpu_request * n_jobs,
+        total_memory_request=one.total_memory_request * n_jobs,
+        n_items=len(items),
+        notes=notes,
+    )
+
+
 def _make_unpack(group: list[_ItemFuture]) -> Callable[[concurrent.futures.Future[Any]], None]:
     def settle(fut: JobFuture, *, result: Any = None, exc: BaseException | None = None) -> None:
         try:
@@ -334,9 +449,21 @@ class _NullBackend:
         return False
 
 
+@overload
+def submit_map(
+    func: Callable[..., Any], iterable: Iterable[Any], *, dry_run: Literal[True], **opts: Any
+) -> DryRun: ...
+
+
+@overload
+def submit_map(
+    func: Callable[..., Any], iterable: Iterable[Any], *, dry_run: Literal[False] = ..., **opts: Any
+) -> list[JobFuture]: ...
+
+
 def submit_map(
     func: Callable[..., Any], iterable: Iterable[Any], **opts: Any
-) -> list[JobFuture]:
+) -> list[JobFuture] | DryRun:
     """Submit ``func(item)`` for each item; return the futures in input order.
 
     ``opts`` are split as in ``submit``: job-option names configure the jobs,
@@ -360,19 +487,35 @@ def submit_map(
 
     ``expect=`` (a job option) is applied to every item's result. ``expect`` and ``pilot``
     are reserved names: they are never forwarded to ``func``.
+
+    ``dry_run=True`` submits nothing and returns a :class:`sk8s.DryRun`: one representative
+    Job body, ``n_jobs`` (batches, with ``batch_size``) and request totals; 10k bodies are
+    never serialized.
     """
-    return _submit_many(func, iterable, star=False, **opts)
+    return _fan_out(func, iterable, False, **opts)
+
+
+@overload
+def submit_starmap(
+    func: Callable[..., Any], iterable: Iterable[Any], *, dry_run: Literal[True], **opts: Any
+) -> DryRun: ...
+
+
+@overload
+def submit_starmap(
+    func: Callable[..., Any], iterable: Iterable[Any], *, dry_run: Literal[False] = ..., **opts: Any
+) -> list[JobFuture]: ...
 
 
 def submit_starmap(
     func: Callable[..., Any], iterable: Iterable[Any], **opts: Any
-) -> list[JobFuture]:
+) -> list[JobFuture] | DryRun:
     """Submit ``func(*item)`` for each item; return the futures in input order.
 
-    ``opts`` are split as in ``submit``; ``batch_size``, ``max_concurrent`` and
-    ``pilot`` behave as in ``submit_map``.
+    ``opts`` are split as in ``submit``; ``batch_size``, ``max_concurrent``, ``pilot`` and
+    ``dry_run`` behave as in ``submit_map``.
     """
-    return _submit_many(func, iterable, star=True, **opts)
+    return _fan_out(func, iterable, True, **opts)
 
 
 def _deadline(timeout: float | None) -> float | None:
@@ -428,8 +571,22 @@ def _gather(
     return results
 
 
-def map(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[Any]:
+@overload
+def map(
+    func: Callable[..., Any], iterable: Iterable[Any], *, dry_run: Literal[True], **opts: Any
+) -> DryRun: ...
+
+
+@overload
+def map(
+    func: Callable[..., Any], iterable: Iterable[Any], *, dry_run: Literal[False] = ..., **opts: Any
+) -> list[Any]: ...
+
+
+def map(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[Any] | DryRun:
     """Run ``func(item)`` for each item as jobs; return results in input order.
+
+    ``dry_run=True`` runs nothing and returns a :class:`sk8s.DryRun` (see ``submit_map``).
 
     ``timeout`` (optional) is one overall deadline for the whole call, covering
     submission (including waiting on ``max_concurrent``) and collection. Other
@@ -443,13 +600,29 @@ def map(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[
     """
     timeout = opts.pop("timeout", None)
     deadline = _deadline(timeout)
-    futures = _submit_many(func, iterable, False, deadline=deadline, timeout=timeout, **opts)
+    futures = _fan_out(func, iterable, False, deadline=deadline, timeout=timeout, **opts)
+    if isinstance(futures, DryRun):
+        return futures
     return _gather(futures, timeout, deadline)
 
 
-def starmap(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[Any]:
+@overload
+def starmap(
+    func: Callable[..., Any], iterable: Iterable[Any], *, dry_run: Literal[True], **opts: Any
+) -> DryRun: ...
+
+
+@overload
+def starmap(
+    func: Callable[..., Any], iterable: Iterable[Any], *, dry_run: Literal[False] = ..., **opts: Any
+) -> list[Any]: ...
+
+
+def starmap(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[Any] | DryRun:
     """Like ``map``, but calls ``func(*item)`` for each item."""
     timeout = opts.pop("timeout", None)
     deadline = _deadline(timeout)
-    futures = _submit_many(func, iterable, True, deadline=deadline, timeout=timeout, **opts)
+    futures = _fan_out(func, iterable, True, deadline=deadline, timeout=timeout, **opts)
+    if isinstance(futures, DryRun):
+        return futures
     return _gather(futures, timeout, deadline)

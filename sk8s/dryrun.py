@@ -1,0 +1,57 @@
+"""``dry_run=True``: the result of building a submission without sending any of it."""
+from __future__ import annotations
+
+import dataclasses
+from typing import Any, Mapping
+
+from kubernetes import client
+
+from sk8s.quantity import cpu_cores, effective_request, memory_bytes
+
+
+@dataclasses.dataclass
+class DryRun:
+    """What a submission WOULD do. Nothing was created: no anchor, no payload upload, no API call.
+
+    ``jobs`` holds fully serialized ``V1Job`` bodies (plain dicts, as the API would receive
+    them). For ``map``-style fan-outs it holds ONE representative body (the first job's);
+    ``n_jobs`` and the totals cover the whole fan-out (with ``batch_size`` a job carries several
+    items, so ``n_jobs`` is the number of batches). Names, payload/result keys and ids differ
+    per job and per real submission; the owner reference and ``SK8S_ANCHOR_*`` env of the
+    workflow anchor show a placeholder uid, because the anchor does not exist yet.
+
+    ``total_cpu_request`` is in cores, ``total_memory_request`` in bytes; an unset request
+    counts as 0 (a job with only limits is costed by its limits, as Kubernetes defaults
+    requests to limits). ``payload_bytes`` is the pickled size of the representative job's
+    function and arguments.
+    """
+
+    jobs: list[dict[str, Any]]
+    image: str
+    store: str
+    namespace: str
+    n_jobs: int
+    total_cpu_request: float
+    total_memory_request: int
+    workflow_id: str = ""
+    n_items: int | None = None
+    payload_bytes: int = 0
+    notes: list[str] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+def serialize_job(job: Any) -> dict[str, Any]:
+    """A client model as the plain dict the API server would be sent."""
+    body: dict[str, Any] = client.ApiClient().sanitize_for_serialization(job)  # type: ignore[no-untyped-call]
+    return body
+
+
+def resource_totals(
+    requests: Mapping[str, Any] | None, limits: Mapping[str, Any] | None
+) -> tuple[float, int]:
+    """(cpu cores, memory bytes) a job's requests (defaulting to its limits) ask for."""
+    cpu = cpu_cores(effective_request(requests, limits, "cpu")) or 0.0
+    memory = memory_bytes(effective_request(requests, limits, "memory")) or 0
+    return cpu, memory

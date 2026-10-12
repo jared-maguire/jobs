@@ -14,6 +14,7 @@ from sk8s.errors import (  # noqa: E402
     VolumeAttachBlocked, VolumeError, VolumeNotFound, VolumeNotPopulated,
     VolumeProvisioningFailed, VolumeWaitTimeout,
 )
+from sk8s.dryrun import DryRun  # noqa: E402
 from sk8s.explaining import explain  # noqa: E402
 from sk8s.future import JobFuture  # noqa: E402
 from sk8s.local import LocalCluster  # noqa: E402
@@ -23,7 +24,7 @@ from sk8s.workflows import WorkflowHandle, attach, submit_workflow  # noqa: E402
 
 __all__ = [
     "__version__", "configure", "run", "submit", "map", "starmap",
-    "submit_map", "submit_starmap", "clean", "explain", "Cluster", "Config", "load_config",
+    "submit_map", "submit_starmap", "clean", "explain", "DryRun", "Cluster", "Config", "load_config",
     "JobFuture", "LocalCluster", "submit_workflow", "attach", "WorkflowHandle",
     "serve", "get_service", "Service", "describe",
     "create_volume", "delete_volume", "scratch_volume",

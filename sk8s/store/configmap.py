@@ -28,6 +28,16 @@ def _blob_labels(key: str) -> dict[str, str]:
     return {**MANAGED_BY, "sk8s/workflow-id": root}
 
 
+def check_blob_size(key: str, data: bytes) -> None:
+    """Raise ``BlobTooLarge`` if ``data`` would not fit in a ConfigMap (also used by dry runs)."""
+    if len(data) > MAX_CONFIGMAP_BLOB:
+        raise BlobTooLarge(
+            f"blob for {key!r} is {len(data)} bytes; the ConfigMap store caps at "
+            f"{MAX_CONFIGMAP_BLOB}. Configure an object store (s3:// or gs://) — "
+            f"see `sk8s config --store`."
+        )
+
+
 def _sanitize(key: str) -> str:
     name = "sk8s-" + re.sub(r"[^a-z0-9-]+", "-", key.lower()).strip("-")
     return name[:253]
@@ -44,12 +54,7 @@ class ConfigMapStore(BlobStore):
         return f"k8s://{self.namespace}/{_sanitize(key)}"
 
     def put(self, key: str, data: bytes, owner: Any | None = None) -> str:
-        if len(data) > MAX_CONFIGMAP_BLOB:
-            raise BlobTooLarge(
-                f"blob for {key!r} is {len(data)} bytes; the ConfigMap store caps at "
-                f"{MAX_CONFIGMAP_BLOB}. Configure an object store (s3:// or gs://) — "
-                f"see `sk8s config --store`."
-            )
+        check_blob_size(key, data)
         meta = client.V1ObjectMeta(
             name=_sanitize(key),
             labels=_blob_labels(key),
