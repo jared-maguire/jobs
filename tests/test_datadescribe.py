@@ -450,6 +450,17 @@ def test_cohort_headline_matches_the_napkin(tmp_path: Path) -> None:
     assert d["headline"].startswith("Found 4 samples (FASTQ, paired-end, 8 files, ")
 
 
+def test_headline_prefers_data_over_sidecars(tmp_path: Path) -> None:
+    write(tmp_path / "a.bam", make_bam())
+    write(tmp_path / "a.bam.bai", b"BAI\x01")
+    write(tmp_path / "b.bam.bai", b"BAI\x01")
+    write(tmp_path / "ref.fa", ">chr1\nACGT\n")
+    write(tmp_path / "notes.json", "{}")
+    d = sk8s.describe(str(tmp_path))
+    assert d["headline"].startswith("Found 1 BAM files (")
+    assert d["formats"]["fasta"]["count"] == 1
+
+
 def test_empty_directory(tmp_path: Path) -> None:
     d = sk8s.describe(str(tmp_path))
     assert d["file_count"] == 0
@@ -759,3 +770,11 @@ def test_s3_endpoint_env_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
     d = sk8s.describe("s3://bkt/x/")
     assert d["file_count"] == 1
     assert seen == {"endpoint_url": "http://minio:9000"}
+
+
+def test_human_output_truncates_giant_values_but_json_keeps_them(tmp_path: Path) -> None:
+    text = BAM_TEXT.replace("bwa mem -t 8", "bwa mem " + "-x " * 400)
+    d = sk8s.describe(str(write(tmp_path / "long.bam", make_bam(text))))
+    assert len(d["facts"]["aligner"]["command_line"]) > 1000
+    human = datadescribe.format_description(d)
+    assert "use --json for all" in human and len(human) < 2500

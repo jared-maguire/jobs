@@ -40,6 +40,7 @@ SMALL_FILE_BYTES = 10_000_000  # records are counted only for files smaller than
 MAX_OBJECTS = 10_000  # listing cap for cohorts
 SAMPLES = 5  # files whose facts are reported for a cohort
 _MAX_INFLATE = 64 * 1024 * 1024  # never inflate more than this from one head
+_HUMAN_VALUE_MAX = 300  # longer fact values (aligner command lines) are cut in human output
 _FIRST_N = 5  # "first 5" lists inside facts (references, samples, read groups)
 _FASTQ_SAMPLE_RECORDS = 1000
 _TABLE_SAMPLE_ROWS = 200
@@ -58,14 +59,17 @@ Facts = dict[str, Any]
 _EXT_FORMATS = {
     ".fastq": "fastq", ".fq": "fastq", ".bam": "bam", ".cram": "cram", ".vcf": "vcf",
     ".csv": "csv", ".tsv": "tsv", ".tab": "tsv", ".txt": "text",
+    ".fa": "fasta", ".fasta": "fasta", ".fna": "fasta",
     ".bai": "index", ".crai": "index", ".tbi": "index", ".csi": "index", ".fai": "index",
 }
 _GZ_EXTS = (".gz", ".bgz")
+_PRIORITY = ("fastq", "bam", "cram", "vcf", "csv", "tsv", "fasta")  # headline tie-break, most interesting first
+_AUXILIARY_FORMATS = {"index", "unknown", "text"}
 _CHECKED_FORMATS = {"fastq", "bam", "cram", "vcf", "csv", "tsv"}  # extensions we hold content to
 
 
 def extension_format(name: str) -> str:
-    """The format a file *name* claims: fastq, bam, cram, vcf, csv, tsv, text, index, gzip, unknown."""
+    """The format a file *name* claims: fastq, bam, cram, vcf, csv, tsv, fasta, text, index, gzip, unknown."""
     lower = name.lower()
     gz = lower.endswith(_GZ_EXTS)
     if gz:
@@ -610,7 +614,9 @@ def _size_stats(sizes: list[int]) -> dict[str, int] | None:
 def _headline(formats: dict[str, dict[str, Any]], patterns: dict[str, Any], entries: list[_Entry], capped: bool) -> str:
     if not entries:
         return "No files found"
-    dominant = max(formats, key=lambda f: (formats[f]["count"], f != "unknown"))
+    # Headline the data, not its sidecars: indexes / unrecognized files only if nothing else exists.
+    data_formats = [f for f in formats if f not in _AUXILIARY_FORMATS] or list(formats)
+    dominant = max(data_formats, key=lambda f: (formats[f]["count"], -_PRIORITY.index(f) if f in _PRIORITY else -99))
     sizes = [e.size for e in entries if extension_format(e.rel) == dominant]
     stats = _size_stats(sizes)
     assert stats is not None
@@ -886,7 +892,8 @@ def _describe_remote(
 
 
 def _fmt_value(value: Any) -> str:
-    return value if isinstance(value, str) else json.dumps(value)
+    text = value if isinstance(value, str) else json.dumps(value)
+    return text if len(text) <= _HUMAN_VALUE_MAX else text[:_HUMAN_VALUE_MAX] + f"... [{len(text)} chars; use --json for all]"
 
 
 def _file_lines(d: dict[str, Any], indent: str) -> list[str]:
