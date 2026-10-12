@@ -179,13 +179,16 @@ class GCSStore(BlobStore):
     def download_file(
         self, uri: str, dest: Path, *, version: str | None = None, hasher: Hasher | None = None,
     ) -> BlobStat:
-        blob = self._bucket.blob(self._key_of(uri))
+        key = self._key_of(uri)
         kwargs: dict[str, Any] = {}
         if version is not None:
             if not version.isdigit():
                 raise VersionChanged(f"{uri}: {version!r} is not a GCS generation")
-            blob.generation = int(version)
+            # Blob.generation is read-only; the constructor argument pins every request.
+            blob = self._bucket.blob(key, generation=int(version))
             kwargs["if_generation_match"] = int(version)
+        else:
+            blob = self._bucket.blob(key)
         try:
             # reload() fixes blob.generation, so every ranged read below is bound to ONE
             # generation: a concurrent overwrite is a clean error, never a spliced file.

@@ -160,8 +160,10 @@ class FakeBucket:
         self._client = client
         self.name = name
 
-    def blob(self, name: str) -> FakeBlob:
-        return FakeBlob(self._client, self.name, name)
+    def blob(self, name: str, generation: int | None = None, **_: Any) -> FakeBlob:
+        blob = FakeBlob(self._client, self.name, name)
+        blob.generation = generation  # a pinned handle, like Bucket.blob(name, generation=N)
+        return blob
 
     def get_blob(self, name: str, **_: Any) -> FakeBlob | None:
         blob = FakeBlob(self._client, self.name, name)
