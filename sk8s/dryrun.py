@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from kubernetes import client
 
+from sk8s.budget import BudgetVerdict
 from sk8s.quantity import cpu_cores, effective_request, memory_bytes
 
 
@@ -26,7 +27,7 @@ class DryRun:
     nothing for: sk8s adds no defaults of its own, so the CLUSTER decides what such a pod gets
     (GKE Autopilot: 0.5 vCPU and 2 GiB; a plain cluster: best-effort), which a preview cannot
     see without contacting it. ``payload_bytes`` is the pickled size of the representative job's
-    function and arguments.
+    function and arguments. ``budget`` is the budget verdict (see :mod:`sk8s.budget`).
     """
 
     jobs: list[dict[str, Any]]
@@ -44,6 +45,9 @@ class DryRun:
     # Staging, from the Artifacts' declared metadata only (a preview pins and hashes nothing):
     n_artifacts: int = 0  # distinct Artifact arguments of the representative job
     artifact_input_bytes: int | None = None  # their summed declared sizes; None if none declared
+    # The active Budget measured against this preview (None when no budget applies). A preview
+    # REPORTS the verdict; a real submission with the same numbers raises BudgetExceeded.
+    budget: BudgetVerdict | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

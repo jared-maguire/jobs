@@ -57,6 +57,7 @@ def build_job(
     anchor_uid: str | None = None,
     store_endpoint: str | None = None,
     store_env: dict[str, str] | None = None,
+    budget_json: str | None = None,
 ) -> client.V1Job:
     labels = {"app.kubernetes.io/managed-by": MANAGED_BY, "sk8s/workflow-id": workflow_id}
     env = [
@@ -79,6 +80,10 @@ def build_job(
         # Nested clusters rebuild their Config from SK8S_* env (load_config's generic layer),
         # so they need the config-level name too to propagate the endpoint onward.
         env.append(client.V1EnvVar(name="SK8S_STORE_ENDPOINT", value=store_endpoint))
+    if budget_json:
+        # Nested submissions in the pod (a detached workflow's driver) rebuild their Config from
+        # SK8S_* env, so the budget rides along and each of them is admitted against it.
+        env.append(client.V1EnvVar(name="SK8S_BUDGET", value=budget_json))
     for key, value in (store_env or {}).items():
         env.append(client.V1EnvVar(name=key, value=value))
     resources = None
