@@ -24,7 +24,9 @@ from sk8s import memo as memolib
 from sk8s.cas import ArtifactStore
 from sk8s.config import Config, load_config
 from sk8s.diagnosis import ATTACH, diagnose_pod_volumes, pod_holds_volumes, read_pvc
-from sk8s.dryrun import DryRun, resource_totals, serialize_job
+from sk8s.dryrun import (
+    DryRun, resource_totals, serialize_job, unset_requests, unset_requests_note,
+)
 from sk8s.errors import (
     BlobNotFound, ImageNotConfigured, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
     VolumeError,
@@ -770,10 +772,13 @@ class Cluster:
             anchor_name=anchor_name, anchor_uid=_DRY_RUN_UID,
         )
         cpu, memory = resource_totals(opts.get("requests"), opts.get("limits"))
+        unset = unset_requests(opts.get("requests"), opts.get("limits"))
+        if unset:
+            notes.append(unset_requests_note(unset))
         return DryRun(
             jobs=[serialize_job(job)], image=image, store=self.config.store, namespace=namespace,
             n_jobs=1, total_cpu_request=cpu, total_memory_request=memory,
-            workflow_id=self.workflow_id, payload_bytes=len(payload), notes=notes,
+            workflow_id=self.workflow_id, payload_bytes=len(payload), unset_requests=unset, notes=notes,
             n_artifacts=len(preview.inputs),
             artifact_input_bytes=preview.ephemeral_bytes if any(a.size is not None for a in preview.inputs) else None,
         )

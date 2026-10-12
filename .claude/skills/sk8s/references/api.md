@@ -206,6 +206,12 @@ placeholder uid (the anchor does not exist yet); read-only mounts show the
 volume itself as the claim (a RWO+ROX volume's hidden clone is chosen at real
 submit). `LocalCluster` raises `ValueError` (no Job to preview).
 
+A request you did not set counts as 0 in the totals, but sk8s adds no defaults
+of its own: the cluster decides (GKE Autopilot gives an unsized pod 0.5 vCPU and
+2 GiB; this includes a `submit_workflow` driver). `dr.unset_requests` lists
+which of `"cpu"`/`"memory"` are unset and a note says so; pass `requests=` for
+an exact preview.
+
 **`sk8s.explain("wf-...")`** (CLI: `sk8s explain wf-...`, `--json` for the dict)
 rebuilds the whole picture from cluster + store state, from any process — an
 agent with zero context needs nothing else. Read-only. Keys: `workflow` (id,
