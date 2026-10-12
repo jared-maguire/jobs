@@ -20,6 +20,7 @@ from kubernetes.client import ApiException
 import sk8s
 from sk8s import anchors, clones, serialize, spec, staging, volumes
 from sk8s import expect as expectations
+from sk8s import memo as memolib
 from sk8s.cas import ArtifactStore
 from sk8s.config import Config, load_config
 from sk8s.diagnosis import ATTACH, diagnose_pod_volumes, pod_holds_volumes, read_pvc
@@ -36,7 +37,7 @@ from sk8s.watch import JobEvent, JobWatcher
 JOB_OPTIONS = {
     "image", "requests", "limits", "volumes", "timeout", "backoff_limit",
     "service_account", "namespace", "name_prefix", "privileged",
-    "pull_policy", "keep_results", "expect", "dry_run",
+    "pull_policy", "keep_results", "expect", "dry_run", "memo", "memo_salt",
 }
 
 _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
@@ -213,6 +214,7 @@ class Cluster:
         self._pending: set[JobFuture] = set()  # unresolved futures (unlike _futures, which empties before resolve)
         self._atexit_hook: Callable[[], None] | None = None
         self._futures: dict[str, tuple[JobFuture, bool, str]] = {}  # name -> (future, keep_results, image)
+        self._memo_pending: dict[str, tuple[str, str, str, list[Any]]] = {}  # job -> (key, fn, image, inputs)
         self._mount_plans: dict[str, _MountPlan] = {}  # job name -> clone-backed volume bookkeeping
         self._read_volumes: set[str] = set()  # clone-backed volumes this client mounted read-only
         self._diagnoses: dict[str, PodFailed] = {}  # job name -> the typed error for a "volume-stuck" job
@@ -623,6 +625,23 @@ class Cluster:
             requests = self._with_ephemeral(
                 opts.get("requests", {}), opts.get("limits", {}), prepared.ephemeral_bytes
             )
+            memo_key: str | None = None
+            # (A config-level memo=true never memoizes the batch wrapper job; an explicit memo=True with
+            # batch_size > 1 is refused earlier, in api._fan_out.)
+            from sk8s.api import _run_batch
+
+            if opts.get("memo", self.config.memo) and func is not _run_batch:
+                memo_key = memolib.memo_key(
+                    func, prepared.args, prepared.kwargs, image=image,
+                    salt=opts.get("memo_salt"), volumes=opts.get("volumes"), expect=expect,
+                )
+                hit = memolib.lookup(self.artifact_store, memo_key)
+                if hit is not None:
+                    # The result already exists: adopt its outputs into this workflow (intent
+                    # first) and answer without a payload, a Job or a pod.
+                    memolib.adopt_outputs(self.artifact_store, self.workflow_id, hit)
+                    self._settle_writers(plan, name, wrote=False)
+                    return memolib.hit_future(self.workflow_id, hit)
             payload_uri = self.store.put(
                 payload_key,
                 serialize.encode_payload(
@@ -661,6 +680,10 @@ class Cluster:
         if plan.writers or plan.readers:
             self._mount_plans[name] = plan
         self._futures[name] = (fut, keep, image)
+        if memo_key is not None:
+            self._memo_pending[name] = (
+                memo_key, getattr(func, "__qualname__", repr(func)), image, prepared.inputs
+            )
         with self._anchor_lock:
             self._pending.add(fut)
         fut.add_done_callback(self._forget)
@@ -696,6 +719,11 @@ class Cluster:
         )
         notes: list[str] = []
         unsized = [a for a in preview.inputs if a.size is None]
+        if opts.get("memo", self.config.memo):
+            notes.append(
+                "memo=True: a preview never consults or writes the memo; a real submit looks the "
+                "call up first and, on a hit, creates no Job at all"
+            )
         if unsized:
             notes.append(
                 f"{len(unsized)} input artifact(s) have no declared size, so ephemeral-storage is "
@@ -963,6 +991,10 @@ class Cluster:
         except BaseException as exc:  # noqa: BLE001 — a future must never be stranded
             log.exception("resolving job %s failed unexpectedly", name)
             error = StoreError(f"could not resolve job {name}: {exc!r}")
+        pending_memo = self._memo_pending.pop(name, None)
+        if pending_memo is not None and error is None:
+            # Only a job that succeeded (no error result, no gate failure) is ever recorded.
+            self._write_memo(name, pending_memo, value)
         if phase in _STUCK_PHASES:
             self._delete_stuck_job(name)
         # Clean up before resolving so a caller woken by the future sees a clean store (and a
@@ -976,6 +1008,16 @@ class Cluster:
                 fut.set_result(value)
         except concurrent.futures.InvalidStateError:
             pass  # cancelled (or otherwise finished) while we were fetching
+
+    def _write_memo(self, name: str, pending: tuple[str, str, str, list[Any]], value: Any) -> None:
+        key, function, image, inputs = pending
+        try:
+            memolib.write(
+                self.artifact_store, key, value, function=function,
+                produced_by=f"{self.workflow_id}/{name}", image=image, inputs=inputs,
+            )
+        except Exception:  # noqa: BLE001 — a cache write must never fail the job that succeeded
+            log.warning("could not record the memo entry of job %s", name, exc_info=True)
 
     def _collect(self, name: str, phase: str, image: str) -> tuple[Any, BaseException | None]:
         """Returns (value, None) or (None, exception) for a terminal job."""
@@ -1085,6 +1127,7 @@ class Cluster:
         except Exception:  # noqa: BLE001
             return False
         entry = self._futures.pop(job_name, None)
+        self._memo_pending.pop(job_name, None)  # a cancelled job is never recorded
         # A cancelled writer's marker is left for the next read-only mount to reconcile: the
         # Job is deleted in the foreground, so it only reads as "gone" once its pods are.
         self._mount_plans.pop(job_name, None)
