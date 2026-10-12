@@ -206,3 +206,16 @@ def test_default_cluster_built_lazily_with_overrides(
     assert sk8s.run(lambda: 1) == "built"
     assert sk8s.run(lambda: 2) == "built"
     assert built == [{"namespace": "team-a"}]  # constructed once, then cached
+
+
+def test_configure_store_string_reaches_the_real_cluster_config(tmp_path: Any) -> None:
+    from sk8s.store.local import LocalStore
+    from tests.fakes import FakeBatchV1, FakeCoreV1
+
+    sk8s.configure(namespace="ns1", image="img:1", store=f"local:{tmp_path}")
+    c = sk8s.api._new_cluster(watch=False, batch_api=FakeBatchV1(), core_api=FakeCoreV1())
+    try:
+        assert c.config.store == f"local:{tmp_path}"
+        assert isinstance(c.store, LocalStore) and c.store.root == tmp_path
+    finally:
+        c.close()

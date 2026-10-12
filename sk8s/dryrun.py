@@ -22,7 +22,10 @@ class DryRun:
 
     ``total_cpu_request`` is in cores, ``total_memory_request`` in bytes; an unset request
     counts as 0 (a job with only limits is costed by its limits, as Kubernetes defaults
-    requests to limits). ``payload_bytes`` is the pickled size of the representative job's
+    requests to limits), and ``unset_requests`` names which of "cpu"/"memory" the job asks
+    nothing for: sk8s adds no defaults of its own, so the CLUSTER decides what such a pod gets
+    (GKE Autopilot: 0.5 vCPU and 2 GiB; a plain cluster: best-effort), which a preview cannot
+    see without contacting it. ``payload_bytes`` is the pickled size of the representative job's
     function and arguments.
     """
 
@@ -36,6 +39,7 @@ class DryRun:
     workflow_id: str = ""
     n_items: int | None = None
     payload_bytes: int = 0
+    unset_requests: list[str] = dataclasses.field(default_factory=list)
     notes: list[str] = dataclasses.field(default_factory=list)
     # Staging, from the Artifacts' declared metadata only (a preview pins and hashes nothing):
     n_artifacts: int = 0  # distinct Artifact arguments of the representative job
@@ -58,3 +62,17 @@ def resource_totals(
     cpu = cpu_cores(effective_request(requests, limits, "cpu")) or 0.0
     memory = memory_bytes(effective_request(requests, limits, "memory")) or 0
     return cpu, memory
+
+
+def unset_requests(requests: Mapping[str, Any] | None, limits: Mapping[str, Any] | None) -> list[str]:
+    """Which of ``cpu``/``memory`` neither a request nor a limit sets (the cluster fills those in)."""
+    return [r for r in ("cpu", "memory") if effective_request(requests, limits, r) is None]
+
+
+def unset_requests_note(unset: list[str]) -> str:
+    what = " or ".join(unset) if len(unset) == 2 else unset[0]
+    return (
+        f"no {what} request is set, so the totals count it as 0, but a pod is never free: sk8s adds "
+        "no defaults, so the cluster decides (GKE Autopilot assigns 0.5 vCPU and 2 GiB; a plain "
+        "cluster schedules it best-effort). Set requests= to make the preview and the schedule exact"
+    )

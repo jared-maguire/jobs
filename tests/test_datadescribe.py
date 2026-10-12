@@ -78,6 +78,23 @@ def write(path: Path, data: bytes | str) -> Path:
     return path
 
 
+def fasta_text(n_contigs: int = 7, per_contig: int = 130, width: int = 60) -> str:
+    out = []
+    for i in range(n_contigs):
+        seq = ("ACGTTGCA" * (per_contig // 8 + 1))[:per_contig]
+        out.append(f">chr{i + 1} desc of contig {i + 1}\n")
+        out.extend(seq[j : j + width] + "\n" for j in range(0, len(seq), width))
+    return "".join(out)
+
+
+def fai_text(rows: list[tuple[str, int]], cols: int = 5) -> str:
+    return "".join(f"{n}\t{ln}\t{10 + i * 1000}\t60\t61" + ("\t0" if cols == 6 else "") + "\n" for i, (n, ln) in enumerate(rows))
+
+
+def bai_bytes(n_ref: int = 3) -> bytes:
+    return b"BAI\x01" + struct.pack("<i", n_ref) + b"\x00" * 24
+
+
 # --- single files: formats ----------------------------------------------------------------------
 
 
@@ -492,6 +509,18 @@ def test_sample_format_mismatch_listed(tmp_path: Path) -> None:
     ]
 
 
+def test_fasta_named_txt_gets_the_mismatch_note_and_cohort_entry(tmp_path: Path) -> None:
+    fa = b">chr_test\nACGTACGTACGT\nACGT\n"
+    write(tmp_path / "ref.txt", fa)
+    single = sk8s.describe(str(tmp_path / "ref.txt"))
+    assert single["format"] == "fasta"
+    assert any("looks like" in n or ".txt" in n for n in single["notes"])
+    cohort = sk8s.describe(str(tmp_path))
+    assert cohort["sample_format_mismatches"] == [
+        {"relative_path": "ref.txt", "by_extension": "text", "by_content": "fasta"}
+    ]
+
+
 def test_human_rendering_mentions_key_facts(tmp_path: Path) -> None:
     _fastq_cohort(tmp_path, samples=2)
     out = datadescribe.format_description(sk8s.describe(str(tmp_path)))
@@ -845,12 +874,128 @@ def test_bam_reference_count_says_at_least_when_the_table_is_cut(tmp_path: Path)
     assert "at least" in d2["facts"]["reference_count_note"]
 
 
-def test_single_line_400kb_fasta_is_text_not_a_crash(tmp_path: Path) -> None:
+def test_single_line_400kb_fasta_is_fasta_not_a_crash(tmp_path: Path) -> None:
     p = write(tmp_path / "chr.txt", ">chr1\n" + "ACGT" * 100_000 + "\n>chr2\nACGT\n")
     d = sk8s.describe(str(p))
-    assert d["format"] == "text"
+    assert d["format"] == "fasta" and d["facts"]["total_residues"] == 400_004
     p2 = write(tmp_path / "chr.csv", ">chr1\n" + "ACGT" * 100_000 + "\n>chr2\nACGT\n")
-    assert sk8s.describe(str(p2))["format"] in ("text", "csv")  # extension fallback may claim csv; must not raise
+    d2 = sk8s.describe(str(p2))
+    assert d2["format"] == "fasta"  # the content wins over the .csv name, and says so
+    assert any(".csv" in n and "fasta" in n for n in d2["notes"])
+
+
+# --- FASTA, .fai, .bai --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["ref.fa", "ref.fasta", "ref.fna", "ref.txt", "ref", "ref.seq"])
+def test_fasta_is_detected_by_content_not_extension(tmp_path: Path, name: str) -> None:
+    d = sk8s.describe(str(write(tmp_path / name, fasta_text(7, 130, 60))))
+    assert d["format"] == "fasta"
+    assert d["confidence"] == "content"
+    f = d["facts"]
+    assert f["contigs"] == ["chr1", "chr2", "chr3", "chr4", "chr5"]  # first five, header words after the name dropped
+    assert f["contig_count"] == 7
+    assert f["total_residues"] == 7 * 130
+    assert f["sequence_type"] == "nucleotide"
+    assert f["line_width"] == 60
+    assert "contig_count_note" not in f
+
+
+def test_fasta_gz_and_lowercase_and_blank_lines(tmp_path: Path) -> None:
+    text = ">a\nacgtnn\n\n>b\nACGT\n"
+    d = sk8s.describe(str(write(tmp_path / "r.fa.gz", gzip.compress(text.encode()))))
+    assert d["format"] == "fasta" and d["compression"] == "gzip"
+    assert d["facts"]["contig_count"] == 2 and d["facts"]["total_residues"] == 10
+
+
+def test_protein_fasta(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "p.faa", ">sp|P1|X\nMKVLAAGIVGLLLAQPSEEDFHW\nLLEPRQ\n")))
+    assert d["format"] == "fasta" and d["facts"]["sequence_type"] == "protein"
+    assert d["facts"]["contigs"] == ["sp|P1|X"]
+
+
+def test_fasta_with_a_truncated_head_is_a_lower_bound(tmp_path: Path) -> None:
+    text = fasta_text(40, 130, 60).encode()
+    d = datadescribe.sniff("big.fa", text[:1500], 50_000_000)  # a huge file of which we hold 1500 bytes
+    f = d["facts"]
+    assert d["format"] == "fasta"
+    assert f["contigs"][:2] == ["chr1", "chr2"]
+    assert f["total_residues"] == "not counted"
+    assert 1 < f["contig_count"] < 40 and "at least" in f["contig_count_note"]
+
+
+def test_fasta_ext_with_prose_content_is_not_trusted(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "ref.fa", "This is not a sequence file at all.\nJust prose.\n")))
+    assert d["format"] == "text"
+    assert any(".fa" in n for n in d["notes"])
+
+
+def test_empty_fasta_extension_is_extension_confidence(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "empty.fa", b"")))
+    assert d["format"] == "fasta" and d["confidence"] == "extension"
+
+
+def test_markdown_quote_is_not_fasta(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "q.txt", "> a quoted line with spaces\n> and another\n")))
+    assert d["format"] == "text"
+
+
+def test_fai_is_parsed(tmp_path: Path) -> None:
+    rows = [(f"chr{i}", 1000 * i) for i in range(1, 9)]
+    d = sk8s.describe(str(write(tmp_path / "ref.fa.fai", fai_text(rows))))
+    assert d["format"] == "fasta-index (fai)"
+    assert d["confidence"] == "content"
+    f = d["facts"]
+    assert f["contig_count"] == 8
+    assert f["contigs"] == [{"name": f"chr{i}", "length": 1000 * i} for i in range(1, 6)]
+    assert f["total_length"] == sum(ln for _, ln in rows)
+
+
+def test_fai_six_columns_fastq_index(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "r.fq.fai", fai_text([("r1", 50)], cols=6))))
+    assert d["format"] == "fasta-index (fai)"
+
+
+def test_fai_name_with_other_content_is_not_trusted(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "x.fai", "a\tb\tc\nd\te\tf\n")))
+    assert d["format"] != "fasta-index (fai)"
+    assert any(".fai" in n for n in d["notes"])
+
+
+def test_fai_shaped_table_without_fai_name_stays_a_table(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "t.tsv", fai_text([("chr1", 100), ("chr2", 200)]))))
+    assert d["format"] == "tsv"
+
+
+def test_bai_is_identified_by_magic(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "a.bam.bai", bai_bytes(25))))
+    assert d["format"] == "bam-index (bai)"
+    assert d["confidence"] == "magic"
+    assert d["facts"]["reference_count"] == 25
+    assert sk8s.describe(str(write(tmp_path / "noext", bai_bytes(2))))["format"] == "bam-index (bai)"
+
+
+def test_bai_magic_only_has_no_facts_and_no_crash(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "a.bai", b"BAI\x01")))
+    assert d["format"] == "bam-index (bai)" and d["facts"] == {}
+
+
+def test_new_formats_render_for_humans_and_in_cohorts(tmp_path: Path) -> None:
+    write(tmp_path / "a.bam", make_bam())
+    write(tmp_path / "a.bam.bai", bai_bytes(2))
+    write(tmp_path / "ref.fa", fasta_text(3))
+    write(tmp_path / "ref.fa.fai", fai_text([("chr1", 130), ("chr2", 130), ("chr3", 130)]))
+    d = sk8s.describe(str(tmp_path))
+    by_name = {s["name"]: s for s in d["samples"]}
+    assert by_name["ref.fa"]["format"] == "fasta"
+    assert by_name["ref.fa.fai"]["format"] == "fasta-index (fai)"
+    assert by_name["a.bam.bai"]["format"] == "bam-index (bai)"
+    text = datadescribe.format_description(d)
+    assert "fasta (content; 3 contigs, nucleotide)" in text
+    assert "fasta-index (fai) (content; 3 contigs)" in text
+    assert "bam-index (bai) (magic; 2 refs)" in text
+    single = datadescribe.format_description(sk8s.describe(str(tmp_path / "ref.fa")))
+    assert "contigs: " in single and "chr1" in single and "total_residues: 390" in single
 
 
 def test_corrupt_sampled_file_is_recorded_not_fatal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -897,6 +1042,11 @@ def test_mini_fuzz_sniff_never_raises() -> None:
         ("x.csv", b"a,b,c\n1,2,3\n4,5,6\n", False),
         ("x.tsv.gz", b"a\tb\n1\t2\n3\t4\n", True),
         ("x.cram", b"CRAM\x03\x01" + b"id" * 10 + b"\x00" * 30, False),
+        ("x.fa", fasta_text(4, 90, 30).encode(), False),
+        ("x.fasta.gz", fasta_text(4, 90, 30).encode(), True),
+        ("x.fa.fai", fai_text([("chr1", 100), ("chr2", 200), ("chr3", 300)]).encode(), False),
+        ("x.fai", fai_text([("chr1", 100), ("chr2", 200)], cols=6).encode(), False),
+        ("x.bam.bai", bai_bytes(3), False),
     ]
     for seed, (name, raw, wrap) in enumerate(cases):
         for mutated in _mutations(seed, raw, 60):
@@ -911,5 +1061,11 @@ def test_mini_fuzz_sniff_never_raises() -> None:
     rng = random.Random(99)
     for _ in range(200):
         junk = bytes(rng.randrange(256) for _ in range(rng.randint(0, 120)))
-        for prefix in (b"", b"\x1f\x8b\x08", b"CRAM", b"\x1f\x8b\x08\x04\x00\x00\x00\x00\x00\xff\x06\x00BC\x02\x00"):
-            datadescribe.sniff("x.bam", prefix + junk, len(prefix + junk))
+        for prefix in (b"", b"\x1f\x8b\x08", b"CRAM", b"BAI\x01", b">chr1\n", b"chr1\t100\t", b"\x1f\x8b\x08\x04\x00\x00\x00\x00\x00\xff\x06\x00BC\x02\x00"):
+            for fuzz_name in ("x.bam", "x.fa", "x.fai"):
+                datadescribe.sniff(fuzz_name, prefix + junk, len(prefix + junk))
+
+
+def test_header_only_fasta_named_fa_is_extension_confidence(tmp_path: Path) -> None:
+    d = sk8s.describe(str(write(tmp_path / "h.fa", ">chr1\n")))
+    assert d["format"] == "fasta" and d["confidence"] == "extension"

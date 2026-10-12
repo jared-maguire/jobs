@@ -28,7 +28,8 @@ sk8s config --namespace sk8s --store k8s     # creates ns + SA/Role/RoleBinding,
 # Build YOUR base worker image (Python minor must match your client!) and push it:
 docker build -f docker/Dockerfile.worker --build-arg PYTHON_VERSION=3.12 \
   -t localhost:5000/sk8s-base . && docker push localhost:5000/sk8s-base
-echo 'image = "localhost:5000/sk8s-base"' >> "$SK8S_CONFIG"   # or SK8S_IMAGE
+echo 'image = "localhost:5000/sk8s-base"' >> "$SK8S_CONFIG"   # or SK8S_IMAGE, or: sk8s config --image IMG
+# (`sk8s config` writes `image` when given --image / $SK8S_IMAGE, else a commented "# image = ..." hint)
 
 sk8s doctor                                  # all checks PASS before doing anything else
 ```

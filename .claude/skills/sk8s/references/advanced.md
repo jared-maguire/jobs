@@ -36,6 +36,12 @@ result = h.result(delete=False)          # blocks if still running; raises the d
 - `sk8s workflows` lists every anchored workflow (finished included) with the
   driver's phase; `sk8s logs <id>` prints the driver log once; `sk8s kill <id>`
   cascades the whole tree.
+- **Print a line per stage from the driver** (`print("aligned 12/48", flush=True)`).
+  A detached driver's log is only what it prints: `sk8s logs <id>` and the
+  `logs_tail` in `sk8s explain` show an empty log with the note "driver produced
+  no output", and a stage-by-stage print is the cheapest progress channel there
+  is (agents found `explain`'s last-log-lines the most useful part of the status
+  view once the driver printed anything).
 - `keep_results=True` stops the client-side close from deleting a workflow your
   own client created; for the attach-later pattern it is NOT needed —
   `result(delete=False)` alone suffices. Either way a surviving workflow **ages

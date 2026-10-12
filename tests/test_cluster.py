@@ -950,3 +950,36 @@ def test_expect_is_not_forwarded_to_the_function(tmp_path) -> None:  # type: ign
     fut = h.cluster.submit(lambda **kw: sorted(kw), a=1, expect=lambda r: None)
     h.finish_job(fut.job_name)
     assert fut.result(timeout=10) == ["a"]
+
+
+# --- store= accepts a URL string (the configure(store=...) path) or a BlobStore object --------------
+
+
+def test_store_url_string_reaches_config_and_get_store(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    seen: list[str] = []
+
+    def fake_get_store(store, **kw):  # type: ignore[no-untyped-def]
+        seen.append(store)
+        return LocalStore(tmp_path)
+
+    monkeypatch.setattr("sk8s.cluster.get_store", fake_get_store)
+    c = Cluster(
+        Config(namespace="ns1", image="sk8s:dev"), batch_api=FakeBatchV1(), core_api=FakeCoreV1(),
+        store="gs://bkt/pfx", watcher_events=lambda: iter(()),
+    )
+    _OPEN.append(c)
+    assert c.config.store == "gs://bkt/pfx"
+    assert c._store is None  # a URL is config, not an injected object
+    assert isinstance(c.store, LocalStore)
+    assert seen == ["gs://bkt/pfx"]  # the store opened is the one the URL names
+
+
+def test_store_object_injection_leaves_config_alone(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    injected = LocalStore(tmp_path)
+    c = Cluster(
+        Config(namespace="ns1", image="sk8s:dev", store="s3://b/p"), batch_api=FakeBatchV1(),
+        core_api=FakeCoreV1(), store=injected, watcher_events=lambda: iter(()),
+    )
+    _OPEN.append(c)
+    assert c.store is injected
+    assert c.config.store == "s3://b/p"

@@ -139,9 +139,11 @@ def _toml_scalar(value: Any) -> str:
     raise Sk8sError(f"config file holds a value this writer cannot preserve: {value!r}")
 
 
-def render_toml(data: dict[str, Any]) -> str:
-    """Top-level scalars, then one flat ``[table]`` per dict value (e.g. ``store_env``)."""
+def render_toml(data: dict[str, Any], comments: Sequence[str] = ()) -> str:
+    """Top-level scalars, then ``comments`` (verbatim ``#`` lines), then one flat ``[table]`` per
+    dict value (e.g. ``store_env``)."""
     lines = [f"{_toml_key(k)} = {_toml_scalar(v)}" for k, v in data.items() if not isinstance(v, dict)]
+    lines.extend(comments)
     for k, table in data.items():
         if isinstance(table, dict):
             lines.append("")
@@ -150,10 +152,18 @@ def render_toml(data: dict[str, Any]) -> str:
     return "\n".join(lines).lstrip("\n") + "\n"
 
 
+def image_hint() -> str:
+    """The commented line a config without a worker image carries, so the file explains itself."""
+    py = f"{sys.version_info.major}.{sys.version_info.minor}"
+    return f'# image = "YOURREG/sk8s-base:py{py}"  (build-your-own: see README)'
+
+
 def write_config(path: Path, updates: dict[str, str | None]) -> None:
     """Set ``updates`` in the TOML file at ``path``, keeping any other keys already there.
 
-    A ``None`` value removes that key (so a stale setting does not outlive the profile).
+    A ``None`` value removes that key (so a stale setting does not outlive the profile). When
+    the result names no worker image (no ``image``, no ``image_prefix``) a commented hint line
+    showing the key is written instead (see :func:`image_hint`).
     """
     data: dict[str, Any] = {}
     if path.exists():
@@ -166,7 +176,8 @@ def write_config(path: Path, updates: dict[str, str | None]) -> None:
             data.pop(key, None)
         else:
             data[key] = value
-    text = render_toml(data)  # raises before touching the file if something is unpreservable
+    # raises before touching the file if something is unpreservable
+    text = render_toml(data, [] if data.get("image") or data.get("image_prefix") else [image_hint()])
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".toml")
     try:
@@ -365,6 +376,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
             _print_cloud_plan(steps, notes)
     print("\n".join(profile_mod.apply(prof)))
     path = config_mod.config_path()
+    image = args.image or os.environ.get("SK8S_IMAGE")
     write_config(
         path,
         {
@@ -372,6 +384,8 @@ def _cmd_config(args: argparse.Namespace) -> int:
             "store": prof.store,
             "image_prefix": prof.image_prefix,
             "rwx_storage_class": prof.rwx_storage_class,  # None (local) drops a stale key
+            # Only when known: a None here would DELETE an image the file already holds.
+            **({"image": image} if image else {}),
         },
     )
     print(f"wrote {path}")
@@ -546,6 +560,8 @@ def _cmd_logs(args: argparse.Namespace) -> int:
     ]
     text = "\n".join(chunks)
     sys.stdout.write(text if text.endswith("\n") or not text else text + "\n")
+    if not text.strip():  # on stderr: stdout stays exactly the log, for pipes
+        print(f"note: {explaining.EMPTY_DRIVER_LOG_NOTE}", file=sys.stderr)
     return 0
 
 
@@ -715,6 +731,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("config", help="prepare a namespace for sk8s and write the client config")
     p.add_argument("--namespace", help="namespace to create and configure (default: sk8s, or the namespace already configured)")
     p.add_argument("--store", help="blob store (default: configured, else 'k8s')")
+    p.add_argument("--image", help="worker image to write as `image` in the config file "
+                   "(default: $SK8S_IMAGE if set, else the existing value, else a commented hint)")
     p.add_argument("--provider", help="local | generic | gke (default: detected from the kube context)")
     p.add_argument("--project", help="gke: Google Cloud project id (required, not inferred)")
     p.add_argument("--region", help="gke: region of the Artifact Registry repo, e.g. us-central1 (required)")

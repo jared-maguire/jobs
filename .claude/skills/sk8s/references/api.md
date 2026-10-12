@@ -169,7 +169,11 @@ sk8s data describe gs://lab/runs/oct/ [--json] [--samples 5] [--max-objects 1000
 - One file -> `{"kind": "file", "format", "confidence", "compression", "facts", "notes"}`.
   Formats: FASTQ(.gz) (read length, phred offset guess, record count only if the file is
   <10MB), BAM (sort order, references, read groups, aligner), CRAM (version), VCF(.gz)
-  (samples, contigs, reference), CSV/TSV (delimiter, header, column types), gzip/unknown.
+  (samples, contigs, reference), FASTA by content, whatever the name (first 5 contig names,
+  contig count, sequence type, line width; total residues only if the file is <10MB, else
+  the count is a lower bound and says so), `.fai` (`fasta-index (fai)`: contig names and
+  lengths), `.bai` (`bam-index (bai)`, by magic: reference count), CSV/TSV (delimiter,
+  header, column types), gzip/unknown.
 - Directory or `gs://`/`s3://` prefix -> `{"kind": "cohort", ...}`: counts and bytes by
   format, size stats, `patterns` (FASTQ R1/R2 pairing + samples estimate, BAM index
   pairing), and full facts for the first 5 files (sorted by path).
@@ -206,10 +210,16 @@ placeholder uid (the anchor does not exist yet); read-only mounts show the
 volume itself as the claim (a RWO+ROX volume's hidden clone is chosen at real
 submit). `LocalCluster` raises `ValueError` (no Job to preview).
 
+A request you did not set counts as 0 in the totals, but sk8s adds no defaults
+of its own: the cluster decides (GKE Autopilot gives an unsized pod 0.5 vCPU and
+2 GiB; this includes a `submit_workflow` driver). `dr.unset_requests` lists
+which of `"cpu"`/`"memory"` are unset and a note says so; pass `requests=` for
+an exact preview.
+
 **`sk8s.explain("wf-...")`** (CLI: `sk8s explain wf-...`, `--json` for the dict)
 rebuilds the whole picture from cluster + store state, from any process — an
 agent with zero context needs nothing else. Read-only. Keys: `workflow` (id,
-namespace, detached, age, retention), `driver` (phase, `logs_tail`), `jobs`
+namespace, detached, age, retention), `driver` (phase, `logs_tail`, `logs_note` when the log is empty), `jobs`
 (name, role, phase `pending|running|succeeded|failed`, timings, requests, pods,
 and for stuck pods `waiting_code`/`waiting_reason` — image-pull, unschedulable,
 volume attach/provision, crash loops — or `failure_reason` for failed jobs: OOM

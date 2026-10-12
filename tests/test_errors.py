@@ -71,6 +71,7 @@ def test_image_not_configured_explains_the_doctrine_in_five_lines() -> None:
     assert len(text.splitlines()) <= 5
     assert "docker build -f docker/Dockerfile.worker" in text
     assert "SK8S_IMAGE" in text and "image=" in text
+    assert "sk8s config --image" in text
     assert "publish" in text  # why: nothing is published anywhere, build your own
 
 

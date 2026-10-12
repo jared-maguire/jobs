@@ -357,3 +357,44 @@ def test_preview_payload_is_the_size_of_the_real_one(tmp_path: Path, batch_size:
     wf = h.cluster.workflow_id
     sizes = {len(h.store.get(h.store.uri_for(f"{wf}/{n}/payload"))) for (_ns, n) in h.batch.jobs}
     assert sizes == {preview.payload_bytes}  # honest: same call shape, expect included
+
+
+# --- unset requests: the preview says the cluster, not sk8s, decides --------------------------------
+
+
+def test_unset_requests_are_flagged_not_silently_zero(tmp_path: Path) -> None:
+    c = strict_cluster(tmp_path)
+    dr = c.submit(double, 1, dry_run=True)
+    assert dr.total_cpu_request == 0 and dr.total_memory_request == 0
+    assert dr.unset_requests == ["cpu", "memory"]
+    note = next(n for n in dr.notes if "no cpu or memory request" in n)
+    # names what happens instead of leaving the zeros to be read as "free"
+    assert "cluster" in note and "Autopilot" in note and "0.5 vCPU" in note and "2 GiB" in note
+    assert dr.to_dict()["unset_requests"] == ["cpu", "memory"]
+
+
+def test_partially_set_requests_flag_only_the_missing_one(tmp_path: Path) -> None:
+    c = strict_cluster(tmp_path)
+    dr = c.submit(double, 1, dry_run=True, requests={"cpu": "1"})
+    assert dr.unset_requests == ["memory"]
+    assert any("no memory request" in n for n in dr.notes)
+
+
+def test_limits_count_as_requests_for_the_unset_flag(tmp_path: Path) -> None:
+    c = strict_cluster(tmp_path)
+    dr = c.submit(double, 1, dry_run=True, limits={"cpu": "2", "memory": "1Gi"})
+    assert dr.unset_requests == [] and not any("request" in n and "no " in n for n in dr.notes)
+
+
+def test_submit_workflow_preview_flags_the_driver_defaults(tmp_path: Path) -> None:
+    c = strict_cluster(tmp_path)
+    dr = workflows.submit_workflow(double, 1, cluster=c, dry_run=True)
+    assert dr.unset_requests == ["cpu", "memory"]
+    assert any("driver" in n and "Autopilot" in n for n in dr.notes)
+
+
+def test_map_preview_carries_the_unset_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SK8S_STORE", f"local:{tmp_path / 'store'}")
+    sk8s.configure(namespace="ns1", image="sk8s:dev")
+    dr = sk8s.map(double, [1, 2, 3], dry_run=True)
+    assert dr.unset_requests == ["cpu", "memory"]

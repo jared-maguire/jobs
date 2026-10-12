@@ -100,6 +100,12 @@ def _preview_workflow(
     finally:
         if cluster is None:
             c.close(delete_workflow=False)
+    if preview.unset_requests:
+        preview.notes.append(
+            "the driver Job sets no cpu/memory request of its own: on GKE Autopilot the real driver "
+            "pod gets the cluster default (0.5 vCPU, 2 GiB), though the totals above show 0; pass "
+            "requests= to submit_workflow to size the driver yourself"
+        )
     preview.notes.append(
         "detached workflow: this is its driver Job. The workflow anchor that owns it (and a "
         "fresh workflow id) are created at submit time; everything the driver submits is owned "

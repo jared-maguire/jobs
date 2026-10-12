@@ -104,8 +104,11 @@ docker push localhost:5000/sk8s-base:dev
 export SK8S_IMAGE=localhost:5000/sk8s-base:dev
 ```
 
-or put it in `~/.config/sk8s/config.toml` (recommended, since it persists across shells;
-`sk8s config` keeps keys it did not write, so this is safe to add at any point):
+or put it in `~/.config/sk8s/config.toml` (recommended, since it persists across shells).
+`sk8s config --image localhost:5000/sk8s-base:dev` writes the line for you (as does running
+`sk8s config` with `SK8S_IMAGE` exported); with neither, the generated file carries a
+commented `# image = "YOURREG/sk8s-base:pyX.Y"` hint instead. `sk8s config` keeps keys it did
+not write, so adding it by hand is safe at any point:
 
 ```toml
 image = "localhost:5000/sk8s-base:dev"
@@ -187,6 +190,8 @@ print(same.result(timeout=300))          # 285, then the finished workflow is de
 
 `sk8s workflows` lists workflows, `sk8s logs <id>` prints a driver's output and
 `sk8s kill <id>` deletes one with everything it owns.
+
+A detached driver's log is only what it prints (`sk8s logs` and `sk8s explain` show an empty log as "driver produced no output"), so `print(..., flush=True)` a line per stage from the driver: it is the cheapest progress channel there is, and the first thing `sk8s explain` shows (its last log lines).
 
 **11. Serve a function.** `serve()` runs a function that blocks forever (here an HTTP
 server) as a Deployment plus a ClusterIP Service. The URL works inside the cluster, so we
@@ -427,7 +432,7 @@ context's namespace if it names one, else `sk8s`.
 
 | Command | What it does |
 |---|---|
-| `sk8s config [--namespace NS] [--store URL] [--provider local\|generic\|gke] [--rwx-storage-class C [--rwx-provisioner P]] [--dry-run]` | Create the namespace, ServiceAccount, Role and RoleBinding; write the client config (including the StorageClass used for `ReadWriteMany` volumes: derived on `gke`, named by `--rwx-storage-class` on `generic`). `--dry-run` prints the plan only. |
+| `sk8s config [--namespace NS] [--store URL] [--image IMG] [--provider local\|generic\|gke] [--rwx-storage-class C [--rwx-provisioner P]] [--dry-run]` | Create the namespace, ServiceAccount, Role and RoleBinding; write the client config (including the StorageClass used for `ReadWriteMany` volumes: derived on `gke`, named by `--rwx-storage-class` on `generic`). `--image` (or `SK8S_IMAGE` at config time) writes `image`; without one the file carries a commented hint. `--dry-run` prints the plan only. |
 | `sk8s doctor [--json]` | Check cluster reachability, namespace, ServiceAccount, permissions and store; non-zero exit if any check fails. |
 | `sk8s workflows [--json]` | List workflows in the namespace (id, detached, age, driver phase). |
 | `sk8s explain WORKFLOW [--json]` | Everything about one workflow in one report: driver, jobs with stuck pods explained, volumes, store blobs, rough cost, and what is blocking progress. Exit 0 even when unhealthy; 1 if the workflow does not exist. Same data as `sk8s.explain(id)`. |

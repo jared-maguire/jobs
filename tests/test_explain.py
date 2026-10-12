@@ -486,6 +486,48 @@ def test_unreadable_driver_logs_degrade_to_a_warning(tmp_path: Path) -> None:
     assert any("log" in w for w in report["warnings"])
 
 
+def test_empty_driver_log_gets_a_note(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    make_anchor(h, driver="drv")
+    make_job(h, "drv", active=1, start=ago(hours=1))
+    make_pod(h, "drv", phase="Running")
+    report = sk8s.explain(WF, cluster=h.cluster)
+    assert report["driver"]["logs_tail"] == []
+    assert report["driver"]["logs_note"] == explaining.EMPTY_DRIVER_LOG_NOTE
+    assert "print() from the driver appears here" in explaining.render(report)
+
+
+def test_whitespace_only_driver_log_gets_the_note_too(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    make_anchor(h, driver="drv")
+    make_job(h, "drv", succeeded=1, start=ago(hours=1), end=ago(minutes=5))
+    make_pod(h, "drv", phase="Succeeded")
+    h.core.pod_logs["drv-pod"] = "\n  \n"
+    assert sk8s.explain(WF, cluster=h.cluster)["driver"]["logs_note"] == explaining.EMPTY_DRIVER_LOG_NOTE
+
+
+@pytest.mark.parametrize("case", ["has-output", "reaped", "pending", "unreadable"])
+def test_no_note_when_the_log_is_not_simply_empty(tmp_path: Path, case: str) -> None:
+    h = Harness(tmp_path)
+    make_anchor(h, driver="drv")
+    if case == "reaped":
+        pass  # no job, no pod: nothing was read, so nothing can be called empty
+    elif case == "pending":
+        make_job(h, "drv", active=1, start=ago(minutes=1))
+        make_pod(h, "drv", phase="Pending")  # not started: no log yet is not "no output"
+    else:
+        make_job(h, "drv", active=1, start=ago(hours=1))
+        make_pod(h, "drv", phase="Running")
+        h.core.pod_logs["drv-pod"] = "stage 1 done"
+        if case == "unreadable":
+            def boom(name: str, namespace: str, **kw: Any) -> str:
+                raise ApiException(status=403, reason="Forbidden")
+            h.core.read_namespaced_pod_log = boom  # type: ignore[method-assign]
+    report = sk8s.explain(WF, cluster=h.cluster)
+    assert report["driver"]["logs_note"] is None
+    assert "appears here" not in explaining.render(report)
+
+
 # --- volumes, store, cost ---------------------------------------------------------------------------
 
 
@@ -593,6 +635,22 @@ def test_cluster_none_builds_read_only_handles_from_config(
     assert report["workflow"]["id"] == WF
     assert report["counts"]["succeeded"] == 1
     assert report["store"]["blob_count"] == 1  # opened from the anchor's recorded store ("k8s")
+
+
+def test_cluster_none_honors_configure_store_string(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Fake the kube APIs like the neighboring test: CI runners have no kube config,
+    # and _context(None) must not depend on the host environment to resolve Config.
+    h = Harness(tmp_path)
+    monkeypatch.setattr(k8s, "core_api", lambda: h.core)
+    monkeypatch.setattr(k8s, "batch_api", lambda: h.batch)
+    sk8s.configure(namespace=NS, store="gs://bkt/pfx")
+    try:
+        ctx = explaining._context(None)
+    finally:
+        sk8s.configure()
+    assert ctx.config.store == "gs://bkt/pfx"
 
 
 # --- human rendering ---------------------------------------------------------------------------------
