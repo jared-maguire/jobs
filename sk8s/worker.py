@@ -23,8 +23,7 @@ from typing import Any, Mapping
 from kubernetes import client
 
 from sk8s import expect as expectations
-from sk8s import serialize, staging
-from sk8s.cas import ArtifactStore
+from sk8s import serialize
 from sk8s.store import get_store
 
 log = logging.getLogger("sk8s.worker")
@@ -57,7 +56,7 @@ def _sweep(environ: Mapping[str, str]) -> None:
         own = environ.get("SK8S_WORKFLOW_ID")
         clean(
             environ.get("SK8S_NAMESPACE"), core_api=_core_api(), batch_api=_batch_api(),
-            exclude=(own,) if own else (), artifacts=False,
+            exclude=(own,) if own else (),
         )
     except Exception:  # noqa: BLE001 — a sweep must never fail the job
         log.warning("retention sweep failed", exc_info=True)
@@ -115,29 +114,18 @@ def main(environ: Mapping[str, str]) -> int:
         )
     try:
         func, args, kwargs, expect = serialize.decode_payload_full(payload)
-        # Artifact arguments are staged to scratch around the call; a call with neither
-        # artifacts nor an OutDir parameter is made directly and touches no artifact code.
-        with staging.artifact_run(
-            func, args, kwargs, environ=environ,
-            astore=lambda: ArtifactStore(store, environ["SK8S_STORE"]),
-        ) as run:
-            value = run.call()
-            serialize.encode_result(value)  # a result that cannot be pickled fails here, pre-gate
-            if expect is not None:
-                # The gate runs on the value AS RETURNED (OutDir paths are still readable files),
-                # BEFORE anything is uploaded: a gated-out result leaves no CAS object, no
-                # reference-set entry and (client-side) no memo entry.
-                verdict = expectations.check(expect, value)
-                if verdict is not None:
-                    # The rejected value rides along in the blob, so it stays inspectable.
-                    store.put(
-                        result_key,
-                        serialize.encode_expect_failed(value, verdict.error, verdict.tb),
-                        owner=owner,
-                    )
-                    return 1
-            value, produced = run.finish(value)  # hash + upload declared outputs
-            blob = serialize.encode_result(value, [a.to_dict() for a in produced])
+        value = func(*args, **kwargs)
+        blob = serialize.encode_result(value)  # a result that cannot be pickled fails here
+        if expect is not None:
+            verdict = expectations.check(expect, value)
+            if verdict is not None:
+                # The rejected value rides along in the blob, so it stays inspectable.
+                store.put(
+                    result_key,
+                    serialize.encode_expect_failed(value, verdict.error, verdict.tb),
+                    owner=owner,
+                )
+                return 1
         store.put(result_key, blob, owner=owner)
         return 0
     except BaseException as exc:  # noqa: BLE001 — everything becomes an error result

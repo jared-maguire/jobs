@@ -18,10 +18,8 @@ from kubernetes import client
 from kubernetes.client import ApiException
 
 import sk8s
-from sk8s import anchors, clones, serialize, spec, staging, volumes
+from sk8s import anchors, clones, serialize, spec, volumes
 from sk8s import expect as expectations
-from sk8s import memo as memolib
-from sk8s.cas import ArtifactStore
 from sk8s.config import Config, load_config
 from sk8s.diagnosis import ATTACH, diagnose_pod_volumes, pod_holds_volumes, read_pvc
 from sk8s.dryrun import DryRun, resource_totals, serialize_job
@@ -37,7 +35,7 @@ from sk8s.watch import JobEvent, JobWatcher
 JOB_OPTIONS = {
     "image", "requests", "limits", "volumes", "timeout", "backoff_limit",
     "service_account", "namespace", "name_prefix", "privileged",
-    "pull_policy", "keep_results", "expect", "dry_run", "memo", "memo_salt",
+    "pull_policy", "keep_results", "expect", "dry_run",
 }
 
 _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
@@ -47,7 +45,7 @@ _STUCK_PHASES = ("imagepull", "volume-stuck")
 _DRY_RUN_UID = "<assigned-when-the-workflow-anchor-is-created>"
 _SELECTOR = "app.kubernetes.io/managed-by=sk8s"
 # Workflow ids that collide with non-workflow key prefixes in the store.
-RESERVED_WORKFLOW_IDS = frozenset({"svc", "doctor", "artifacts", "workflows"})
+RESERVED_WORKFLOW_IDS = frozenset({"svc", "doctor"})
 _FETCH_ATTEMPTS = 3
 _RETRY_DELAY = 0.5  # seconds between result-fetch attempts (store write visibility lag)
 _K8S_DEFAULT_BACKOFF_LIMIT = 6
@@ -192,7 +190,6 @@ class Cluster:
         self._core = core_api
         self._apps = apps_api
         self._store = store
-        self._artifact_store: ArtifactStore | None = None
         # An explicit workflow_id (attach) or the pod's SK8S_WORKFLOW_ID adopts that
         # workflow: use its anchor, never delete it from this cluster.
         inherited = workflow_id or os.environ.get("SK8S_WORKFLOW_ID")
@@ -214,7 +211,6 @@ class Cluster:
         self._pending: set[JobFuture] = set()  # unresolved futures (unlike _futures, which empties before resolve)
         self._atexit_hook: Callable[[], None] | None = None
         self._futures: dict[str, tuple[JobFuture, bool, str]] = {}  # name -> (future, keep_results, image)
-        self._memo_pending: dict[str, tuple[str, str, str, list[Any]]] = {}  # job -> (key, fn, image, inputs)
         self._mount_plans: dict[str, _MountPlan] = {}  # job name -> clone-backed volume bookkeeping
         self._read_volumes: set[str] = set()  # clone-backed volumes this client mounted read-only
         self._diagnoses: dict[str, PodFailed] = {}  # job name -> the typed error for a "volume-stuck" job
@@ -281,13 +277,6 @@ class Cluster:
                 endpoint=self.config.store_endpoint,
             )
         return self._store
-
-    @property
-    def artifact_store(self) -> ArtifactStore:
-        """The artifact layer (CAS, index, workflow reference sets) over this cluster's store."""
-        if self._artifact_store is None:
-            self._artifact_store = ArtifactStore(self.store, self.config.store)
-        return self._artifact_store
 
     # --- workflow anchor ----------------------------------------------------
     def _ensure_anchor(self) -> Any:
@@ -617,44 +606,14 @@ class Cluster:
         try:
             anchor = self._ensure_anchor()
             owner = anchors.owner_ref(anchor)
-            # Artifact arguments: pin external refs, record the hashes in the workflow's
-            # reference set (intent first), size ephemeral storage. A no-op without artifacts.
-            prepared = staging.prepare_submission(
-                self.artifact_store, self.workflow_id, args, kwargs
-            )
-            requests = self._with_ephemeral(
-                opts.get("requests", {}), opts.get("limits", {}), prepared.ephemeral_bytes
-            )
-            memo_key: str | None = None
-            # (A config-level memo=true never memoizes the batch wrapper job; an explicit memo=True with
-            # batch_size > 1 is refused earlier, in api._fan_out.)
-            from sk8s.api import _run_batch
-
-            if opts.get("memo", self.config.memo) and func is not _run_batch:
-                memo_key = memolib.memo_key(
-                    func, prepared.args, prepared.kwargs, image=image,
-                    salt=opts.get("memo_salt"), volumes=opts.get("volumes"), expect=expect,
-                )
-                hit = memolib.lookup(self.artifact_store, memo_key)
-                if hit is not None and memolib.adopt_outputs(
-                    self.artifact_store, self.workflow_id, hit
-                ):
-                    # The result already exists and its outputs are now ours (recorded, then
-                    # re-verified): answer without a payload, a Job or a pod.
-                    self._settle_writers(plan, name, wrote=False)
-                    return memolib.hit_future(self.workflow_id, hit)
             payload_uri = self.store.put(
-                payload_key,
-                serialize.encode_payload(
-                    func, prepared.args, prepared.kwargs, expect=expect, extra_header=prepared.header
-                ),
-                owner=owner,
+                payload_key, serialize.encode_payload(func, args, kwargs, expect=expect), owner=owner
             )
             pod_mounts = self._resolve_pod_mounts(mounts, pvcs, plan)
             job = self._build_job(
-                name, image=image, namespace=namespace, opts={**opts, "requests": requests},
-                payload_uri=payload_uri, result_key=result_key, pod_mounts=pod_mounts,
-                owner=owner, anchor_name=anchor.metadata.name, anchor_uid=anchor.metadata.uid,
+                name, image=image, namespace=namespace, opts=opts, payload_uri=payload_uri,
+                result_key=result_key, pod_mounts=pod_mounts, owner=owner,
+                anchor_name=anchor.metadata.name, anchor_uid=anchor.metadata.uid,
             )
             try:
                 self.batch.create_namespaced_job(namespace=namespace, body=job)
@@ -681,10 +640,6 @@ class Cluster:
         if plan.writers or plan.readers:
             self._mount_plans[name] = plan
         self._futures[name] = (fut, keep, image)
-        if memo_key is not None:
-            self._memo_pending[name] = (
-                memo_key, getattr(func, "__qualname__", repr(func)), image, prepared.inputs
-            )
         with self._anchor_lock:
             self._pending.add(fut)
         fut.add_done_callback(self._forget)
@@ -708,29 +663,9 @@ class Cluster:
         expect = self._expectation(opts)  # same checks, same order as submit
         name, namespace, image, mounts = self._job_settings(opts)  # same errors as submit
         payload_key = f"{self.workflow_id}/{name}/payload"
-        # Staging, as far as it can be previewed WITHOUT touching anything: no pin (that stats the
-        # object), no hash, no reference-set write, no memo lookup. Declared sizes only.
-        preview = staging.preview_submission(args, kwargs)
-        requests = self._with_ephemeral(
-            opts.get("requests", {}), opts.get("limits", {}), preview.ephemeral_bytes
-        )
         # unpicklable args fail here too; expect rides in the payload exactly as in submit
-        payload = serialize.encode_payload(
-            func, args, kwargs, expect=expect, extra_header=preview.header
-        )
+        payload = serialize.encode_payload(func, args, kwargs, expect=expect)
         notes: list[str] = []
-        unsized = [a for a in preview.inputs if a.size is None]
-        if opts.get("memo", self.config.memo):
-            notes.append(
-                "memo=True: a preview never consults or writes the memo; a real submit looks the "
-                "call up first and, on a hit, creates no Job at all"
-            )
-        if unsized:
-            notes.append(
-                f"{len(unsized)} input artifact(s) have no declared size, so ephemeral-storage is "
-                "not sized for them; a real submit pins them (a stat) and sizes the request"
-            )
-
         configmap_store = (
             isinstance(self._store, ConfigMapStore) if self._store is not None
             else self.config.store == "k8s"
@@ -759,8 +694,7 @@ class Cluster:
             api_version="v1", kind="ConfigMap", name=anchor_name, uid=_DRY_RUN_UID, controller=True
         )
         job = self._build_job(
-            name, image=image, namespace=namespace, opts={**opts, "requests": requests},
-            payload_uri=payload_uri,
+            name, image=image, namespace=namespace, opts=opts, payload_uri=payload_uri,
             result_key=f"{self.workflow_id}/{name}/result", pod_mounts=pod_mounts, owner=owner,
             anchor_name=anchor_name, anchor_uid=_DRY_RUN_UID,
         )
@@ -769,27 +703,7 @@ class Cluster:
             jobs=[serialize_job(job)], image=image, store=self.config.store, namespace=namespace,
             n_jobs=1, total_cpu_request=cpu, total_memory_request=memory,
             workflow_id=self.workflow_id, payload_bytes=len(payload), notes=notes,
-            n_artifacts=len(preview.inputs),
-            artifact_input_bytes=preview.ephemeral_bytes if any(a.size is not None for a in preview.inputs) else None,
         )
-
-    @staticmethod
-    def _with_ephemeral(
-        requests: dict[str, str], limits: dict[str, str], input_bytes: int
-    ) -> dict[str, str]:
-        """Requests plus an ephemeral-storage request sized for staged inputs (decision A2:
-        2x the known input bytes), unless the caller already set one."""
-        wanted = staging.ephemeral_request(input_bytes)
-        if wanted is None or staging.EPHEMERAL in requests or staging.EPHEMERAL in limits:
-            return requests
-        if input_bytes > staging.GENERIC_EPHEMERAL_THRESHOLD:
-            log.warning(
-                "staging %.1f GiB of inputs needs more node-local scratch than a pod's "
-                "ephemeral-storage request usually gets; generic ephemeral volumes are not "
-                "implemented yet, so set requests={'ephemeral-storage': ...} explicitly if the "
-                "job is evicted", input_bytes / 1024**3,
-            )
-        return {**requests, staging.EPHEMERAL: wanted}
 
     def track_job(self, name: str, *, keep_results: bool) -> JobFuture:
         """Future for an already-submitted job of this workflow (e.g. a detached driver),
@@ -992,10 +906,6 @@ class Cluster:
         except BaseException as exc:  # noqa: BLE001 — a future must never be stranded
             log.exception("resolving job %s failed unexpectedly", name)
             error = StoreError(f"could not resolve job {name}: {exc!r}")
-        pending_memo = self._memo_pending.pop(name, None)
-        if pending_memo is not None and error is None:
-            # Only a job that succeeded (no error result, no gate failure) is ever recorded.
-            self._write_memo(name, pending_memo, value)
         if phase in _STUCK_PHASES:
             self._delete_stuck_job(name)
         # Clean up before resolving so a caller woken by the future sees a clean store (and a
@@ -1009,16 +919,6 @@ class Cluster:
                 fut.set_result(value)
         except concurrent.futures.InvalidStateError:
             pass  # cancelled (or otherwise finished) while we were fetching
-
-    def _write_memo(self, name: str, pending: tuple[str, str, str, list[Any]], value: Any) -> None:
-        key, function, image, inputs = pending
-        try:
-            memolib.write(
-                self.artifact_store, key, value, function=function,
-                produced_by=f"{self.workflow_id}/{name}", image=image, inputs=inputs,
-            )
-        except Exception:  # noqa: BLE001 — a cache write must never fail the job that succeeded
-            log.warning("could not record the memo entry of job %s", name, exc_info=True)
 
     def _collect(self, name: str, phase: str, image: str) -> tuple[Any, BaseException | None]:
         """Returns (value, None) or (None, exception) for a terminal job."""
@@ -1128,7 +1028,6 @@ class Cluster:
         except Exception:  # noqa: BLE001
             return False
         entry = self._futures.pop(job_name, None)
-        self._memo_pending.pop(job_name, None)  # a cancelled job is never recorded
         # A cancelled writer's marker is left for the next read-only mount to reconcile: the
         # Job is deleted in the foreground, so it only reads as "gone" once its pods are.
         self._mount_plans.pop(job_name, None)
