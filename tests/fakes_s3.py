@@ -1,9 +1,12 @@
 """Dict-backed fake of the boto3 S3 client surface that S3Store uses.
 
-The conditional-write behaviour (PutObject ``IfNoneMatch="*"`` / ``IfMatch=<etag>``) follows
-AWS documentation, NOT a live server: the S3/MinIO column of SPIKE-CCW.md is unverified.
-Error codes modelled: 412 ``PreconditionFailed``; 404 ``NoSuchKey`` (If-Match on a missing
-key); 409 ``ConditionalRequestConflict`` (injectable via ``inject_conflicts``).
+Conditional writes (PutObject ``IfNoneMatch="*"`` / ``IfMatch=<etag>``) are modelled on what
+tests/integration/test_artifacts_s3.py observed live against MinIO RELEASE.2026-09-22 (the
+S3/MinIO column SPIKE-CCW left open; real AWS S3 is NOT verified): 412 ``PreconditionFailed``
+for If-None-Match on an existing key and for a stale If-Match; 404 ``NoSuchKey`` for If-Match on
+a missing key. 409 ``ConditionalRequestConflict`` (documented by AWS for concurrent in-flight
+writes; never observed on MinIO) is injectable via ``inject_conflicts``. Like real S3, a
+single-part ETag is the md5 of the content, so rewriting identical bytes keeps the ETag.
 """
 from __future__ import annotations
 
@@ -46,11 +49,9 @@ class FakeS3Client:
         self.copy_calls = 0
         self.lock = threading.RLock()
         self.inject_conflicts = 0  # the next N conditional puts fail with 409
-        self._n = 0
 
     def _etag(self, raw: bytes) -> str:
-        self._n += 1  # distinct per write, even for identical bytes (like a fresh upload)
-        return '"' + hashlib.md5(raw + str(self._n).encode()).hexdigest() + '"'  # noqa: S324
+        return '"' + hashlib.md5(raw).hexdigest() + '"'  # noqa: S324 — an ETag, not security
 
     def _record(self, bucket: str, key: str, raw: bytes, metadata: dict[str, str] | None) -> str:
         etag = self._etag(raw)

@@ -90,10 +90,12 @@ class S3Store(BlobStore):
         self._client.put_object(Bucket=self.bucket, Key=self._full_key(key), Body=data)
         return self.uri_for(key)
 
-    # --- conditional writes: PutObject If-None-Match / If-Match (AWS docs; SPIKE-PENDING) -----
-    # NOT verified against a live server (SPIKE-CCW E8 never ran MinIO). Expected losers: 412
-    # PreconditionFailed; 409 ConditionalRequestConflict means a concurrent in-flight write on
-    # the key, so the call is retried (bounded, jittered) until it resolves to a 412 or wins.
+    # --- conditional writes: PutObject If-None-Match / If-Match ---------------------------------
+    # Verified live against MinIO RELEASE.2026-09-22 (tests/integration/test_artifacts_s3.py):
+    # losers get 412 PreconditionFailed (If-None-Match on an existing key, stale If-Match) and 404
+    # NoSuchKey (If-Match on a missing key). NOT verified against AWS S3 proper. AWS documents a
+    # 409 ConditionalRequestConflict for a concurrent in-flight write on the key (never seen on
+    # MinIO); it is retried (bounded, jittered) until it resolves to a 412 or a win.
     def _conditional_put(self, key: str, data: bytes, **condition: str) -> bool:
         def attempt() -> bool | None:
             try:
@@ -197,7 +199,7 @@ class S3Store(BlobStore):
                 return count
             token = resp["NextContinuationToken"]
 
-    # --- object operations (SPIKE-PENDING: modelled on AWS docs, not a live server) ----------
+    # --- object operations (verified against MinIO, not AWS S3 proper) -------------------------
     def _stat_from(self, uri: str, resp: dict[str, Any]) -> BlobStat:
         return BlobStat(
             uri=uri, size=int(resp.get("ContentLength", 0)), version=str(resp["ETag"]),
