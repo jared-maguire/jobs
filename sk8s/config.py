@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from sk8s.budget import Budget
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -58,6 +60,13 @@ class Config:
     # Extra env vars exported to worker pods (e.g. AWS_* creds for an S3-compatible store).
     # Config file / kwargs only: values are never read from SK8S_* env vars.
     store_env: dict[str, str] = field(default_factory=dict)
+    # Client-side guardrails (see sk8s.budget): None = unlimited. A mapping is coerced to Budget.
+    # Travels to detached drivers as SK8S_BUDGET (JSON), so nested submissions enforce it too.
+    budget: Budget | None = None
+
+    def __post_init__(self) -> None:
+        if self.budget is not None and not isinstance(self.budget, Budget):
+            object.__setattr__(self, "budget", Budget.coerce(self.budget))
 
 
 _FIELDS = {f.name: f.type for f in dataclasses.fields(Config)}
@@ -68,6 +77,8 @@ def _coerce(name: str, raw: str) -> Any:
         return int(raw)
     if name in ("volume_wait_seconds", "volume_attach_grace_seconds", "volume_provision_grace_seconds"):
         return float(raw)
+    if name == "budget":
+        return Budget.coerce(raw)
     if name in ("keep_results", "memo"):
         return raw.strip().lower() in ("1", "true", "yes")
     return raw
@@ -97,6 +108,9 @@ def load_config(
             continue
         env_key = f"SK8S_{name.upper()}"
         if env_key in env:
-            values[name] = _coerce(name, env[env_key])
+            try:
+                values[name] = _coerce(name, env[env_key])
+            except ValueError as e:
+                raise ValueError(f"{env_key}: {e}") from None
     values.update({k: v for k, v in overrides.items() if v is not None})
     return Config(**values)
