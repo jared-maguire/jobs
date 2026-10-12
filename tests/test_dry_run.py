@@ -13,7 +13,7 @@ import sk8s
 from sk8s import api, k8s, workflows
 from sk8s.cluster import Cluster
 from sk8s.config import Config
-from sk8s.errors import BlobTooLarge
+from sk8s.errors import BlobTooLarge, ImageNotConfigured
 from sk8s.store.configmap import MAX_CONFIGMAP_BLOB
 from sk8s.store.local import LocalStore
 from tests.test_cluster import Harness, _close_clusters  # noqa: F401  (autouse fixture)
@@ -95,8 +95,15 @@ def test_dry_run_resolves_everything_a_real_submit_would(tmp_path: Path) -> None
     assert container(body)["imagePullPolicy"] == "Always"
     assert body["spec"]["template"]["spec"]["serviceAccountName"] == "robot"
     assert container(body)["securityContext"] == {"privileged": True}
-    default = strict_cluster(tmp_path, image=None).submit(double, 1, dry_run=True)
-    assert default.image.startswith("ghcr.io/jared-maguire/sk8s:")
+    composed = strict_cluster(tmp_path, image=None, image_prefix="reg.example/").submit(
+        double, 1, dry_run=True)
+    assert composed.image.startswith("reg.example/ghcr.io/jared-maguire/sk8s:")
+
+
+def test_dry_run_fails_like_a_submit_when_no_image_is_configured(tmp_path: Path) -> None:
+    with pytest.raises(ImageNotConfigured):  # the preview fails exactly as a real submit would
+        strict_cluster(tmp_path, image=None).submit(double, 1, dry_run=True)
+    assert nothing_written(tmp_path)
 
 
 def test_dry_run_is_not_a_function_kwarg(tmp_path: Path) -> None:
@@ -296,3 +303,57 @@ def test_submit_workflow_dry_run_builds_its_own_cluster(tmp_path: Path, monkeypa
     dr = sk8s.submit_workflow(double, 1, dry_run=True)
     assert dr.n_jobs == 1 and dr.namespace == "ns1"
     assert nothing_written(tmp_path)
+
+
+# --- composed with pilot= and expect= -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call,items", [
+    (lambda f, items, **kw: sk8s.map(f, items, **kw), [1, 2, 3, 4]),
+    (lambda f, items, **kw: sk8s.starmap(f, items, **kw), [(1,), (2,), (3,), (4,)]),
+    (lambda f, items, **kw: sk8s.submit_map(f, items, **kw), [1, 2, 3, 4]),
+    (lambda f, items, **kw: sk8s.submit_starmap(f, items, **kw), [(1,), (2,), (3,), (4,)]),
+])
+def test_dry_run_with_pilot_never_submits_or_touches_the_api(
+    tmp_path: Path, call: Any, items: list[Any]
+) -> None:
+    # dry_run must win over pilot: a pilot would otherwise submit and WAIT for real.
+    sk8s.configure(cluster=strict_cluster(tmp_path))  # Strict: any API use fails the test
+    dr = call(double, items, dry_run=True, pilot=2, timeout=1)
+    assert isinstance(dr, sk8s.DryRun) and dr.n_jobs == 4 and len(dr.jobs) == 1
+    assert any("pilot=2" in n and "nothing was submitted" in n for n in dr.notes)
+    assert nothing_written(tmp_path)
+
+
+def test_dry_run_still_validates_pilot(tmp_path: Path) -> None:
+    sk8s.configure(cluster=strict_cluster(tmp_path))
+    with pytest.raises(ValueError, match="pilot"):
+        sk8s.map(double, [1], dry_run=True, pilot=0)
+    with pytest.raises(TypeError, match="pilot"):
+        sk8s.map(double, [1], dry_run=True, pilot="3")
+
+
+def ok(result: Any) -> bool:
+    return True
+
+
+def test_expect_rides_in_the_previewed_payload_and_is_validated(tmp_path: Path) -> None:
+    c = strict_cluster(tmp_path)
+    plain = c.submit(double, 1, dry_run=True)
+    gated = c.submit(double, 1, dry_run=True, expect=ok)
+    assert gated.payload_bytes > plain.payload_bytes
+    assert "expect" not in env(gated.jobs[0])  # a payload property, not job env
+    with pytest.raises(TypeError, match="expect"):
+        c.submit(double, 1, dry_run=True, expect="not callable")
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_preview_payload_is_the_size_of_the_real_one(tmp_path: Path, batch_size: int) -> None:
+    h = Harness(tmp_path)
+    sk8s.configure(cluster=h.cluster)
+    kw: dict[str, Any] = dict(batch_size=batch_size, expect=ok)
+    preview = sk8s.map(double, [1, 2, 3, 4], dry_run=True, **kw)
+    sk8s.submit_map(double, [1, 2, 3, 4], **kw)
+    wf = h.cluster.workflow_id
+    sizes = {len(h.store.get(h.store.uri_for(f"{wf}/{n}/payload"))) for (_ns, n) in h.batch.jobs}
+    assert sizes == {preview.payload_bytes}  # honest: same call shape, expect included
