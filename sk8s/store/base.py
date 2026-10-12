@@ -30,3 +30,9 @@ class BlobStore(ABC):
     @abstractmethod
     def uri_for(self, key: str) -> str:
         """The URI put(key, ...) would return. Deterministic; no I/O."""
+
+    def count_prefix(self, prefix: str) -> int:
+        """How many blobs lie at or under ``prefix`` (read-only; same whole-segment matching and
+        empty-prefix rule as ``delete_prefix``). Backends that cannot count raise
+        ``NotImplementedError``."""
+        raise NotImplementedError(f"{type(self).__name__} cannot count blobs under a prefix")

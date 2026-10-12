@@ -45,3 +45,12 @@ class LocalStore(BlobStore):
             shutil.rmtree(target)
         elif target.exists():
             target.unlink()
+
+    def count_prefix(self, prefix: str) -> int:
+        prefix = prefix.strip("/")
+        if not prefix:
+            raise ValueError("count_prefix requires a non-empty prefix")
+        target = self.root / prefix
+        if target.is_dir():
+            return sum(1 for p in target.rglob("*") if p.is_file())
+        return 1 if target.exists() else 0

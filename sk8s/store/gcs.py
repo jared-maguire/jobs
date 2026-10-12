@@ -85,3 +85,17 @@ class GCSStore(BlobStore):
         for blob in self._client.list_blobs(self.bucket, prefix=under):  # pages transparently
             if blob.name.startswith(under):  # whole-segment match only
                 self._delete_key(blob.name)
+
+    def count_prefix(self, prefix: str) -> int:
+        prefix = prefix.strip("/")
+        if not prefix:
+            raise ValueError("count_prefix requires a non-empty prefix")
+        target = self._full_key(prefix)
+        under = target + "/"
+        # An object stored exactly at `target` counts as the prefix itself; anything else must
+        # lie under "target/" (whole-segment match only).
+        return sum(
+            1
+            for blob in self._client.list_blobs(self.bucket, prefix=target)  # pages transparently
+            if blob.name == target or blob.name.startswith(under)
+        )

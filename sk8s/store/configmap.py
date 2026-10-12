@@ -111,3 +111,18 @@ class ConfigMapStore(BlobStore):
             key = (cm.metadata.annotations or {}).get(KEY_ANNOTATION, "")
             if key == prefix or key.startswith(prefix + "/"):
                 self.delete(f"k8s://{self.namespace}/{cm.metadata.name}")
+
+    def count_prefix(self, prefix: str) -> int:
+        prefix = prefix.strip("/")
+        if not prefix:
+            raise ValueError("count_prefix requires a non-empty prefix")
+        selector = ",".join(f"{k}={v}" for k, v in _blob_labels(prefix).items())
+        cms = self.core_api.list_namespaced_config_map(
+            namespace=self.namespace, label_selector=selector
+        )
+        count = 0
+        for cm in cms.items:
+            key = (cm.metadata.annotations or {}).get(KEY_ANNOTATION, "")
+            if key == prefix or key.startswith(prefix + "/"):
+                count += 1
+        return count
