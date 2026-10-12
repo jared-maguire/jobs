@@ -30,10 +30,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
 from sk8s.artifacts import Artifact, OutDir
+from sk8s import cas
 from sk8s.cas import ArtifactStore, location, store_for_uri
-from sk8s.errors import (
-    ArtifactChanged, ArtifactError, ArtifactNotFound, BlobNotFound, VersionChanged,
-)
+from sk8s.errors import ArtifactChanged, ArtifactError, ArtifactNotFound
 
 EPHEMERAL = "ephemeral-storage"
 _MIB = 1024 * 1024
@@ -161,34 +160,12 @@ def stage_artifact(astore: ArtifactStore, art: Artifact, dest: Path) -> tuple[st
 
     Verifies against a known hash; learns and indexes the hash of an external reference
     (the lazy hash-on-first-staging of SPEC 3.2)."""
-    import hashlib
-
     problems: list[str] = []
     res = astore.resolve(art, problems)
     if res is None:
-        detail = "; ".join(problems) or "no known location"
-        if any("changed" in p for p in problems):
-            raise ArtifactChanged(
-                f"input artifact {art.uri} was overwritten after it was pinned ({detail}); "
-                "a changed input is a different artifact, so the run was refused"
-            )
-        raise ArtifactNotFound(f"input artifact {art.uri} is not available anywhere: {detail}")
+        raise cas.not_available(art, problems)
     reader, _ = store_for_uri(res.uri, astore.store)
-    h = hashlib.sha256()
-    try:
-        reader.download_file(res.uri, dest, version=res.version, hasher=h)
-    except VersionChanged as exc:
-        raise ArtifactChanged(f"input artifact {res.uri} changed while it was being read") from exc
-    except BlobNotFound as exc:
-        raise ArtifactNotFound(f"input artifact {res.uri} vanished before it was read") from exc
-    sha = h.hexdigest()
-    size = dest.stat().st_size
-    if art.sha256 and sha != art.sha256:
-        dest.unlink(missing_ok=True)
-        raise ArtifactChanged(
-            f"input artifact {res.uri} hashes to sha256:{sha[:16]}..., expected "
-            f"sha256:{art.sha256[:16]}...: its bytes are not what was pinned"
-        )
+    sha, size = cas.fetch(reader, res.uri, dest, version=res.version, expected_sha=art.sha256)
     if res.kind in ("own", "external") and art.store is None:
         # An external reference: remember where this content was seen (and its hash), so the
         # hash is known for next time and provenance can name it.

@@ -24,13 +24,17 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
-from sk8s.errors import BlobNotFound, StoreError
+from sk8s.errors import (
+    ArtifactChanged, ArtifactError, ArtifactNotFound, BlobNotFound, PublishConflict, StoreError,
+    VersionChanged,
+)
 from sk8s.store import get_store
 from sk8s.store.base import CHUNK, BlobStat, BlobStore
 from sk8s.store.retry import update_blob
@@ -39,6 +43,11 @@ if TYPE_CHECKING:
     from sk8s.artifacts import Artifact
 
 log = logging.getLogger("sk8s.cas")
+
+# Custom object metadata stamped on every published object (SPEC 3.1): points back to the hash
+# and to the producing job.
+META_SHA = "sk8s-artifact-sha256"
+META_PRODUCED_BY = "sk8s-produced-by"
 
 INDEX_SCHEMA = 1
 MANIFEST_SCHEMA = 1
@@ -425,3 +434,203 @@ class ArtifactStore:
                 continue
             return Resolved(uri=uri, kind=kind, version=st.version, stat=st)
         return None
+
+
+# --- fetching, publishing, downloading -----------------------------------------------------
+
+
+def fetch(
+    reader: BlobStore, uri: str, dest: Path, *, version: str | None, expected_sha: str | None
+) -> tuple[str, int]:
+    """Stream ``uri`` to ``dest`` hashing as it goes; verify against ``expected_sha`` and pin to
+    ``version``. Returns (sha256, size). On any failure nothing is left at ``dest``."""
+    h = hashlib.sha256()
+    try:
+        reader.download_file(uri, dest, version=version, hasher=h)
+    except VersionChanged as exc:
+        dest.unlink(missing_ok=True)
+        raise ArtifactChanged(f"artifact {uri} changed while it was being read") from exc
+    except BlobNotFound as exc:
+        raise ArtifactNotFound(f"artifact {uri} vanished before it was read") from exc
+    sha = h.hexdigest()
+    if expected_sha and sha != expected_sha:
+        dest.unlink(missing_ok=True)
+        raise ArtifactChanged(
+            f"artifact {uri} hashes to sha256:{sha[:16]}..., expected sha256:{expected_sha[:16]}...: "
+            "its bytes are not what was pinned"
+        )
+    return sha, dest.stat().st_size
+
+
+def not_available(art: Artifact, problems: list[str]) -> ArtifactError:
+    detail = "; ".join(problems) or "no known location"
+    if any("changed" in p for p in problems):
+        return ArtifactChanged(
+            f"artifact {art.uri} was overwritten after it was pinned ({detail}); "
+            "a changed input is a different artifact, so it was refused"
+        )
+    return ArtifactNotFound(f"artifact {art.uri} is not available anywhere: {detail}")
+
+
+def _local_scratch_copy(reader: BlobStore, uri: str, version: str | None) -> tuple[Path, str]:
+    """Stream an object to a temp file (for stores with no server-side path to the destination)."""
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(prefix="sk8s-publish-")
+    os.close(fd)
+    path = Path(tmp)
+    try:
+        sha, _ = fetch(reader, uri, path, version=version, expected_sha=None)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path, sha
+
+
+def publish(
+    astore: ArtifactStore | None, art: Artifact, dest_uri: str, *, copy: bool = False
+) -> Artifact:
+    """Make an artifact available at a human-legible location (SPEC 3.2, decision A3).
+
+    Move by default: the destination becomes the hash's recorded location and the CAS copy is
+    retired; ``copy=True`` keeps both. An external reference (not CAS-resident) is always copied:
+    sk8s never deletes bytes it does not own. The destination is created if absent and never
+    overwritten with different content; re-publishing the same content there is a no-op.
+
+    Provenance metadata (``sk8s-artifact-sha256``, ``sk8s-produced-by``) is sent WITH the
+    content (server-side copy or upload), so there is no window where the object exists without
+    it, and no later content write that could wipe it (the GCS overwrite trap). It is read back
+    and verified afterwards."""
+    dest_uri = normalize_uri(dest_uri)
+    scheme, _, _ = split_uri(dest_uri)
+    if scheme == "k8s":
+        raise ValueError("cannot publish into the ConfigMap store; use gs://, s3:// or a path")
+    problems: list[str] = []
+    res = astore.resolve(art, problems) if astore is not None else _resolve_bare(art, problems)
+    if res is None:
+        raise not_available(art, problems)
+    reader, _ = store_for_uri(res.uri, astore.store if astore else None)
+    sha = art.sha256
+    if sha is None:  # an unhashed external reference: hash it now (streamed, nothing kept)
+        sha, _ = fetch(reader, res.uri, Path(os.devnull), version=res.version, expected_sha=None)
+    size = res.stat.size
+    dst_store, dst_key = store_for_uri(dest_uri)
+    metadata = {META_SHA: sha, META_PRODUCED_BY: art.produced_by or "unknown"}
+
+    existing = dst_store.stat(dest_uri)
+    if existing is None:
+        done = reader.server_copy(res.uri, dst_store, dst_key, metadata=metadata, if_absent=True)
+        if done is None:  # no server-side path between these stores: stream through a temp file
+            tmp, got = _local_scratch_copy(reader, res.uri, res.version)
+            try:
+                if got != sha:
+                    raise ArtifactChanged(
+                        f"artifact {res.uri} hashes to sha256:{got[:16]}..., expected sha256:{sha[:16]}..."
+                    )
+                done = dst_store.upload_file(dst_key, tmp, metadata=metadata, if_absent=True)
+            finally:
+                tmp.unlink(missing_ok=True)
+        landed = dst_store.stat(dest_uri)  # also covers losing the create race to a same-content publish
+    else:
+        landed = existing
+    if landed is None:
+        raise ArtifactError(f"publish to {dest_uri} reported success but the object is not there")
+    if landed.metadata.get(META_SHA) != sha:
+        if existing is not None or landed.size != size or META_SHA in landed.metadata:
+            raise PublishConflict(
+                f"{dest_uri} already holds different content "
+                f"(sk8s-artifact-sha256={landed.metadata.get(META_SHA)!r}); publish never overwrites"
+            )
+        raise ArtifactError(
+            f"published {dest_uri} but its {META_SHA} metadata is missing - the destination store "
+            "dropped custom metadata, so provenance would be lost; refusing to retire the source"
+        )
+    if landed.size != size:
+        raise ArtifactError(f"published {dest_uri} is {landed.size} bytes, expected {size}")
+
+    out = _moved(art, dest_uri, sha, size, landed.version)
+    if astore is not None and art.store is not None:
+        cas_uri = astore.store.uri_for(cas_key(sha))
+        retire = not copy and res.uri == cas_uri
+        astore.update_index(
+            sha, size=size, touch=True,
+            add=[location("published", dest_uri, landed.version, copy=copy or not retire)],
+        )
+        if retire:
+            astore.update_index(sha, remove=[("cas", cas_uri)])
+            astore.store.delete(cas_uri)
+    return out
+
+
+def _moved(art: Artifact, uri: str, sha: str, size: int, version: str | None) -> Artifact:
+    import dataclasses
+
+    return dataclasses.replace(
+        art, uri=uri, sha256=sha, size=size, version=version,
+        name=posixpath.basename(uri) or art.name,
+    )
+
+
+def _resolve_bare(art: Artifact, problems: list[str]) -> Resolved | None:
+    """resolve() for an artifact with no artifact store: only its own uri is known."""
+    try:
+        reader, _ = store_for_uri(art.uri)
+        st = reader.stat(art.uri)
+    except StoreError as exc:
+        problems.append(f"{art.uri}: {exc}")
+        return None
+    if st is None:
+        problems.append(f"{art.uri}: not found")
+        return None
+    if (art.size is not None and st.size != art.size) or (
+        art.version is not None and st.version != art.version
+    ):
+        problems.append(f"{art.uri}: changed (version {st.version}, pinned {art.version})")
+        return None
+    return Resolved(uri=art.uri, kind="own", version=st.version, stat=st)
+
+
+def download(astore: ArtifactStore | None, art: Artifact, path: str | os.PathLike[str]) -> Path:
+    """Copy an artifact's bytes to a local ``path`` (a directory gets ``art.filename`` inside),
+    verifying the hash as they stream. Written to a temp name and renamed, so a failed download
+    leaves nothing at ``path``."""
+    target = Path(path)
+    if target.is_dir():
+        target = target / posixpath.basename(art.filename)
+    problems: list[str] = []
+    res = astore.resolve(art, problems) if astore is not None else _resolve_bare(art, problems)
+    if res is None:
+        raise not_available(art, problems)
+    reader, _ = store_for_uri(res.uri, astore.store if astore else None)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".sk8s-part")
+    try:
+        fetch(reader, res.uri, part, version=res.version, expected_sha=art.sha256)
+        os.replace(part, target)
+    finally:
+        part.unlink(missing_ok=True)
+    return target
+
+
+# --- opening the artifact store an Artifact belongs to -----------------------------------------
+
+_artifact_stores: dict[tuple[str, str], ArtifactStore] = {}
+
+
+def open_artifact_store(spec: str | None, uri: str = "") -> ArtifactStore | None:
+    """The ArtifactStore named by an Artifact's ``store`` spec (None for a bare reference).
+    Shared per process so its record cache and clients are reused."""
+    if spec is None:
+        return None
+    namespace = None
+    if spec == "k8s":
+        namespace = uri[len("k8s://"):].split("/", 1)[0] if uri.startswith("k8s://") else (
+            os.environ.get("SK8S_NAMESPACE") or None
+        )
+    cache_key = (spec, namespace or "")
+    with _bucket_lock:
+        found = _artifact_stores.get(cache_key)
+        if found is None:
+            found = ArtifactStore.from_spec(spec, namespace=namespace)
+            _artifact_stores[cache_key] = found
+    return found

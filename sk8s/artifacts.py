@@ -56,7 +56,23 @@ class Artifact:
         ident = f"sha256:{self.sha256[:12]}" if self.sha256 else "unhashed"
         return f"Artifact({self.filename!r}, {ident}, {self.uri})"
 
-    # publish / download are attached by sk8s.publish (kept out of this value type's import graph)
+    def publish(self, uri: str, copy: bool = False) -> Artifact:
+        """Give the artifact a permanent, human-legible home at ``uri`` and return the Artifact
+        that lives there (``gs://``, ``s3://`` or a local path).
+
+        Move by default: the destination becomes the recorded location and the CAS copy is
+        retired (one copy, decision A3). ``copy=True`` keeps both. Never overwrites a different
+        object; the object carries ``sk8s-artifact-sha256`` / ``sk8s-produced-by`` metadata."""
+        from sk8s import cas
+
+        return cas.publish(cas.open_artifact_store(self.store, self.uri), self, uri, copy=copy)
+
+    def download(self, path: str | os.PathLike[str]) -> Path:
+        """Copy the bytes to a local ``path`` (a directory gets the artifact's file name inside),
+        verifying the hash while streaming. Returns the file's path."""
+        from sk8s import cas
+
+        return cas.download(cas.open_artifact_store(self.store, self.uri), self, path)
 
 
 def artifact(
