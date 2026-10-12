@@ -4,6 +4,46 @@ Brainstormed 2026-10-11, right after v2 completed (plans 1–11, PRs #70–#87).
 Ideas, not commitments; no designs or plans exist yet. The theme: **v2 made jobs
 reliable; v3 makes workflows cheap and durable.**
 
+## The target interaction (the bar-napkin demo, 2026-10-11 — "YES. I want THAT.")
+
+Every v3 feature is judged by whether it moves us toward these twelve lines:
+
+```
+You:  computer, align the new cohort in gs://lab/runs/oct/ against GRCh38
+      and give me per-sample variant counts.
+
+C:    Found 48 samples (FASTQ, ~12GB each). Plan: fastqc → bwa-mem →
+      dedup → haplotypecaller → count. 240 jobs, est. $31, ~2h.
+      Pilot on 3 samples first? [plan: wf-7f3a, diffable]
+
+You:  yes, go.
+
+C:    Pilot green — QC: 97% mapped, dup rate 8%. Running the other 45.
+
+      ... (you close the laptop, go to the bar) ...
+
+You:  computer, status?
+
+C:    44/48 done. S23 failed QC (61% mapped — contamination?),
+      quarantined, everything else on track. $26 so far.
+
+You:  drop S23, finish up, publish counts to gs://lab/results/oct/.
+
+C:    Done. 47 samples published, provenance attached —
+      counts.tsv ← sha256:9c41… ← [pipeline wf-7f3a, GRCh38@2024,
+      bwa@0.7.17]. Re-running tomorrow would cost $0 — it's all cached.
+```
+
+Decomposition — every line is a wishlist item: "Found 48 samples" = the data
+catalog (10.1); the plan + estimate + diffable wf-7f3a = IR, dry-run, manifests
+(9); "pilot first" = answer verification (10.4); stage names = task cards
+(10.2); close-the-laptop = durable workflows (2); "status?" = explain (9);
+S23 quarantined = QC gates + typed semantic failure (10.4); "drop S23, finish"
+= dynamic control of a running workflow; publish + provenance = artifacts/CAS +
+refs (8); "$0 tomorrow" = memoization as execution semantics (1, first
+principle); the $31/$26 numbers = cost accounting + budgets (6, 9); the whole
+conversation = the resident computer + autonomy policy (10.6).
+
 ## The first principle (candidate first sentence of any v3 spec)
 
 > **Your outputs are supposed to be pure functions of your inputs — that's what
