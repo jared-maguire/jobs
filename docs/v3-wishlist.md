@@ -140,6 +140,80 @@ Interactions: wishlist item 1 (memoization) mostly collapses into "hash the
 input artifacts, look up the key"; item 2's replay reads the same manifests;
 item 3's triggers arrive on the same bucket notifications.
 
+## 9. Agent-native sk8s (Jared's #1, discussed 2026-10-11)
+
+sk8s as the substrate coding agents use to build and execute complex workflows —
+"people don't write code anymore." v2 did parts of this by accident (typed
+errors with fix-hints, doctor, plan-first config, SK8S_CONFIG isolation, the
+in-repo skill); v3 makes it a design principle:
+
+> **Every operation previewable, every state explainable in one call, every
+> failure naming its fix, every blast radius bounded.**
+
+The concrete surface:
+
+- **One-call situational awareness:** `sk8s explain <workflow>` (+ `--json` on
+  every CLI command) — the whole tree in one response: driver state, job phases,
+  pod events already interpreted, logs pointers, artifacts, cost so far, what's
+  blocking what. All state reconstructible from cluster + store, never from a
+  process (an agent with zero context rebuilds the picture in one call).
+- **Previewability:** `submit(..., dry_run=True)` returning the built Job,
+  resolved image, store destination, cost estimate; reviewable workflow
+  manifests ("what this pipeline WILL do") that diff in PRs before anything
+  touches the cluster — the trust gate for agent-built infrastructure.
+- **Bounded blast radius:** `budget=` per workflow (max pods / cpu-hours /
+  estimated spend, typed error at the limit); `sk8s sandbox` = ephemeral
+  namespace + config + budget, auto-reaped (the isolation pattern every agent in
+  the v2 build maintained by hand, as one command).
+- **Fast inner loop:** the dev-loop item (ship the module tree with the
+  payload); `LocalCluster` promoted to a faithful simulator with failure
+  injection (test error handling with no cluster); idempotent re-execution via
+  memoization (an agent re-running a crashed script double-executes nothing).
+- **The skill ships with the package and is CI-tested** (the retrieval-test loop
+  from plan 11, institutionalized); possibly `sk8s skill install`; possibly an
+  MCP server, though CLI-with-`--json` + the skill may serve coding agents
+  better.
+
+### Radical-option appendix: is Python even the right language?
+
+The irony is noted: sk8s exists because workflow DSLs are miserable for humans —
+and agents invert that trade (learning curves cost them nothing; verifiability
+before execution is what they need most). The direction under consideration:
+
+**Split the two jobs Python currently does.**
+
+- *Leaf compute* (the function that runs bwa, the numpy transform) stays Python
+  in a container — LLM training distribution dominates there, and leaf code
+  gains nothing from static verifiability.
+- *Orchestration* stops being a running Python process and becomes **data**: a
+  workflow IR — versioned, typed, budget-annotated graphs with dynamic
+  constructs. Python becomes ONE frontend that emits the IR (the PyTorch /
+  Terraform-CDK move); agents may emit IR directly. The artifact reaching the
+  cluster is checkable data, not code with opaque control flow.
+
+Much of this wishlist collapses into the IR: durable/resumable workflows
+(item 2) = an interpreter over data with an event log, replayable by
+construction; memoization (item 1) = per-node; manifests/dry-run/explain =
+views of the IR; cost estimation = a fold over it.
+
+The hard problem is **dynamic workflows** (data-dependent fan-out, loops —
+the reason DSLs were fled in the first place). Two proven escapes to evaluate:
+
+- **Temporal's model:** orchestration stays code, but deterministic code whose
+  effects all route through the engine and are event-logged — durability and
+  resume by replay, full expressiveness, no static DAG.
+- **Starlark** as the orchestration dialect: Python *syntax* (LLM generation
+  quality carries over) but hermetic and deterministic by construction —
+  evaluates to the IR, and its determinism makes replay sound.
+
+Working bet on the underlying empirical question (familiar-but-uncheckable vs
+constrained-but-verifiable): **verification-loop quality beats generation
+familiarity** — agents iterate, and a verifier that answers in seconds converts
+generation errors from cluster-hours to nothing. Shape: **sk8s-IR + a durable
+in-cluster interpreter (the driver's successor) + two frontends** (eager Python
+for humans; Starlark-or-direct-IR for agents). v2's job layer unchanged
+underneath — a new floor, not a teardown.
+
 ## Candidate v2.x fixes (small, could land before any v3)
 
 - `MapFailed` should carry the successes (`e.results`), not just failures.
