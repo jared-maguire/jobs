@@ -1277,3 +1277,77 @@ def test_main_reads_sys_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     pushed: list[str] = []
     monkeypatch.setattr(images, "push", lambda tag, **kw: pushed.append(tag))
     assert cli.main() == 0 and pushed == ["t"]
+
+
+# --- config: the worker image (written when known, hinted when not) --------------------------------
+
+
+def _hint_line() -> str:
+    return (
+        f'# image = "YOURREG/sk8s-base:py{sys.version_info.major}.{sys.version_info.minor}"'
+        "  (build-your-own: see README)"
+    )
+
+
+def test_config_image_flag_writes_image(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
+    _fakes(monkeypatch)
+    assert cli.run(["config", "--namespace", NS, "--image", "reg/sk8s-base:py3.12"]) == 0
+    text = env.read_text()
+    assert tomllib.loads(text)["image"] == "reg/sk8s-base:py3.12"
+    assert "YOURREG" not in text  # nothing left to hint at
+
+
+def test_config_takes_the_image_from_sk8s_image_env(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
+    _fakes(monkeypatch)
+    monkeypatch.setenv("SK8S_IMAGE", "reg/from-env:1")
+    assert cli.run(["config", "--namespace", NS]) == 0
+    assert tomllib.loads(env.read_text())["image"] == "reg/from-env:1"
+
+
+def test_config_image_flag_beats_env(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
+    _fakes(monkeypatch)
+    monkeypatch.setenv("SK8S_IMAGE", "reg/from-env:1")
+    assert cli.run(["config", "--namespace", NS, "--image", "reg/flag:2"]) == 0
+    assert tomllib.loads(env.read_text())["image"] == "reg/flag:2"
+
+
+def test_config_without_an_image_writes_a_commented_hint(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
+    _fakes(monkeypatch)
+    assert cli.run(["config", "--namespace", NS]) == 0
+    text = env.read_text()
+    assert _hint_line() in text.splitlines()
+    assert "image" not in tomllib.loads(text)  # a comment, not a setting
+    cli.run(["config", "--namespace", NS])  # re-running converges: one hint, not two
+    assert env.read_text().count("YOURREG") == 1
+
+
+def test_config_hint_stays_above_the_tables(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
+    _fakes(monkeypatch)
+    env.parent.mkdir(parents=True)
+    env.write_text('[store_env]\nAWS_KEY = "abc"\n')
+    cli.run(["config", "--namespace", NS])
+    lines = env.read_text().splitlines()
+    assert lines.index(_hint_line()) < lines.index("[store_env]")
+    assert tomllib.loads(env.read_text())["store_env"] == {"AWS_KEY": "abc"}
+
+
+def test_config_keeps_an_existing_image_and_hints_nothing(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
+    _fakes(monkeypatch)
+    env.parent.mkdir(parents=True)
+    env.write_text('image = "me/img:1"\n')
+    cli.run(["config", "--namespace", NS])
+    assert tomllib.loads(env.read_text())["image"] == "me/img:1"
+    assert "YOURREG" not in env.read_text()
+
+
+def test_config_with_an_image_prefix_needs_no_hint(tmp_path: Path) -> None:
+    path = tmp_path / "c.toml"
+    cli.write_config(path, {"namespace": "n", "image_prefix": "reg.example/proj/"})
+    assert "YOURREG" not in path.read_text()
+
+
+def test_config_help_documents_image(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.run(["config", "--help"])
+    out = capsys.readouterr().out
+    assert "--image" in out and "SK8S_IMAGE" in out

@@ -565,6 +565,8 @@ def test_worker_probe_image_pull_failure_gets_an_image_hint() -> None:
 def test_worker_probe_with_no_image_configured_says_so() -> None:
     c = _doctor_gs(Submitter(raises=ImageNotConfigured()))[WORKER]
     assert not c.ok and "no worker image" in c.fix_hint and "SK8S_IMAGE" in c.fix_hint
+    # the same remedy `sk8s config` and the commented hint in the toml point at
+    assert "sk8s config --image" in c.fix_hint and "image_prefix" in c.fix_hint
     assert "Workload Identity" not in c.fix_hint and "client-side" not in c.fix_hint
 
 

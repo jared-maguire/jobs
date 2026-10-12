@@ -95,9 +95,9 @@ class ImageNotConfigured(Sk8sError):
             "  docker build -f docker/Dockerfile.worker --build-arg PYTHON_VERSION=<your client's "
             "minor> -t REGISTRY/sk8s-worker:TAG .\n"
             "  docker push REGISTRY/sk8s-worker:TAG\n"
-            "then pass image='REGISTRY/sk8s-worker:TAG' per job, or set it once: export "
-            "SK8S_IMAGE=... (or `image = \"...\"` in config.toml; `image_prefix` composes the "
-            "name instead).\n"
+            "then pass image='REGISTRY/sk8s-worker:TAG' per job, or set it once: "
+            "`sk8s config --image REGISTRY/sk8s-worker:TAG` (writes config.toml), export "
+            "SK8S_IMAGE=..., or set `image_prefix` to compose the name instead.\n"
             "See the README quickstart, \"Build the worker image and push it\"."
         )
 

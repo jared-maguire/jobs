@@ -149,8 +149,9 @@ def _worker_probe_hint(profile: ClusterProfile, exc: BaseException) -> str:
     if isinstance(exc, ImageNotConfigured):
         return (
             "no worker image is configured, so the probe pod was never created: build one and "
-            "set SK8S_IMAGE (or `image` in your config); `sk8s config` writes an image_prefix "
-            f"only on GKE ({detail})"
+            "run `sk8s config --image REGISTRY/IMG:TAG` (or export SK8S_IMAGE, or set `image` in "
+            "your config; a GKE `sk8s config` derives an image_prefix instead) "
+            f"({detail})"
         )
     if isinstance(exc, ImagePullError):
         return (
