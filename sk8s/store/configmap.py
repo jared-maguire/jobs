@@ -82,7 +82,7 @@ class ConfigMapStore(BlobStore):
         return self.uri_for(key)
 
     # --- conditional writes: create-only = create-if-absent; resourceVersion = the version token.
-    # SPIKE-CCW E7: replace/patch WITHOUT a resourceVersion is a blind write, so put_if_version
+    # Spec Appendix B.1 (ConfigMap): replace/patch WITHOUT a resourceVersion is a blind write, so put_if_version
     # always sends one (merge-patch with metadata.resourceVersion in the body: 409 when stale).
     def put_if_absent(self, key: str, data: bytes, owner: Any | None = None) -> bool:
         self._check_size(key, data)

@@ -191,8 +191,13 @@ def sweep(
                 if sha in roots2:
                     report.kept_reachable += 1
                     continue
-                # Re-read the index immediately before this delete: a workflow that adopted the
-                # object (touch, then record) since the scan makes it young again.
+                # INVARIANT "touch-before-record": a workflow adopting an existing object first
+                # touches its index entry (``last_referenced``) and only THEN records the hash in
+                # its reference set (cas.ArtifactStore.record_refs). So at any instant either the
+                # record is visible to a root re-read, or the touch is visible here. Re-reading
+                # the index immediately before each delete therefore stands in for re-reading the
+                # roots per delete (spec 3.3 rule 2: S3 ignores conditional delete, so the
+                # re-check, not a precondition, is what protects the object).
                 idx = _read_json(store, cas.index_key(sha))
                 last = cas._parse_ts((idx or {}).get("last_referenced"))
                 if last is not None and (_utc_now() if now is None else when) - last < floor:

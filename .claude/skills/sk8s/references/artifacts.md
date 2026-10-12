@@ -29,13 +29,18 @@ bam.download("s1.bam")                                   # hash-verified local c
 - **Publish is how you keep things.** CAS objects are workflow-scoped: killing/expiring a
   workflow, then `sk8s clean`, collects them after 300 s unless published (copy=True keeps the
   CAS copy too) or referenced by a memo entry younger than 7 days.
-- `publish` never overwrites a different object (`PublishConflict`); re-publishing the same
-  content to the same name is a no-op; it never deletes an external input or an earlier publish.
+- `publish`: create-if-absent is real on GCS and local paths (a different object there ->
+  `PublishConflict`; same content again -> no-op) but only best-effort HEAD-then-copy on S3/MinIO
+  (S3 ignores preconditions on copy); refs are last-writer-wins per the spec. A move retires the
+  CAS copy only if this call did the copy; it never deletes an external input or an earlier
+  publish. To put different bytes on a taken name, delete the old object first (no `overwrite=` yet).
 - **Memo is opt-in** (`memo=True`, `SK8S_MEMO=1`, `memo = true`); `memo_salt="v2"` invalidates;
   not with `batch_size > 1`. Failed/cancelled/lost runs never write an entry. A hit needs every
   output artifact to still exist, else it recomputes. The key sees the function's bytecode,
-  closure, named globals and called helpers, args, input artifact hashes, the image STRING and
-  python minor - NOT other modules' code, runtime file reads, env vars, mutable volume contents.
+  closure, named globals and called helpers (for a bound method / callable object: the instance
+  state and its class code incl. inherited methods), args, input artifact hashes, the image STRING
+  and python minor - NOT other modules' code, runtime file reads, env vars, mutable volume
+  contents. Edited code the key cannot see -> bump `memo_salt`.
   Use an image digest, not `:latest`; when unsure, bump `memo_salt`.
 - A memo hit is a resolved future with `fut.memo_hit == True`; no pod, no Job.
 - The worker image needs the `gcs` extra for `gs://` locations (`docker/Dockerfile.dev

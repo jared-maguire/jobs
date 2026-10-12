@@ -1,6 +1,6 @@
 """The ONE bounded, jittered retry helper for optimistic (conditional) store writes.
 
-Spike (SPIKE-CCW.md, E2/E7): under 10-way contention on one hot key, GCS and the ConfigMap
+Spike evidence (spec Appendix B.1; live runs E2/E7): under 10-way contention on one hot key, GCS and the ConfigMap
 store both converge with no lost updates, but a writer can lose ~5 races per success (worst
 case 8-9 for one increment, 38 over five). An unbounded loop has no fairness, so every
 optimistic loop in sk8s goes through here: a hard attempt cap and full-jitter exponential

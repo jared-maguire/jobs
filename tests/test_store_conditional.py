@@ -174,7 +174,7 @@ def test_local_leaves_no_temp_files_behind(tmp_path: Path) -> None:
 
 
 def test_configmap_put_if_version_sends_a_resource_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SPIKE-CCW E7: a patch WITHOUT metadata.resourceVersion is a blind write. Never send one."""
+    """Spec Appendix B.1 (ConfigMap): a patch WITHOUT metadata.resourceVersion is a blind write. Never send one."""
     core = FakeCoreV1()
     s = ConfigMapStore("ns1", core)
     s.put_if_absent(KEY, b"v1")

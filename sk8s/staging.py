@@ -167,12 +167,7 @@ def stage_artifact(astore: ArtifactStore, art: Artifact, dest: Path) -> tuple[st
 
     Verifies against a known hash; learns and indexes the hash of an external reference
     (the lazy hash-on-first-staging of SPEC 3.2)."""
-    problems: list[str] = []
-    res = astore.resolve(art, problems)
-    if res is None:
-        raise cas.not_available(art, problems)
-    reader, _ = store_for_uri(res.uri, astore.store)
-    sha, size = cas.fetch(reader, res.uri, dest, version=res.version, expected_sha=art.sha256)
+    sha, size, res = cas.fetch_artifact(astore, art, dest)
     if res.kind in ("own", "external") and art.store is None:
         # An external reference: remember where this content was seen (and its hash), so the
         # hash is known for next time and provenance can name it.

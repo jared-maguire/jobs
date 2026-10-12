@@ -1,6 +1,6 @@
 """Dict-backed fake of the google-cloud-storage client surface that GCSStore uses.
 
-Models the semantics verified live in SPIKE-CCW.md: generations, ``if_generation_match``
+Models the semantics verified live (spec Appendix B.1): generations, ``if_generation_match``
 (0 = create-if-absent; a missing object never matches N > 0), a plain content overwrite
 WIPES custom metadata, a read pinned to an overwritten generation is a 404, ``rewrite``
 preserves source metadata unless the destination blob carries its own.

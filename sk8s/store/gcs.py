@@ -60,7 +60,7 @@ class GCSStore(BlobStore):
         self._bucket.blob(self._full_key(key)).upload_from_string(data)
         return self.uri_for(key)
 
-    # --- conditional writes (SPIKE-CCW: generation preconditions; verified live) ----------
+    # --- conditional writes (spec Appendix B.1: generation preconditions; verified live) ----------
     # ifGenerationMatch=0 is create-if-absent; =N is compare-and-swap on the generation. A
     # missing object never satisfies N > 0 (also a 412), so "changed" and "gone" read alike.
     def put_if_absent(self, key: str, data: bytes, owner: Any | None = None) -> bool:
@@ -163,7 +163,7 @@ class GCSStore(BlobStore):
         if_absent: bool = False,
     ) -> bool:
         # Metadata is attached to the upload itself so it lands atomically with the content: a
-        # content write WITHOUT metadata would wipe it (SPIKE-CCW E3), so there is no window in
+        # content write WITHOUT metadata would wipe it (spec Appendix B.1: the overwrite-wipes-metadata trap), so there is no window in
         # which the object exists unlabelled.
         blob = self._bucket.blob(self._full_key(key))
         if metadata:
@@ -216,7 +216,7 @@ class GCSStore(BlobStore):
         src_blob = self._bucket.blob(self._key_of(src_uri))
         dst_blob = dst._bucket.blob(dst._full_key(dst_key))
         if metadata is not None:
-            dst_blob.metadata = dict(metadata)  # replaces the source's wholesale (SPIKE-CCW E3)
+            dst_blob.metadata = dict(metadata)  # replaces the source's wholesale (spec Appendix B.1: the overwrite-wipes-metadata trap)
         token: str | None = None
         try:
             while True:  # rewrite is resumable: large or cross-location copies take several calls

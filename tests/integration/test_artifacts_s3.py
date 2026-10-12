@@ -1,6 +1,6 @@
 """Artifact layer against an in-cluster MinIO: the S3 conditional-write paths, live.
 
-SPIKE-CCW left the S3/MinIO column UNVERIFIED; this suite is that verification for the
+The conditional-writes spike left the S3/MinIO column UNVERIFIED; this suite is that verification for the
 operations the artifact layer uses (PutObject If-None-Match / If-Match, CopyObject metadata,
 HEAD metadata, multipart upload, listing) and then runs the whole layer over an s3:// store.
 It reuses the MinIO fixture of test_store_s3_minio (deployed in the suite namespace by
@@ -65,7 +65,7 @@ def err_of(exc: BaseException) -> tuple[str, int]:
 
 
 def test_what_does_minio_actually_say(s3_client: Any, bucket: str) -> None:  # noqa: F811
-    """The raw facts SPIKE-CCW could not get: the error code/status of each conditional failure."""
+    """The raw facts the spike could not get: the error code/status of each conditional failure."""
     key = f"probe/{os.urandom(4).hex()}"
     s3_client.put_object(Bucket=bucket, Key=key, Body=b"a", IfNoneMatch="*")
     with pytest.raises(Exception) as exists:

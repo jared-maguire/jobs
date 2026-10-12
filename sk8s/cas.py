@@ -1,6 +1,6 @@
 """The content-addressed artifact store: layout, index manifests, workflow reference sets.
 
-Layout (all keys relative to the configured store; SPEC-DRAFT section 3.1)::
+Layout (all keys relative to the configured store; docs/superpowers/specs/2026-10-12-sk8s-v3-design.md section 3.1)::
 
     artifacts/cas/sha256/<hh>/<hash>            the bytes, immutable
     artifacts/index/sha256/<hh>/<hash>.json     manifest: locations, size, checksums, provenance
@@ -13,7 +13,7 @@ Every index/manifest write is an optimistic, preconditioned read-modify-write th
 
 Deviation from the spec text, on purpose: the reference set is sharded per writer. One
 ``workflows/<wf>/artifacts.json`` appended to by every pod of a 1000-way map is exactly the
-"hot key" SPIKE-CCW warns about (~5 lost races per success at 10-way). Clients record into the
+"hot key" the spike evidence warns about (spec Appendix B.1) (~5 lost races per success at 10-way). Clients record into the
 workflow file; each job records its outputs into its own ``<job>`` shard (a single writer, so
 no contention). The GC mark phase unions every ``artifacts.json`` under ``workflows/``.
 """
@@ -29,7 +29,7 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Iterator
 
 from sk8s.errors import (
     ArtifactChanged, ArtifactError, ArtifactNotFound, BlobNotFound, PublishConflict, StoreError,
@@ -425,6 +425,13 @@ class ArtifactStore:
     def resolve(self, artifact: Artifact, problems: list[str] | None = None) -> Resolved | None:
         """The first location that still exists with the right size and pinned version, or None.
         ``problems`` (if given) collects one line per location that was tried and rejected."""
+        return next(self.resolve_all(artifact, problems), None)
+
+    def resolve_all(
+        self, artifact: Artifact, problems: list[str] | None = None
+    ) -> Iterator[Resolved]:
+        """Every location that passes resolve()'s checks, best first (lazily: a caller that
+        finds the first one's BYTES wrong - a hash mismatch - can try the next)."""
         notes = problems if problems is not None else []
         for kind, uri, version in self.candidate_locations(artifact):
             try:
@@ -442,8 +449,7 @@ class ArtifactStore:
             if version is not None and st.version != version:
                 notes.append(f"{uri}: changed (version {st.version}, pinned {version})")
                 continue
-            return Resolved(uri=uri, kind=kind, version=st.version, stat=st)
-        return None
+            yield Resolved(uri=uri, kind=kind, version=st.version, stat=st)
 
 
 # --- fetching, publishing, downloading -----------------------------------------------------
@@ -537,6 +543,7 @@ def publish(
     metadata = {META_SHA: sha, META_PRODUCED_BY: art.produced_by or "unknown"}
 
     existing = dst_store.stat(dest_uri)
+    performed = False  # did THIS call put the bytes at the destination?
     if existing is None:
         done = reader.server_copy(res.uri, dst_store, dst_key, metadata=metadata, if_absent=True)
         if done is None:  # no server-side path between these stores: stream through a temp file
@@ -549,7 +556,8 @@ def publish(
                 done = dst_store.upload_file(dst_key, tmp, metadata=metadata, if_absent=True)
             finally:
                 tmp.unlink(missing_ok=True)
-        landed = dst_store.stat(dest_uri)  # also covers losing the create race to a same-content publish
+        performed = bool(done)  # False: lost the create race to someone else's publish
+        landed = dst_store.stat(dest_uri)
     else:
         landed = existing
     if landed is None:
@@ -570,7 +578,11 @@ def publish(
     out = _moved(art, dest_uri, sha, size, landed.version)
     if astore is not None and art.store is not None:
         cas_uri = astore.store.uri_for(cas_key(sha))
-        retire = not copy and res.uri == cas_uri
+        # Retire the CAS copy only if this call performed the copy. An already-present destination
+        # (an idempotent re-publish, or a race lost) is accepted on its metadata sha alone, and
+        # that label is not tied to the bytes on every store (the local sidecar is not), so the
+        # only verified copy is kept: it is treated as copy=True.
+        retire = not copy and res.uri == cas_uri and performed
         astore.update_index(
             sha, size=size, touch=True,
             add=[location("published", dest_uri, landed.version, copy=copy or not retire)],
@@ -609,6 +621,43 @@ def _resolve_bare(art: Artifact, problems: list[str]) -> Resolved | None:
     return Resolved(uri=art.uri, kind="own", version=st.version, stat=st)
 
 
+def fetch_artifact(
+    astore: ArtifactStore | None, art: Artifact, dest: Path
+) -> tuple[str, int, Resolved]:
+    """Stream an artifact to ``dest`` from the first location whose BYTES verify.
+
+    A location can pass the cheap checks (exists, right size, pinned version) and still hold
+    other bytes - e.g. a published object overwritten in place by a same-size file, reached through
+    a handle that has no version pin. On a hash mismatch (or a vanished object) the next known
+    location is tried (the CAS copy that ``copy=True`` kept, say); only when every candidate
+    fails is ``ArtifactChanged`` (preferred over NotFound, as the more informative) raised."""
+    problems: list[str] = []
+    if astore is not None:
+        candidates: Iterator[Resolved] = astore.resolve_all(art, problems)
+    else:
+        bare = _resolve_bare(art, problems)
+        candidates = iter(() if bare is None else (bare,))
+    changed: ArtifactError | None = None
+    gone: ArtifactError | None = None
+    for res in candidates:
+        reader, _ = store_for_uri(res.uri, astore.store if astore else None)
+        try:
+            sha, size = fetch(reader, res.uri, dest, version=res.version, expected_sha=art.sha256)
+        except ArtifactChanged as exc:
+            changed = changed or exc
+            log.info("location %s did not verify (%s); trying the next", res.uri, exc)
+            continue
+        except ArtifactNotFound as exc:
+            gone = gone or exc
+            continue
+        return sha, size, res
+    if changed is not None:
+        raise changed
+    if gone is not None:
+        raise gone
+    raise not_available(art, problems)
+
+
 def download(astore: ArtifactStore | None, art: Artifact, path: str | os.PathLike[str]) -> Path:
     """Copy an artifact's bytes to a local ``path`` (a directory gets ``art.filename`` inside),
     verifying the hash as they stream. Written to a temp name and renamed, so a failed download
@@ -616,15 +665,10 @@ def download(astore: ArtifactStore | None, art: Artifact, path: str | os.PathLik
     target = Path(path)
     if target.is_dir():
         target = target / posixpath.basename(art.filename)
-    problems: list[str] = []
-    res = astore.resolve(art, problems) if astore is not None else _resolve_bare(art, problems)
-    if res is None:
-        raise not_available(art, problems)
-    reader, _ = store_for_uri(res.uri, astore.store if astore else None)
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_name(target.name + ".sk8s-part")
     try:
-        fetch(reader, res.uri, part, version=res.version, expected_sha=art.sha256)
+        fetch_artifact(astore, art, part)
         os.replace(part, target)
     finally:
         part.unlink(missing_ok=True)

@@ -327,3 +327,70 @@ def test_uri_access_reuses_the_configured_stores_client() -> None:
     hint = S3Store("cfg-bucket", "p", client=fake)
     other, key = cas.store_for_uri("s3://elsewhere/a/b", hint)
     assert other._client is fake and key == "a/b"  # carries the configured endpoint/credentials
+
+
+# --- final-round regressions ---------------------------------------------------------------------------------
+
+
+def test_a_move_onto_an_already_published_name_keeps_the_cas_copy(world: dict[str, Any]) -> None:
+    """The destination was NOT written by this call (its sidecar label alone vouches for it), so
+    the only verified copy must survive: the move degrades to copy=True."""
+    astore: ArtifactStore = world["astore"]
+    art: Artifact = world["art"]
+    dst = dest_local(world)
+    art.publish(dst, copy=True)  # earlier publish: both copies exist
+    again = art.publish(dst)  # a "move" onto the name that already holds it
+    assert again.uri == f"local:{dst}"
+    assert astore.store.stat(art.uri) is not None  # the CAS copy is still there
+    idx = astore.read_index(SHA)
+    assert idx is not None and {loc["kind"] for loc in idx["locations"]} == {"cas", "published"}
+
+
+def test_a_move_whose_destination_was_overwritten_in_place_cannot_lose_the_only_copy(world: dict[str, Any]) -> None:
+    """The local-store sidecar outlives an overwrite; a same-size file there still 'matches' the label."""
+    astore: ArtifactStore = world["astore"]
+    art: Artifact = world["art"]
+    dst = Path(dest_local(world))
+    art.publish(str(dst), copy=True)
+    dst.write_bytes(b"X" * len(DATA))  # same size, sidecar intact
+    art.publish(str(dst))
+    assert astore.store.get(art.uri) == DATA  # the CAS copy was not retired on the strength of the label
+
+
+def test_staging_falls_back_to_the_next_location_on_a_hash_mismatch(world: dict[str, Any], tmp_path: Path) -> None:
+    import dataclasses
+
+    from sk8s import staging
+
+    astore: ArtifactStore = world["astore"]
+    art: Artifact = world["art"]
+    dst = Path(dest_local(world))
+    pub = art.publish(str(dst), copy=True)
+    handle = dataclasses.replace(pub, version=None)  # a version-less handle at the published object
+    dst.write_bytes(b"Y" * len(DATA))  # overwritten in place with SAME-size different bytes
+    out = tmp_path / "staged"
+    sha, size = staging.stage_artifact(astore, handle, out)
+    assert sha == SHA and size == len(DATA) and out.read_bytes() == DATA  # served from the CAS copy
+    assert handle.download(tmp_path / "dl").read_bytes() == DATA  # download() falls back too
+    # every candidate bad -> ArtifactChanged is the final error, and nothing is left behind
+    astore.store.put(cas_key(SHA), b"Z" * len(DATA))
+    out2 = tmp_path / "staged2"
+    with pytest.raises(ArtifactChanged):
+        staging.stage_artifact(astore, handle, out2)
+    assert not out2.exists()
+
+
+def test_staging_reports_changed_not_missing_when_one_location_is_gone_and_one_is_wrong(
+    world: dict[str, Any], tmp_path: Path
+) -> None:
+    import dataclasses
+
+    from sk8s import staging
+
+    astore: ArtifactStore = world["astore"]
+    pub = world["art"].publish(dest_local(world), copy=True)
+    handle = dataclasses.replace(pub, version=None)
+    Path(dest_local(world)).write_bytes(b"Y" * len(DATA))
+    astore.store.delete(world["art"].uri)  # the CAS copy is gone
+    with pytest.raises(ArtifactChanged):
+        staging.stage_artifact(astore, handle, tmp_path / "x")

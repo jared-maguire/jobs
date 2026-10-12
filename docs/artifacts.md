@@ -3,7 +3,7 @@
 Artifacts are files that flow between jobs without you managing `gs://` paths by hand. Bytes
 live once in a content-addressed store (CAS) under your configured store; a job gets real
 files in, hands real files out, and `sk8s` records what produced what. This is the data plane
-of the v3 design (`SPEC-DRAFT.md` section 3); everything below is shipped and tested, with the
+of the v3 design (`docs/superpowers/specs/2026-10-12-sk8s-v3-design.md` section 3); everything below is shipped and tested, with the
 gaps listed at the end.
 
 ```python
@@ -100,9 +100,25 @@ copy), otherwise streamed with a hash check. The destination object carries
 `sk8s-artifact-sha256` and `sk8s-produced-by`; the metadata is sent *with* the content (a later
 content write without it would wipe it on GCS) and read back before anything is retired.
 
-Publish never overwrites a different object (`PublishConflict`), treats re-publishing the same
-content to the same name as a no-op, and only ever retires a CAS copy: an external reference or
-an earlier published ref is copied from, never deleted.
+What publish promises, honestly, per backend:
+
+- **GCS and local paths:** the destination is created only if absent (GCS `rewrite` with
+  `ifGenerationMatch=0`; a hard link locally). Publishing onto a name that already holds
+  *different* content fails with `PublishConflict`; re-publishing the same content to the same
+  name is a no-op. A move retires the CAS copy only if THIS call performed the copy - if the name
+  already held the content, the CAS copy is kept (the move degrades to `copy=True`), because the
+  metadata label alone is not proof of the bytes on every store.
+- **S3 / MinIO:** create-if-absent is best-effort (a HEAD, then the copy): S3 silently ignores a
+  precondition on `CopyObject` (spec Appendix B.1), so two concurrent publishes of different
+  content to one name can still overwrite each other.
+- The spec (3.3 rule 3) calls published refs last-writer-wins, like any human-named file; the
+  refusal above is a deliberate extra safety on top of that, not something to rely on across
+  backends. Identity lives in the CAS and its index, which is the authoritative provenance record;
+  the object metadata is decoration that is verified, never trusted as the only copy.
+- To publish *different* bytes to a name that is taken you must delete the old object yourself
+  first. There is no `overwrite=` option yet (future work).
+- An external reference (not CAS-resident) is always copied and never deleted: sk8s does not own
+  those bytes.
 
 ## Memoization
 
@@ -119,9 +135,13 @@ write one - and a hit is honoured only if every output artifact still exists som
 (otherwise it recomputes and rewrites the entry).
 
 **Read this before trusting a hit.** The key sees the function's bytecode, constants, defaults,
-closure, the globals it names and (recursively) the plain functions it calls - not other
-modules' code, files read at run time, environment variables, the network, the clock, or what a
-mutable volume contains. Use an image *digest*, not `:latest`. Builtin arguments (numbers,
+closure, the globals it names and (recursively) the plain functions it calls. For a bound method
+or a callable object it also hashes the instance's state and the code of its class, including
+inherited methods, so editing a sibling or base-class method changes the key. It does NOT see other
+modules' code (an `import`ed library function's callees beyond the plain functions reached by
+name), files read at run time, environment variables, the network, the clock, or what a mutable
+volume contains. When you edit code the key cannot see, bump `memo_salt="v2"` (any new string) to
+invalidate. Use an image *digest*, not `:latest`. Builtin arguments (numbers,
 strings, bytes, lists, tuples, dicts, sets, `Path`) use a canonical encoding that is stable
 across processes and hash seeds; any other object falls back to its cloudpickle bytes, which can
 differ between processes (a spurious *miss*, never a false hit - but an object whose pickle is

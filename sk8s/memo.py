@@ -180,18 +180,22 @@ def _fp_class(cls: type, seen: set[int], depth: int) -> str:
     if id(cls) in seen or depth > _MAX_FP_DEPTH:
         return h.hexdigest()
     seen.add(id(cls))
-    for name in sorted(vars(cls)):
-        attr = vars(cls)[name]
-        if isinstance(attr, (staticmethod, classmethod)):
-            attr = attr.__func__
-        h.update(b"." + name.encode())
-        if isinstance(attr, types.FunctionType):
-            h.update(_fp_function(attr, seen, depth + 1).encode())
-        elif not name.startswith("__"):
-            try:
-                h.update(canonical(attr))
-            except _Opaque:
-                h.update(b"O" + type(attr).__qualname__.encode())
+    for klass in cls.__mro__:  # inherited methods are code the call can reach too
+        if klass.__module__ == "builtins":
+            continue
+        h.update(b"^" + f"{klass.__module__}.{klass.__qualname__}".encode())
+        for name in sorted(vars(klass)):
+            attr = vars(klass)[name]
+            if isinstance(attr, (staticmethod, classmethod)):
+                attr = attr.__func__
+            h.update(b"." + name.encode())
+            if isinstance(attr, types.FunctionType):
+                h.update(_fp_function(attr, seen, depth + 1).encode())
+            elif not name.startswith("__"):
+                try:
+                    h.update(canonical(attr))
+                except _Opaque:
+                    h.update(b"O" + type(attr).__qualname__.encode())
     return h.hexdigest()
 
 
@@ -207,6 +211,9 @@ def _fp_function(func: Callable[..., Any], seen: set[int], depth: int) -> str:
     if isinstance(func, types.MethodType):  # a bound method: the instance's state is an input
         h.update(b"method" + _fp_function(func.__func__, seen, depth).encode())
         h.update(canonical_or_pickle(func.__self__))
+        # ... and the CLASS of the instance: pickle names an importable class but does not carry
+        # its code, so editing a sibling/inherited method the call reaches must change the key.
+        h.update(_fp_class(type(func.__self__), seen, depth + 1).encode())
         return h.hexdigest()
     code = getattr(func, "__code__", None)
     if isinstance(code, types.CodeType):
@@ -224,8 +231,10 @@ def _fp_function(func: Callable[..., Any], seen: set[int], depth: int) -> str:
             else:
                 h.update(canonical_or_pickle(contents))
         return h.hexdigest()
-    # A builtin, a bound method, a callable object, a class: the pickle is all there is.
+    # A builtin, a callable object, a class: the pickle (plus, for an instance, its class code).
     h.update(canonical_or_pickle(func))
+    if not isinstance(func, type) and type(func).__module__ != "builtins":
+        h.update(_fp_class(type(func), seen, depth + 1).encode())
     return h.hexdigest()
 
 

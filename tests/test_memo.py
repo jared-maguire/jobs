@@ -683,3 +683,42 @@ def test_a_gated_out_run_writes_no_entry_and_a_stricter_gate_misses(tmp_path: Pa
     assert not again.memo_hit
     h.finish(again.job_name)
     assert again.result(timeout=10) == 6
+
+
+class _Base:
+    def helper(self, x: int) -> int:
+        return x + 1
+
+
+class _Calc(_Base):
+    def run(self, x: int) -> int:
+        return self.helper(x) * 2
+
+
+class _Callable:
+    def __call__(self, x: int) -> int:
+        return _Base().helper(x)
+
+
+def test_editing_a_sibling_or_inherited_method_changes_a_bound_methods_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    c = _Calc()
+    before = memo.function_fingerprint(c.run)
+
+    def new_helper(self: Any, x: int) -> int:
+        return x + 100
+
+    new_helper.__qualname__ = _Base.helper.__qualname__
+    monkeypatch.setattr(_Base, "helper", new_helper)  # a method of the BASE class run() reaches
+    assert memo.function_fingerprint(c.run) != before
+
+
+def test_editing_a_class_the_callable_object_belongs_to_changes_its_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    obj = _Callable()
+    before = memo.function_fingerprint(obj)
+
+    def new_call(self: Any, x: int) -> int:
+        return x * 7
+
+    new_call.__qualname__ = _Callable.__call__.__qualname__
+    monkeypatch.setattr(_Callable, "__call__", new_call)
+    assert memo.function_fingerprint(obj) != before

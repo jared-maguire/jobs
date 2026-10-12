@@ -71,7 +71,7 @@ class BlobStore(ABC):
         raise NotImplementedError(f"{type(self).__name__} cannot count blobs under a prefix")
 
     # --- conditional writes (the artifact layer's concurrency primitives) -------------
-    # Verified semantics per backend are in SPIKE-CCW.md. Versions are opaque strings: compare
+    # Verified semantics per backend are in docs/superpowers/specs/2026-10-12-sk8s-v3-design.md Appendix B.1. Versions are opaque strings: compare
     # for equality only. None of these fall back to an unconditional write.
 
     def put_if_absent(self, key: str, data: bytes, owner: Any | None = None) -> bool:

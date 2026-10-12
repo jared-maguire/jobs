@@ -2,7 +2,7 @@
 
 Conditional writes (PutObject ``IfNoneMatch="*"`` / ``IfMatch=<etag>``) are modelled on what
 tests/integration/test_artifacts_s3.py observed live against MinIO RELEASE.2026-09-22 (the
-S3/MinIO column SPIKE-CCW left open; real AWS S3 is NOT verified): 412 ``PreconditionFailed``
+S3/MinIO column the spike left open; real AWS S3 is NOT verified): 412 ``PreconditionFailed``
 for If-None-Match on an existing key and for a stale If-Match; 404 ``NoSuchKey`` for If-Match on
 a missing key. 409 ``ConditionalRequestConflict`` (documented by AWS for concurrent in-flight
 writes; never observed on MinIO) is injectable via ``inject_conflicts``. Like real S3, a
