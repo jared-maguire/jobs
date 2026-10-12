@@ -157,3 +157,69 @@ def test_worker_threads_s3_endpoint_to_store(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(RuntimeError):
         worker.main({"SK8S_STORE": "s3://b/p/", "SK8S_S3_ENDPOINT": "http://minio:9000"})
     assert seen["endpoint"] == "http://minio:9000"
+
+
+# --- expect= ------------------------------------------------------------------
+
+def run_worker_expect(tmp_path: Path, func, expect, args=()):  # type: ignore[no-untyped-def]
+    store = LocalStore(tmp_path)
+    payload_uri = store.put(
+        "wf/j/payload", serialize.encode_payload(func, args, {}, expect=expect)
+    )
+    env = {
+        "SK8S_STORE": f"local:{tmp_path}",
+        "SK8S_PAYLOAD_URI": payload_uri,
+        "SK8S_RESULT_KEY": "wf/j/result",
+    }
+    return worker.main(env), store.get(store.uri_for("wf/j/result"))
+
+
+def test_expectation_passes(tmp_path: Path) -> None:
+    code, blob = run_worker_expect(tmp_path, lambda x: x * 2, lambda r: r == 42 or "wrong", (21,))
+    assert code == 0
+    assert serialize.decode_result(blob) == 42
+
+
+def test_expectation_failure_is_typed_exit_1_and_result_kept(tmp_path: Path) -> None:
+    from sk8s.errors import ExpectationFailed
+
+    code, blob = run_worker_expect(
+        tmp_path, lambda: {"mapped": 0.61}, lambda r: f"mapped {r['mapped']:.0%} < 90%"
+    )
+    assert code == 1
+    with pytest.raises(ExpectationFailed) as exc_info:
+        serialize.decode_result(blob)
+    assert exc_info.value.message == "mapped 61% < 90%"
+    assert "0.61" in exc_info.value.result_repr
+    assert isinstance(exc_info.value.__cause__, RemoteTraceback)
+    assert serialize.load_result_value(blob) == {"mapped": 0.61}  # result still inspectable
+
+
+def test_function_exception_is_not_an_expectation_failure(tmp_path: Path) -> None:
+    called = []
+
+    def boom() -> None:
+        raise KeyError("missing")
+
+    code, blob = run_worker_expect(tmp_path, boom, lambda r: called.append(r))
+    assert code == 1
+    with pytest.raises(KeyError):
+        serialize.decode_result(blob)
+    assert called == []  # the expectation never ran
+
+
+def test_expectation_that_raises_fails_semantically(tmp_path: Path) -> None:
+    from sk8s.errors import ExpectationFailed
+
+    def gate(r: int) -> None:
+        assert r > 100, "too small"
+
+    code, blob = run_worker_expect(tmp_path, lambda: 1, gate)
+    assert code == 1
+    with pytest.raises(ExpectationFailed, match="too small"):
+        serialize.decode_result(blob)
+
+
+def test_legacy_payload_without_expect_still_runs(tmp_path: Path) -> None:
+    code, blob = run_worker(tmp_path, lambda: 7)
+    assert code == 0 and serialize.decode_result(blob) == 7

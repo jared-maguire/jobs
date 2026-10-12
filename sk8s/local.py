@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
+from sk8s import expect as expectations
 from sk8s import serialize, spec
 from sk8s.errors import BlobNotFound, JobTimeout, PodFailed
 from sk8s.future import JobFuture
@@ -59,10 +60,13 @@ class LocalCluster:
         for k in IGNORED_OPTIONS:
             kwargs.pop(k, None)  # accepted for parity; meaningless locally
         kwargs.pop("keep_results", None)
+        expect = kwargs.pop("expect", None)
+        if expect is not None:
+            expectations.require_callable(expect)
         name = spec.job_name(kwargs.pop("name_prefix", "job"))
         payload_uri = self.store.put(
             f"{self.workflow_id}/{name}/payload",
-            serialize.encode_payload(func, args, kwargs),
+            serialize.encode_payload(func, args, kwargs, expect=expect),
         )
         result_key = f"{self.workflow_id}/{name}/result"
         fut = JobFuture(name, self.workflow_id, backend=self)

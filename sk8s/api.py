@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterable
 
 import cloudpickle  # type: ignore[import-untyped]  # no py.typed marker upstream
 
+from sk8s import expect as expectations
 from sk8s.errors import MapFailed, RemoteException
 from sk8s.future import JobFuture
 
@@ -107,17 +108,22 @@ def _run_batch(
     items: list[Any],
     star: bool,
     kwargs: dict[str, Any] | None = None,
+    expect: Callable[..., Any] | None = None,
 ) -> list[tuple[str, Any]]:
     """Run ``func`` over ``items`` inside one job.
 
     Returns one outcome per item, in order: ``("ok", value)`` or ``("err", exc)``.
+    ``expect`` is checked per item (a batch is one job, but the expectation is about each
+    item's result): a rejected item becomes ``("err", ExpectationFailed)``.
     Module-level so it serializes by reference rather than by value.
     """
     kw = kwargs or {}
     out: list[tuple[str, Any]] = []
     for item in items:
         try:
-            out.append(("ok", func(*item, **kw) if star else func(item, **kw)))
+            value = func(*item, **kw) if star else func(item, **kw)
+            verdict = None if expect is None else expectations.check(expect, value)
+            out.append(("ok", value) if verdict is None else ("err", verdict.error))
         except BaseException as exc:  # noqa: BLE001
             out.append(_safe_outcome(exc))
     return out
@@ -211,11 +217,15 @@ def _submit_many(
     from sk8s.cluster import JOB_OPTIONS
 
     job_opts = {k: v for k, v in opts.items() if k in JOB_OPTIONS}
+    # The expectation is per item, so it rides inside the batch rather than on the job.
+    expect = job_opts.pop("expect", None)
+    if expect is not None:
+        expectations.require_callable(expect)
     func_kwargs = {k: v for k, v in opts.items() if k not in JOB_OPTIONS}
     item_futures: list[JobFuture] = []
     for start in range(0, len(items), batch_size):
         chunk = items[start:start + batch_size]
-        parent = submit_job(_run_batch, func, chunk, star, func_kwargs, **job_opts)
+        parent = submit_job(_run_batch, func, chunk, star, func_kwargs, expect, **job_opts)
         if parent is None:
             item_futures.extend(_unsubmitted() for _ in chunk)
             continue
