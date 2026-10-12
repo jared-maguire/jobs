@@ -342,6 +342,14 @@ and each stage names a missing layer. Each sub-item is independently shippable.
 
 ## Candidate v2.x fixes (small, could land before any v3)
 
+- **The conda image-build path should install sk8s from the local checkout, not
+  PyPI** (Jared, 2026-10-12 morning). `sk8s image build --conda ...` currently
+  pip-installs sk8s from PyPI inside the miniforge base — a documented dead end
+  pre-release and a violation of the build-your-own doctrine always. Fix: build
+  a wheel from the checkout on the fly and COPY it in. Payoff: bioconda tools
+  (bwa/samtools/bcftools) become a pure-Python one-liner via `images.build`,
+  and the NA12878 demo loses its Dockerfile entirely.
+
 - Done in v2.x: `MapFailed` carries the successes (`e.results`, `{index: value}`).
 - Done in v2.x: fail fast at submit when no image is configured. Build-your-own doctrine
   means the default name can never pull, so `run`/`submit`/`map` raise `ImageNotConfigured`
