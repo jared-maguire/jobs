@@ -102,11 +102,12 @@ Semantics to design around:
   `standard` class does). ROX patterns are GKE/real-CSI territory; on minikube,
   test with RWO single-node semantics.
 
-## Partial-failure harvesting (the MapFailed trap)
+## Partial-failure harvesting
 
-`sk8s.map` is all-or-nothing in its return: on any failure it raises `MapFailed`
-with only `(index, exception)` pairs. When N-3 good results must survive 3
-failures, hold the futures:
+`sk8s.map` is all-or-nothing in its return: on any failure it raises `MapFailed`.
+The simple path: `except sk8s.MapFailed as e:` then use `e.results` (`{index: value}`
+for every success) and `e.failures` (`[(index, exception), ...]`). When you need
+results as they land, or per-item timeout control, hold the futures instead:
 
 ```python
 futs = sk8s.submit_map(align, samples, image=IMG, max_concurrent=50)

@@ -1,6 +1,6 @@
 ---
 name: sk8s
-description: Use when running Python functions on a Kubernetes cluster with sk8s — submitting jobs, maps, or detached workflows; setting up a cluster or namespace for sk8s (minikube or GKE, as user or admin); building worker images; using volumes (scratch, shared-read reference data); or debugging sk8s errors like ImagePullError, VolumeWaitTimeout, MapFailed, ResultDecodeError, or pods stuck Pending.
+description: Use when running Python functions on a Kubernetes cluster with sk8s — submitting jobs, maps, or detached workflows; setting up a cluster or namespace for sk8s (minikube or GKE, as user or admin); building worker images; using volumes (scratch, shared-read reference data); or debugging sk8s errors like ImageNotConfigured, ImagePullError, VolumeWaitTimeout, MapFailed, ResultDecodeError, or pods stuck Pending.
 ---
 
 # sk8s: Python functions as Kubernetes jobs
@@ -46,8 +46,8 @@ and are self-sufficient for agents.
    docker/Dockerfile.worker --build-arg PYTHON_VERSION=3.X .`), push it to *your*
    registry, and layer deps on it. The worker's Python minor **must match the
    client's**, and the base has **no scientific stack**. Failures:
-   `ImagePullError` (unconfigured image), `VersionMismatch`, remote
-   `ModuleNotFoundError`.
+   `ImageNotConfigured` (no image set anywhere; raised at submit, before anything
+   is created), `VersionMismatch`, remote `ModuleNotFoundError`.
 3. **Volume mounts default to read-only.** Any job that writes passes
    `volumes={"name": {"access_mode": "rw"}}`. Failure: `OSError: Read-only file
    system` raised *by your function*.
@@ -55,8 +55,9 @@ and are self-sufficient for agents.
    futures). Close the laptop ⇒ orphaned work. `submit_workflow` detaches; attach
    from anywhere later — and collect with `result(delete=False)` if you'll look
    again.
-5. **`sk8s.map` raises `MapFailed` carrying only the failures** — completed
-   values are not on the exception. When partial results matter, keep the futures
+5. **`sk8s.map` raises `MapFailed` on any failed item, but the successes ride along**
+   — `e.results` is `{index: value}`, `e.failures` is `[(index, exc), ...]`. For
+   streaming results as they land, or per-item timeout control, keep the futures
    (`submit_map`) and harvest per-future (pattern in references/advanced.md).
 
 ## Quick reference
@@ -78,11 +79,11 @@ and are self-sufficient for agents.
 | Symptom | Cause → fix |
 |---|---|
 | `ResultDecodeError` on a *successful* job | client lacks the result type's module → install it client-side, or return builtins |
-| `ImagePullError` with no image configured | nothing is published — build your own base, set `image=`/`SK8S_IMAGE` |
+| `ImageNotConfigured` at submit | nothing is published — build your own base, set `image=`/`SK8S_IMAGE`/config `image` (or `image_prefix`) |
 | Remote `ModuleNotFoundError` | base image has no deps → `sk8s image build` or a Dockerfile layer |
 | `OSError: Read-only file system` in your function | mounts default ro → `{"access_mode": "rw"}` for the writer |
 | Everything gone after closing the laptop | tethered `submit` → `submit_workflow` |
 | Workflow gone when you attach the next day | `result()` deletes on success by default → `result(delete=False)` |
-| 47 good results lost because 3 failed | `MapFailed` carries failures only → per-future harvest pattern |
+| `map` raised and you want the 47 good results | they are on the exception: `e.results[i]`; use `submit_map` + per-future harvest for streaming/timeout control |
 | `sk8s doctor` red right after `--apply-cloud` on GKE | IAM propagation (~60s) → retry before debugging |
 | Writes to the config file clobbered another session | global default path → set `SK8S_CONFIG` per agent/CI run |

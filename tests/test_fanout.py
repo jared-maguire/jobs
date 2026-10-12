@@ -61,6 +61,7 @@ def test_batched_map_per_item_errors() -> None:
     with pytest.raises(MapFailed) as exc_info:
         sk8s.map(maybe, range(6), batch_size=4)
     assert sorted(i for i, _ in exc_info.value.failures) == [2, 5]
+    assert exc_info.value.results == {0: 0, 1: 1, 3: 3, 4: 4}
 
 
 def test_batched_submit_map_futures() -> None:

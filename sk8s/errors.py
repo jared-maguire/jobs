@@ -73,6 +73,26 @@ class ImagePullError(PodFailed):
         self.image = image
 
 
+class ImageNotConfigured(Sk8sError):
+    """No worker image is configured, and sk8s publishes none (you build your own).
+
+    Raised before anything is created, when ``image`` is unset in the job options, ``Config`` /
+    ``SK8S_IMAGE``, and no ``image_prefix`` is set to compose a name from.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "no worker image is configured, and sk8s publishes none: build your own and name it.\n"
+            "  docker build -f docker/Dockerfile.worker --build-arg PYTHON_VERSION=<your client's "
+            "minor> -t REGISTRY/sk8s-worker:TAG .\n"
+            "  docker push REGISTRY/sk8s-worker:TAG\n"
+            "then pass image='REGISTRY/sk8s-worker:TAG' per job, or set it once: export "
+            "SK8S_IMAGE=... (or `image = \"...\"` in config.toml; `image_prefix` composes the "
+            "name instead).\n"
+            "See the README quickstart, \"Build the worker image and push it\"."
+        )
+
+
 class VolumeError(Sk8sError):
     """Something is wrong with a volume the job asked to mount (base of the volume errors).
 
@@ -220,9 +240,22 @@ class RemoteException(Sk8sError):
 
 
 class MapFailed(Sk8sError):
-    def __init__(self, failures: list[tuple[int, BaseException]], total: int) -> None:
+    """``map``/``starmap`` finished with at least one failed item.
+
+    ``failures`` is ``[(index, exception), ...]``; ``results`` maps the index of every item that
+    completed successfully to its value (so the successes are not lost); ``total`` is the item
+    count. ``len(results) + len(failures) == total``.
+    """
+
+    def __init__(
+        self,
+        failures: list[tuple[int, BaseException]],
+        total: int,
+        results: dict[int, Any] | None = None,
+    ) -> None:
         self.failures = failures
         self.total = total
+        self.results: dict[int, Any] = {} if results is None else results
         first_i, first_e = failures[0]
         super().__init__(
             f"{len(failures)}/{total} map items failed; "

@@ -81,6 +81,23 @@ def test_map_failure_summary() -> None:
     )
 
 
+def test_map_failure_carries_the_successes() -> None:
+    def maybe_boom(x: int) -> int:
+        if x == 2:
+            raise ValueError("bad item")
+        return x * 10
+
+    with pytest.raises(MapFailed) as exc_info:
+        sk8s.map(maybe_boom, range(4))
+    assert exc_info.value.results == {0: 0, 1: 10, 3: 30}
+
+
+def test_starmap_failure_carries_the_successes() -> None:
+    with pytest.raises(MapFailed) as exc_info:
+        sk8s.starmap(lambda a, b: a // b, [(4, 2), (1, 0), (9, 3)])
+    assert exc_info.value.results == {0: 2, 2: 3}
+
+
 def test_starmap_failure_summary() -> None:
     with pytest.raises(MapFailed) as exc_info:
         sk8s.starmap(lambda a, b: a // b, [(4, 2), (1, 0), (9, 3)])

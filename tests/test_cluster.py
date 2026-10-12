@@ -10,7 +10,8 @@ from sk8s import anchors
 from sk8s.cluster import Cluster
 from sk8s.config import Config
 from sk8s.errors import (
-    BlobNotFound, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
+    BlobNotFound, ImageNotConfigured, ImagePullError, JobRejected, JobTimeout, PodFailed,
+    StoreError,
 )
 from sk8s.store.local import LocalStore
 from sk8s.watch import JobEvent
@@ -272,18 +273,79 @@ def test_workflow_id_reserved(tmp_path, monkeypatch, reserved) -> None:  # type:
         Harness(tmp_path)
 
 
-def test_default_image_fallback(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_image_prefix_composes_the_default_image_name(tmp_path) -> None:  # type: ignore[no-untyped-def]
     import sys
 
     import sk8s as pkg
     h = Harness(tmp_path)
-    h.cluster.config = Config(namespace="ns1")  # no image configured
+    h.cluster.config = Config(namespace="ns1", image_prefix="reg.example/team/")  # no image
     fut = h.cluster.submit(lambda: 1)
     expected = (
-        f"ghcr.io/jared-maguire/sk8s:{pkg.__version__}"
+        f"reg.example/team/ghcr.io/jared-maguire/sk8s:{pkg.__version__}"
         f"-py{sys.version_info.major}.{sys.version_info.minor}"
     )
     assert h.batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].image == expected
+
+
+def _unconfigured(tmp_path):  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    h.cluster.config = Config(namespace="ns1")  # no image, no image_prefix
+    return h
+
+
+def test_submit_without_any_image_fails_fast_and_creates_nothing(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = _unconfigured(tmp_path)
+    with pytest.raises(ImageNotConfigured, match="Dockerfile.worker"):
+        h.cluster.submit(lambda: 1)
+    assert h.batch.jobs == {}
+    assert h.cluster._anchor is None  # not even the workflow anchor
+    assert not any(tmp_path.iterdir())  # no payload blob
+    assert h.cluster._futures == {}
+
+
+def test_run_without_any_image_fails_fast(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = _unconfigured(tmp_path)
+    with pytest.raises(ImageNotConfigured):
+        h.cluster.run(lambda: 1, timeout=5)
+    assert h.batch.jobs == {}
+
+
+@pytest.mark.parametrize("opts", [{}, {"batch_size": 2}])
+def test_map_without_any_image_raises_the_typed_error_not_map_failed(tmp_path, opts) -> None:  # type: ignore[no-untyped-def]
+    import sk8s
+    h = _unconfigured(tmp_path)
+    sk8s.configure(cluster=h.cluster)
+    try:
+        with pytest.raises(ImageNotConfigured):
+            sk8s.map(lambda x: x, range(3), **opts)
+        with pytest.raises(ImageNotConfigured):
+            sk8s.starmap(lambda x: x, [(1,), (2,)], **opts)
+    finally:
+        sk8s.configure(cluster=None)
+    assert h.batch.jobs == {}
+
+
+def test_image_job_option_suffices_without_configured_image(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = _unconfigured(tmp_path)
+    fut = h.cluster.submit(lambda: 1, image="mine:1")
+    assert h.batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].image == "mine:1"
+
+
+def test_sk8s_image_env_counts_as_configured(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # What an in-pod nested submission sees: spec.build_job exports SK8S_IMAGE to every pod.
+    from sk8s.config import load_config
+    h = Harness(tmp_path)
+    monkeypatch.setenv("SK8S_IMAGE", "pod-img:7")
+    h.cluster.config = load_config(path=tmp_path / "none.toml", namespace="ns1")
+    fut = h.cluster.submit(lambda: 1)
+    assert h.batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].image == "pod-img:7"
+
+
+def test_nested_submission_inherits_the_image_through_the_pod_env(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    fut = h.cluster.submit(lambda: 1)
+    env = {e.name: e.value for e in h.batch.jobs[("ns1", fut.job_name)].spec.template.spec.containers[0].env}
+    assert env["SK8S_IMAGE"] == "sk8s:dev"
 
 
 # --- binding contract: _on_terminal never raises, future always resolves ---------

@@ -21,7 +21,7 @@ import sk8s
 from sk8s import anchors, clones, serialize, spec, volumes
 from sk8s.config import Config, load_config
 from sk8s.errors import (
-    BlobNotFound, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
+    BlobNotFound, ImageNotConfigured, ImagePullError, JobRejected, JobTimeout, PodFailed, StoreError,
     VolumeAttachBlocked, VolumeError, VolumeProvisioningFailed,
 )
 from sk8s.future import JobFuture
@@ -112,6 +112,20 @@ def default_image(config: Config) -> str:
         return config.image
     py = f"{sys.version_info.major}.{sys.version_info.minor}"
     return f"{config.image_prefix}ghcr.io/jared-maguire/sk8s:{sk8s.__version__}-py{py}"
+
+
+def resolve_image(config: Config, explicit: str | None = None) -> str:
+    """The image a new job/service/pod runs: ``explicit`` (the ``image`` option), else the
+    configured image, else the ``image_prefix``-composed default name.
+
+    Raises ``ImageNotConfigured`` when none is set: the bare default name (no prefix) is a
+    ghcr.io path nothing is ever published to, so it could only fail later as a pull error.
+    """
+    if explicit:
+        return explicit
+    if config.image or config.image_prefix:
+        return default_image(config)
+    raise ImageNotConfigured()
 
 
 def job_phase(job: Any) -> str:
@@ -572,7 +586,7 @@ class Cluster:
                 f"namespace={opts['namespace']!r} differs from this cluster's namespace "
                 f"{namespace!r}: per-job namespaces arrive in a later release"
             )
-        image = opts.get("image") or default_image(self.config)
+        image = resolve_image(self.config, opts.get("image"))  # before anything is created
         mounts = volumes.parse_mounts(opts.get("volumes"))  # ValueError before any side effect
         # Order matters (see sk8s.clones, "Races"): writers are held back and MARKED first, before
         # anything slow; read-only mounts are resolved to a clone as LATE as possible, right before

@@ -35,12 +35,15 @@ bake your package into the image.
 - Your function raised → the **same exception type** re-raises locally, with
   `__cause__` = `RemoteTraceback` (full remote trace). Unreconstructible types →
   `RemoteException` (`.type_name`, `.message`, `.tb_text`).
-- `MapFailed` — `.failures` is `[(index, exception), ...]`, `.total` the item
-  count. **Successful values are not on it**; see references/advanced.md for
-  harvesting.
+- `MapFailed` — `.failures` is `[(index, exception), ...]`, `.results` is
+  `{index: value}` for every item that succeeded, `.total` the item count. For
+  streaming or per-item timeouts see the per-future pattern in references/advanced.md.
 - `ResultDecodeError` — job *succeeded* but the client can't unpickle the result
   (missing module locally). `JobTimeout` (also a `TimeoutError`); `PodFailed`;
-  `ImagePullError`; `JobRejected` (admission refused the Job: privileged on
+  `ImagePullError` (an image IS set but nodes can't pull it); `ImageNotConfigured`
+  (no `image=` / `SK8S_IMAGE` / config `image` / `image_prefix` anywhere: raised by
+  `run`/`submit`/`map`/`serve` before anything is created; `LocalCluster` and in-pod
+  nested submits are exempt); `JobRejected` (admission refused the Job: privileged on
   Autopilot, RBAC 403, invalid spec — carries the server's message + a gated
   hint); `VersionMismatch` (client/worker Python minor); `StoreError`,
   `BlobNotFound`, `BlobTooLarge`.

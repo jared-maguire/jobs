@@ -145,6 +145,9 @@ def serve(
     c = _resolve(cluster)
     namespace = c.config.namespace
     assert namespace is not None
+    from sk8s.cluster import resolve_image
+
+    resolved_image = resolve_image(c.config, image)  # ImageNotConfigured before anything is created
     apps, core, store = c.apps, c.core, c.store
 
     def conflict() -> Sk8sError:
@@ -160,8 +163,6 @@ def serve(
     ):
         raise conflict()
 
-    from sk8s.cluster import default_image
-
     payload_uri = store.put(_payload_key(name), serialize.encode_payload(func, args, kwargs))
     created: list[Callable[[], None]] = []  # undo steps, newest last
 
@@ -176,7 +177,7 @@ def serve(
     try:
         deployment = build_deployment(
             name,
-            image=image or default_image(c.config),
+            image=resolved_image,
             namespace=namespace,
             payload_uri=payload_uri,
             store=c.config.store,

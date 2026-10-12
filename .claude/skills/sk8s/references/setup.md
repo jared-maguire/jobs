@@ -35,7 +35,7 @@ sk8s doctor                                  # all checks PASS before doing anyt
 
 - Pods pull what `image` (or `SK8S_IMAGE`) names. `image_prefix` is **not** a
   build mechanism — it only prefixes the *default* image name when `image` is
-  unset; on minikube, tag images `localhost:5000/<name>` yourself and set
+  unset (with neither set, submits raise `ImageNotConfigured`); on minikube, tag images `localhost:5000/<name>` yourself and set
   `image=`. Docker exempts localhost from TLS; the port-forward must be alive
   when you push.
 - Deps beyond the base: `sk8s image build --tag localhost:5000/science --base

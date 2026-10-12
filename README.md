@@ -113,7 +113,9 @@ image = "localhost:5000/sk8s-base:dev"
 
 Nodes cache images by tag and the default pull policy (`IfNotPresent`) will not refetch a
 tag a node already has, so when you rebuild the base, push it under a new tag and update
-`image`.
+`image`. There is no published default image: until `image` (or `SK8S_IMAGE`, or an
+`image_prefix`) is set, `run` / `submit` / `map` raise `sk8s.ImageNotConfigured` straight
+away, before creating anything, with the build commands in the message.
 
 **8. Run a function.**
 
@@ -144,8 +146,9 @@ except ZeroDivisionError as e:  # the remote exception, re-raised as its real ty
 ```
 
 When some items of a `map` fail, every other item is still collected and
-`sk8s.MapFailed` lists the failing indices (`e.failures`). Use `submit_map` /
-`submit_starmap` to get the futures themselves.
+`sk8s.MapFailed` lists the failing indices (`e.failures`) and carries every success
+(`e.results`, `{index: value}`). Use `submit_map` / `submit_starmap` to get the futures
+themselves.
 
 **10. Start a detached workflow.** The driver function runs in the cluster as a Job and can
 submit its own Jobs. Your process does not need to stay alive:
@@ -319,7 +322,7 @@ print(sk8s.run(lambda: __import__("pysam").__version__, image="localhost:5000/py
 Pods resolve `localhost:5000` through the addon's node-local proxy, so no pull-policy
 override is needed. Setting `image_prefix = "localhost:5000/"` in
 `~/.config/sk8s/config.toml` prepends that registry to the official worker image name
-(used only when `image` is not set), the same way you would point a real cluster at an ECR
+(used only when `image` is not set; with neither, sk8s raises `ImageNotConfigured`), the same way you would point a real cluster at an ECR
 or GAR mirror prefix.
 
 ### From Python
