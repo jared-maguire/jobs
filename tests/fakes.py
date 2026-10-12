@@ -26,6 +26,8 @@ class FakeCoreV1:
         self.pvc_patches: list[tuple[str, dict[str, Any]]] = []  # (name, body), in order
         self.pods: dict[tuple[str, str], Any] = {}  # (ns, name) -> pod-like object
         self.events: list[Any] = []  # event-like objects served by list_namespaced_event
+        self.pod_logs: dict[str, str] = {}  # pod name -> log text served by read_namespaced_pod_log
+        self.events_forbidden = False  # list_namespaced_event answers 403 (Role predates the rule)
 
     def create_namespaced_config_map(self, namespace: str, body: Any) -> Any:
         self.create_calls.append(body.metadata.name)
@@ -197,6 +199,8 @@ class FakeCoreV1:
 
     def list_namespaced_event(self, namespace: str, field_selector: str = "") -> Any:
         """Honors `a.b=v[,...]` field selectors over the event-like objects in ``self.events``."""
+        if self.events_forbidden:
+            raise ApiException(status=403, reason="Forbidden")
         wanted = dict(p.split("=", 1) for p in field_selector.split(",") if p)
 
         def get(ev: Any, path: str) -> Any:
@@ -220,8 +224,11 @@ class FakeCoreV1:
         ]
         return SimpleNamespace(items=items)
 
-    def read_namespaced_pod_log(self, name: str, namespace: str) -> str:
-        return ""
+    def read_namespaced_pod_log(self, name: str, namespace: str, tail_lines: int | None = None) -> str:
+        text = self.pod_logs.get(name, "")
+        if tail_lines is None:
+            return text
+        return "\n".join(text.splitlines()[-tail_lines:])
 
 
 class FakeBatchV1:

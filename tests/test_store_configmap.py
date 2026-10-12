@@ -158,3 +158,21 @@ def test_factory_namespace_resolution_order(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(k8s, "context_namespace", lambda: None)
     ns = get_store("k8s", core_api=core).namespace  # type: ignore[attr-defined]
     assert ns == "sk8s" and ns != "default"
+
+
+def test_count_prefix_whole_segments() -> None:
+    s = make_store()
+    s.put("wf-a/j1/payload", b"1")
+    s.put("wf-a/j1/result", b"2")
+    s.put("wf-ab/j1/payload", b"3")
+    s.put("svc/scorer/payload", b"4")
+    assert s.count_prefix("wf-a") == 2
+    assert s.count_prefix("wf-a/j1") == 2
+    assert s.count_prefix("absent") == 0
+    assert s.count_prefix("svc") == 1
+    assert len(s.core_api.configmaps) == 4  # reading only
+
+
+def test_count_prefix_rejects_empty() -> None:
+    with pytest.raises(ValueError):
+        make_store().count_prefix("")

@@ -56,7 +56,15 @@ class LocalCluster:
                 return True
             return False
 
+    def dry_run(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        raise ValueError(
+            "dry_run is not supported by LocalCluster: it runs subprocesses, not Kubernetes Jobs, "
+            "so there is no Job body to preview"
+        )
+
     def submit(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture:
+        if kwargs.pop("dry_run", False):
+            self.dry_run(func, *args, **kwargs)
         for k in IGNORED_OPTIONS:
             kwargs.pop(k, None)  # accepted for parity; meaningless locally
         kwargs.pop("keep_results", None)

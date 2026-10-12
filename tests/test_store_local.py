@@ -68,3 +68,21 @@ def test_delete_prefix_rejects_empty(tmp_path: Path) -> None:
 def test_factory(tmp_path: Path) -> None:
     s = get_store(f"local:{tmp_path}")
     assert isinstance(s, LocalStore)
+
+
+def test_count_prefix_counts_whole_segments_only(tmp_path: Path) -> None:
+    s = LocalStore(tmp_path)
+    s.put("wf-a/j1/payload", b"1")
+    s.put("wf-a/j1/result", b"2")
+    s.put("wf-a/j2/payload", b"3")
+    s.put("wf-ab/j1/payload", b"4")
+    assert s.count_prefix("wf-a") == 3
+    assert s.count_prefix("/wf-a/") == 3
+    assert s.count_prefix("wf-a/j1") == 2
+    assert s.count_prefix("absent") == 0
+    assert s.count_prefix("wf-ab") == 1
+
+
+def test_count_prefix_rejects_empty(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        LocalStore(tmp_path).count_prefix("/")

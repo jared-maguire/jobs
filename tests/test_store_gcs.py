@@ -201,3 +201,25 @@ def test_factory_ignores_endpoint(spy: _StorageSpy) -> None:
 
 def test_factory_local_unchanged(tmp_path: Path) -> None:
     get_store(f"local:{tmp_path}", endpoint="http://ignored")
+
+
+def test_count_prefix_whole_segments_and_exact_key(store: GCSStore, fake: FakeGCSClient) -> None:
+    store.put("wf-a", b"exact")
+    store.put("wf-a/j1/payload", b"1")
+    store.put("wf-a/j1/result", b"2")
+    store.put("wf-ab/j1/payload", b"3")
+    assert store.count_prefix("wf-a") == 3
+    assert store.count_prefix("/wf-a/") == 3
+    assert store.count_prefix("absent") == 0
+    assert len(fake.objects) == 4  # reading only: nothing deleted
+    assert fake.delete_calls == 0
+
+
+def test_count_prefix_paginates_and_rejects_empty(fake: FakeGCSClient) -> None:
+    fake.page_size = 1000
+    s = GCSStore("bkt", "pre", client=fake)
+    for i in range(2500):
+        fake.objects[("bkt", f"pre/wf-a/j{i:05d}/payload")] = b"x"
+    assert s.count_prefix("wf-a") == 2500
+    with pytest.raises(ValueError):
+        s.count_prefix("")

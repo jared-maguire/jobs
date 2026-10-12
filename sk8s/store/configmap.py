@@ -28,6 +28,16 @@ def _blob_labels(key: str) -> dict[str, str]:
     return {**MANAGED_BY, "sk8s/workflow-id": root}
 
 
+def check_blob_size(key: str, data: bytes) -> None:
+    """Raise ``BlobTooLarge`` if ``data`` would not fit in a ConfigMap (also used by dry runs)."""
+    if len(data) > MAX_CONFIGMAP_BLOB:
+        raise BlobTooLarge(
+            f"blob for {key!r} is {len(data)} bytes; the ConfigMap store caps at "
+            f"{MAX_CONFIGMAP_BLOB}. Configure an object store (s3:// or gs://) — "
+            f"see `sk8s config --store`."
+        )
+
+
 def _sanitize(key: str) -> str:
     name = "sk8s-" + re.sub(r"[^a-z0-9-]+", "-", key.lower()).strip("-")
     return name[:253]
@@ -44,12 +54,7 @@ class ConfigMapStore(BlobStore):
         return f"k8s://{self.namespace}/{_sanitize(key)}"
 
     def put(self, key: str, data: bytes, owner: Any | None = None) -> str:
-        if len(data) > MAX_CONFIGMAP_BLOB:
-            raise BlobTooLarge(
-                f"blob for {key!r} is {len(data)} bytes; the ConfigMap store caps at "
-                f"{MAX_CONFIGMAP_BLOB}. Configure an object store (s3:// or gs://) — "
-                f"see `sk8s config --store`."
-            )
+        check_blob_size(key, data)
         meta = client.V1ObjectMeta(
             name=_sanitize(key),
             labels=_blob_labels(key),
@@ -111,3 +116,18 @@ class ConfigMapStore(BlobStore):
             key = (cm.metadata.annotations or {}).get(KEY_ANNOTATION, "")
             if key == prefix or key.startswith(prefix + "/"):
                 self.delete(f"k8s://{self.namespace}/{cm.metadata.name}")
+
+    def count_prefix(self, prefix: str) -> int:
+        prefix = prefix.strip("/")
+        if not prefix:
+            raise ValueError("count_prefix requires a non-empty prefix")
+        selector = ",".join(f"{k}={v}" for k, v in _blob_labels(prefix).items())
+        cms = self.core_api.list_namespaced_config_map(
+            namespace=self.namespace, label_selector=selector
+        )
+        count = 0
+        for cm in cms.items:
+            key = (cm.metadata.annotations or {}).get(KEY_ANNOTATION, "")
+            if key == prefix or key.startswith(prefix + "/"):
+                count += 1
+        return count

@@ -115,3 +115,23 @@ class S3Store(BlobStore):
         errors = resp.get("Errors")
         if errors:
             raise StoreError(f"failed to delete {len(errors)} object(s): {errors[0]!r}")
+
+    def count_prefix(self, prefix: str) -> int:
+        prefix = prefix.strip("/")
+        if not prefix:
+            raise ValueError("count_prefix requires a non-empty prefix")
+        target = self._full_key(prefix)
+        under = target + "/"
+        count = 0
+        token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": target}
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = self._client.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []):
+                if obj["Key"] == target or obj["Key"].startswith(under):  # whole segments only
+                    count += 1
+            if not resp.get("IsTruncated"):
+                return count
+            token = resp["NextContinuationToken"]
