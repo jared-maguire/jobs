@@ -1,18 +1,24 @@
 #!/usr/bin/env python
-"""NA12878 / BRCA2: reads -> alignment -> SNVs + indels -> VCF, as a detached sk8s workflow.
+"""NA12878 / BRCA2: reads -> alignment -> SNVs + indels -> VCF, as a detached, memoized sk8s workflow.
 
 The request, verbatim: "Fetch reads from NA12878 from some small tractable genomic region
 (e.g. the BRCA2 gene), align them, call SNVs and Indels there, and create a VCF."
+The napkin's last line: "Re-running tomorrow would cost $0 - it's all cached."  This is that,
+honestly framed: a detached re-run creates no stage jobs (one driver pod, ~$0.0002); a
+--tethered re-run creates no jobs at all.
 
 What it does (see examples/README.md for the one-page version):
 
     describe the input  ->  dry_run preview of the plan  ->  submit a DETACHED driver which runs
-      1. fetch_fastq   stage the pinned region BAM + reference slice from the GCS mirror,
-                       verify md5s against MANIFEST.json, extract mate-aware FASTQ     [expect=]
-      2. align         bwa index + bwa mem, fixmate, sort, markdup, index              [expect=]
-      3. call_window   bcftools mpileup | call -mv over N windows, sk8s.map(pilot=1)   [expect=]
+      1. fetch_fastq   inputs are sk8s.artifact()s pinned by generation AND sha256; md5-check the
+                       manifest too; mate-aware FASTQ out                               [expect=]
+      2. align         bwa index + mem, fixmate, sort, markdup  -> BAM artifact            [expect=]
+      3. call_window   bcftools mpileup | call -mv over N windows (starmap, pilot=1)     [expect=]
       4. merge         concat, bcftools norm, lift slice coords -> chr13, bgzip+tabix,
-                       stats.json, publish to results/<run-id>/                        [expect=]
+                       stats.json                                                        [expect=]
+      5. publish       Artifact.publish() of VCF + index + stats to results/<run-id>/ with
+                       sk8s-artifact-sha256 / sk8s-produced-by metadata
+    Every stage is memo=True: run it again and the whole chain is a memo hit - no stage pods.
 
 Inputs are PINNED (gs://.../demo-data/na12878-brca2/, provenance in its MANIFEST.json): 26,841
 reads of 1000 Genomes NYGC 30x NA12878, GRCh38, BRCA2 +/-10kb = chr13:32,305,086-32,410,268, plus
@@ -21,13 +27,17 @@ the matching 105,183 bp reference slice (contig ``chr13_32305086_32410268``).
 Environment (nothing else is read implicitly):
 
     KUBECONFIG    kubeconfig whose current context is the GKE cluster
-    SK8S_CONFIG   toml with namespace / store (gs://...) / the Workload-Identity-ready namespace
-    SK8S_IMAGE    worker image = sk8s worker base + bwa/samtools/bcftools (examples/Dockerfile.na12878);
-                  its Python minor MUST equal this client's (3.14 for the demo image)
+    SK8S_CONFIG   toml with namespace / store (gs://...) for a Workload-Identity-ready namespace
+    SK8S_IMAGE    worker image = sk8s worker base BUILT FROM A CHECKOUT WITH THE ARTIFACT LAYER
+                  + bwa/samtools/bcftools (examples/Dockerfile.na12878); its Python minor MUST
+                  equal this client's (3.14 for the demo image). Memo keys include this string,
+                  so a new image tag is a (deliberate) cache miss.
 
 Usage:
     python examples/na12878_brca2.py                  # describe, preview, one full run
-    python examples/na12878_brca2.py --repeat 2       # two fresh runs, assert identical variant counts
+    python examples/na12878_brca2.py --repeat 2       # two runs: 1st computes, 2nd is all memo hits
+    python examples/na12878_brca2.py --memo-salt v2   # change the salt: everything recomputes
+    python examples/na12878_brca2.py --tethered       # drive from this process (a pure re-run = 0 jobs)
     python examples/na12878_brca2.py --preview-only   # describe + dry_run plan, touch nothing
 """
 
@@ -38,6 +48,7 @@ import json
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 import sk8s
@@ -53,6 +64,12 @@ N_WINDOWS = 4
 
 BAM = f"NA12878.{CONTIG}.bam"
 REF = f"GRCh38.{CONTIG}.fa"
+# sha256 of the mirrored objects, copied from MANIFEST.json. Together with the generation pin
+# sk8s.artifact() records at submit, an input can neither change nor be swapped unnoticed.
+SHA256 = {
+    BAM: "e5fe6834224568732013d53d7ae0df7eb4009bd90fc08c4657d36d6a58904b60",
+    REF: "b2a1f089a5470299a2d9f47b65162bba8d3044acc25982ceb308c550e411036b",
+}
 
 # Per-stage resources. Autopilot rounds these up; nothing here asserts exact values.
 R_FETCH = {"cpu": "1", "memory": "2Gi"}
@@ -61,25 +78,21 @@ R_CALL = {"cpu": "1", "memory": "2Gi"}
 R_MERGE = {"cpu": "1", "memory": "2Gi"}
 
 
+def inputs(data: str) -> tuple[Any, Any, Any]:
+    """The three input Artifacts: region BAM and reference slice (sha256-pinned) and the manifest."""
+    return (
+        sk8s.artifact(data + BAM, sha256=SHA256[BAM]),
+        sk8s.artifact(data + REF, sha256=SHA256[REF]),
+        sk8s.artifact(data + "MANIFEST.json"),
+    )
+
+
 # ----------------------------------------------------------------------------------------------
-# Everything below the next marker runs IN THE CLUSTER (this file's __main__ functions pickle by
-# value, so the image needs no copy of this script - only sk8s[gcs] and the bio tools).
+# Stage functions run IN THE CLUSTER. Artifact arguments arrive as real local Paths; whatever is
+# returned under the OutDir becomes an Artifact in the CAS. They are deterministic and take no
+# run-id, so their memo keys depend only on code + inputs. (This file's __main__ functions pickle
+# by value, so the image needs no copy of the script - only sk8s and the bio tools.)
 # ----------------------------------------------------------------------------------------------
-
-
-def _blob(uri: str) -> Any:
-    from google.cloud import storage  # type: ignore[import-untyped,unused-ignore]
-
-    bucket, _, name = uri.removeprefix("gs://").partition("/")
-    return storage.Client().bucket(bucket).blob(name)
-
-
-def _download(uri: str, dest: str) -> None:
-    _blob(uri).download_to_filename(dest)
-
-
-def _upload(src: str, uri: str) -> None:
-    _blob(uri).upload_from_filename(src)
 
 
 def _sh(script: str, cwd: str) -> str:
@@ -94,7 +107,7 @@ def _sh(script: str, cwd: str) -> str:
     return p.stdout
 
 
-def _md5(path: str) -> str:
+def _md5(path: Path) -> str:
     import hashlib
 
     h = hashlib.md5()
@@ -104,98 +117,98 @@ def _md5(path: str) -> str:
     return h.hexdigest()
 
 
-def fetch_fastq(data: str, work: str) -> dict[str, Any]:
-    """Stage the mirror, verify it against MANIFEST.json, and extract mate-aware FASTQ."""
+def fetch_fastq(bam: Path, ref: Path, manifest: Path, out: sk8s.OutDir) -> dict[str, Any]:
+    """Mate-aware FASTQ from the region BAM. sk8s already verified sha256 and generation while
+    streaming the inputs down; the manifest md5 cross-check is a second, independent belt."""
+    import os
     import tempfile
 
-    t0 = time.time()
-    d = tempfile.mkdtemp()
-    for name in (BAM, REF, "MANIFEST.json"):
-        _download(data + name, f"{d}/{name}")
-    files = json.load(open(f"{d}/MANIFEST.json"))["files"]
-    for name in (BAM, REF):
-        got, want = _md5(f"{d}/{name}"), files[name]["md5"]
+    o = os.fspath(out)  # str(OutDir) is its repr; the path itself is what a shell wants
+    files = json.load(open(manifest))["files"]
+    for p in (bam, ref):
+        got, want = _md5(p), files[p.name]["md5"]
         if got != want:
-            raise RuntimeError(f"{name}: md5 {got} != manifest {want} (mirror corrupted?)")
-    # Mate-aware: collate groups mates, -F 0x900 drops secondary/supplementary records, complete
-    # pairs go to r1/r2 and orphans (mate outside the window) to singletons.fq (not aligned).
+            raise RuntimeError(f"{p.name}: md5 {got} != manifest {want}")
+    d = tempfile.mkdtemp()
+    # collate groups mates, -F 0x900 drops secondary/supplementary, complete pairs go to r1/r2 and
+    # orphans (mate outside the window) to singletons.fq, which is not aligned.
     _sh(
-        f"mkdir -p tmp && samtools collate -u -O {BAM} tmp/col"
-        " | samtools fastq -n -F 0x900 -1 r1.fq -2 r2.fq -0 /dev/null -s singletons.fq"
-        " && gzip -n r1.fq r2.fq",
+        f"samtools collate -u -O {bam} col | samtools fastq -n -F 0x900"
+        f" -1 {o}/r1.fq -2 {o}/r2.fq -0 /dev/null -s singletons.fq"
+        f" && gzip -n {o}/r1.fq {o}/r2.fq",
         d,
     )
-    records = int(_sh(f"samtools view -c {BAM}", d))
-    pairs = int(_sh("zcat r1.fq.gz | wc -l", d)) // 4
-    singletons = int(_sh("wc -l < singletons.fq", d)) // 4
-    _upload(f"{d}/r1.fq.gz", work + "r1.fq.gz")
-    _upload(f"{d}/r2.fq.gz", work + "r2.fq.gz")
     return {
-        "bam_records": records,
-        "pairs": pairs,
-        "singletons_dropped": singletons,
-        "md5_verified": [BAM, REF],
-        "seconds": round(time.time() - t0, 1),
+        "stats": {
+            "bam_records": int(_sh(f"samtools view -c {bam}", d)),
+            "pairs": int(_sh(f"zcat {o}/r1.fq.gz | wc -l", d)) // 4,
+            "singletons_dropped": int(_sh("wc -l < singletons.fq", d)) // 4,
+            "checked": ["sha256+generation (sk8s)", "md5 (manifest)"],
+        },
+        "r1": out / "r1.fq.gz",
+        "r2": out / "r2.fq.gz",
     }
 
 
-def align(data: str, work: str) -> dict[str, Any]:
+def align(r1: Path, r2: Path, ref: Path, out: sk8s.OutDir) -> dict[str, Any]:
     """bwa index + mem against the reference slice; fixmate/sort/markdup; index; count."""
+    import os
+    import shutil
     import tempfile
 
-    t0 = time.time()
+    o = os.fspath(out)
     d = tempfile.mkdtemp()
-    for name in (REF, f"{REF}.fai"):
-        _download(data + name, f"{d}/{name}")
-    for name in ("r1.fq.gz", "r2.fq.gz"):
-        _download(work + name, f"{d}/{name}")
+    shutil.copy(ref, d)  # bwa writes its index files next to the FASTA
+    fa = Path(d) / ref.name
     rg = r"@RG\tID:NA12878\tSM:NA12878\tPL:illumina"
-    _sh(f"bwa index {REF}", d)
+    _sh(f"bwa index {fa}", d)
     # -K fixes the batch size so the result cannot depend on the thread count.
     _sh(
-        f"bwa mem -t 2 -K 100000000 -R '{rg}' {REF} r1.fq.gz r2.fq.gz"
+        f"bwa mem -t 2 -K 100000000 -R '{rg}' {fa} {r1} {r2}"
         " | samtools fixmate -m -u - -"
         " | samtools sort -u -"
-        " | samtools markdup - aln.bam"
-        " && samtools index aln.bam",
+        f" | samtools markdup - {o}/aln.bam",
         d,
     )
-    primary = int(_sh("samtools view -c -F 0x900 aln.bam", d))
-    mapped = int(_sh("samtools view -c -F 0x904 aln.bam", d))
-    dups = int(_sh("samtools view -c -F 0x900 -f 0x400 aln.bam", d))
-    _upload(f"{d}/aln.bam", work + "aln.bam")
-    _upload(f"{d}/aln.bam.bai", work + "aln.bam.bai")
+    bam = out / "aln.bam"
+    primary = int(_sh(f"samtools view -c -F 0x900 {bam}", d))
+    mapped = int(_sh(f"samtools view -c -F 0x904 {bam}", d))
     return {
-        "reads_primary": primary,
-        "reads_mapped": mapped,
-        "pct_mapped": round(100.0 * mapped / max(primary, 1), 3),
-        "duplicates_marked": dups,
-        "seconds": round(time.time() - t0, 1),
+        "stats": {
+            "reads_primary": primary,
+            "reads_mapped": mapped,
+            "pct_mapped": round(100.0 * mapped / max(primary, 1), 3),
+            "duplicates_marked": int(_sh(f"samtools view -c -F 0x900 -f 0x400 {bam}", d)),
+        },
+        "bam": bam,
     }
 
 
-def call_window(data: str, work: str, idx: int, start: int, end: int) -> dict[str, Any]:
+def call_window(
+    bam: Path, ref: Path, idx: int, start: int, end: int, out: sk8s.OutDir
+) -> dict[str, Any]:
     """SNV + indel calls (bcftools mpileup | call -mv) for one slice window, 1-based inclusive."""
+    import shutil
     import tempfile
 
-    t0 = time.time()
     d = tempfile.mkdtemp()
-    for name in (REF, f"{REF}.fai"):
-        _download(data + name, f"{d}/{name}")
-    for name in ("aln.bam", "aln.bam.bai"):
-        _download(work + name, f"{d}/{name}")
+    shutil.copy(ref, d)
+    shutil.copy(bam, d)
+    fa = ref.name
+    _sh(f"samtools index {bam.name}", d)
+    vcf = out / f"win{idx:02d}.vcf.gz"
     _sh(
-        f"bcftools mpileup -f {REF} -r {CONTIG}:{start}-{end} -a AD,DP -Ou aln.bam"
-        f" | bcftools call -mv -Oz -o win.vcf.gz",
+        f"bcftools mpileup -f {fa} -r {CONTIG}:{start}-{end} -a AD,DP -Ou {bam.name}"
+        f" | bcftools call -mv -Oz -o {vcf}",
         d,
     )
-    records = int(_sh("bcftools view -H win.vcf.gz | wc -l", d))
-    _upload(f"{d}/win.vcf.gz", f"{work}win{idx:02d}.vcf.gz")
     return {
-        "window": idx,
-        "region": f"{CONTIG}:{start}-{end}",
-        "records": records,
-        "seconds": round(time.time() - t0, 1),
+        "stats": {
+            "window": idx,
+            "region": f"{CONTIG}:{start}-{end}",
+            "records": int(_sh(f"bcftools view -H {vcf} | wc -l", d)),
+        },
+        "vcf": vcf,
     }
 
 
@@ -223,46 +236,43 @@ def _lift(vcf_text: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def merge_publish(
-    data: str, work: str, out: str, n_windows: int, upstream: dict[str, Any]
+def merge_calls(
+    vcfs: list[Path], ref: Path, upstream: dict[str, Any], out: sk8s.OutDir
 ) -> dict[str, Any]:
-    """concat windows -> bcftools norm -> lift to chr13 -> bgzip+tabix -> stats.json -> publish."""
+    """concat windows -> bcftools norm -> lift to chr13 -> bgzip+tabix -> stats.json. (Named for
+    what it feeds: the driver publishes these three outputs.) No run-id in, none out: the result
+    is a pure function of its inputs, which is what lets it be memoized."""
     import hashlib
+    import shutil
     import tempfile
 
-    t0 = time.time()
     d = tempfile.mkdtemp()
-    for name in (REF, f"{REF}.fai"):
-        _download(data + name, f"{d}/{name}")
-    wins = [f"win{i:02d}.vcf.gz" for i in range(n_windows)]
-    for name in wins:
-        _download(work + name, f"{d}/{name}")
+    shutil.copy(ref, d)
+    names = []
+    for i, v in enumerate(vcfs):  # the list is in window order; staged names may collide, so rename
+        shutil.copy(v, f"{d}/win{i:02d}.vcf.gz")
+        names.append(f"win{i:02d}.vcf.gz")
     # Windows are disjoint and ordered, so plain concat suffices. norm: left-align indels against
     # the slice and split multiallelics (-m -any) so every record is one SNP or one indel.
     _sh(
-        f"bcftools concat {' '.join(wins)} -Ou"
-        f" | bcftools norm -f {REF} -m -any -Oz -o normed.vcf.gz",
+        f"bcftools concat {' '.join(names)} -Ou"
+        f" | bcftools norm -f {ref.name} -m -any -Oz -o normed.vcf.gz",
         d,
     )
     open(f"{d}/lifted.vcf", "w").write(_lift(_sh("bcftools view normed.vcf.gz", d)))
-    _sh(
-        "bcftools view -Oz -o NA12878.BRCA2.vcf.gz lifted.vcf"
-        " && bcftools index -t NA12878.BRCA2.vcf.gz",
-        d,
-    )
+    vcf = out / "NA12878.BRCA2.vcf.gz"
+    _sh(f"bcftools view -Oz -o {vcf} lifted.vcf && bcftools index -t {vcf}", d)
     rows = [
         r.split("\t")
-        for r in _sh(
-            "bcftools query -f '%CHROM\\t%POS\\t%REF\\t%ALT\\t%TYPE\\t[%GT]\\n' NA12878.BRCA2.vcf.gz", d
-        ).splitlines()
+        for r in _sh(f"bcftools query -f '%CHROM\\t%POS\\t%REF\\t%ALT\\t%TYPE\\t[%GT]\\n' {vcf}", d).splitlines()
     ]
     by_type: dict[str, int] = {}
     ts = tv = het = hom = 0
     transitions = {("A", "G"), ("G", "A"), ("C", "T"), ("T", "C")}
-    for _chrom, _pos, ref, alt, typ, gt in rows:
+    for _chrom, _pos, ref_a, alt, typ, gt in rows:
         by_type[typ] = by_type.get(typ, 0) + 1
         if typ == "SNP":
-            if (ref, alt) in transitions:
+            if (ref_a, alt) in transitions:
                 ts += 1
             else:
                 tv += 1
@@ -271,9 +281,8 @@ def merge_publish(
             het += 1
         elif a[0] not in (".", "0"):
             hom += 1
-    body = _sh("bcftools view -H NA12878.BRCA2.vcf.gz", d)
+    body = _sh(f"bcftools view -H {vcf}", d)
     stats = {
-        "run_id": out.rstrip("/").rsplit("/", 1)[-1],
         "sample": "NA12878",
         "region": "chr13:32305086-32410268 (GRCh38; BRCA2 +/-10kb)",
         "variants": {
@@ -289,40 +298,38 @@ def merge_publish(
         "lifted": f"slice pos + {OFFSET} -> chr13",
         "upstream": upstream,
     }
-    json.dump(stats, open(f"{d}/stats.json", "w"), indent=2, sort_keys=True)
-    for name in ("NA12878.BRCA2.vcf.gz", "NA12878.BRCA2.vcf.gz.tbi", "stats.json"):
-        _upload(f"{d}/{name}", out + name)
-    stats["seconds"] = round(time.time() - t0, 1)
-    stats["outputs"] = [out + n for n in ("NA12878.BRCA2.vcf.gz", "NA12878.BRCA2.vcf.gz.tbi", "stats.json")]
-    return stats
+    json.dump(stats, open(out / "stats.json", "w"), indent=2, sort_keys=True)
+    return {"stats": stats, "vcf": vcf, "tbi": out / "NA12878.BRCA2.vcf.gz.tbi", "stats_json": out / "stats.json"}
 
 
-# ---- QC gates (expect=): run in the worker on each stage's return value --------------------------
+# ---- QC gates (expect=): run in the worker on each stage's return value, BEFORE upload ------------
 
 
 def gate_fastq(r: dict[str, Any]) -> str | None:
-    if r["pairs"] < 10_000:
-        return f"only {r['pairs']} complete pairs extracted (expect ~13,236)"
+    if r["stats"]["pairs"] < 10_000:
+        return f"only {r['stats']['pairs']} complete pairs extracted (expect ~13,236)"
     return None
 
 
 def gate_alignment(r: dict[str, Any]) -> str | None:
-    if r["reads_mapped"] < 20_000:
-        return f"only {r['reads_mapped']} reads aligned (need >= 20,000)"
-    if r["pct_mapped"] <= 90.0:
-        return f"only {r['pct_mapped']}% mapped (need > 90%)"
+    s = r["stats"]
+    if s["reads_mapped"] < 20_000:
+        return f"only {s['reads_mapped']} reads aligned (need >= 20,000)"
+    if s["pct_mapped"] <= 90.0:
+        return f"only {s['pct_mapped']}% mapped (need > 90%)"
     return None
 
 
 def gate_window(r: dict[str, Any]) -> str | None:
     # ~26 kb of a human genome carries dozens of NA12878 variants; none/very few means the pileup broke.
-    if r["records"] < 10:
-        return f"window {r['window']} ({r['region']}) has only {r['records']} calls (need >= 10)"
+    s = r["stats"]
+    if s["records"] < 10:
+        return f"window {s['window']} ({s['region']}) has only {s['records']} calls (need >= 10)"
     return None
 
 
 def gate_calls(r: dict[str, Any]) -> str | None:
-    v = r["variants"]
+    v = r["stats"]["variants"]
     if v["total"] == 0:
         return "VCF is empty"
     if v["total"] < 50:
@@ -332,40 +339,70 @@ def gate_calls(r: dict[str, Any]) -> str | None:
     return None
 
 
-# ---- the detached driver ---------------------------------------------------------------------------
+# ---- the pipeline (runs as the detached driver, or in this process with --tethered) -------------
 
 
-def pipeline(run_id: str, data: str, results: str) -> dict[str, Any]:
-    """Runs IN the cluster as the workflow driver; chains the per-stage jobs."""
-    work = f"{results}{run_id}/work/"
+def pipeline(run_id: str, data: str, results: str, salt: str) -> dict[str, Any]:
+    """Chain the per-stage jobs. Every stage is memo=True; ``memo`` below records hit/computed."""
     out = f"{results}{run_id}/"
     t0 = time.time()
-    print(f"[{run_id}] stage 1/4 fetch_fastq", flush=True)  # `sk8s logs <wf>` shows these
-    fq = sk8s.run(fetch_fastq, data, work, requests=R_FETCH, expect=gate_fastq)
-    print(f"[{run_id}] gate ok: {fq['pairs']} pairs; stage 2/4 align", flush=True)
-    al = sk8s.run(align, data, work, requests=R_ALIGN, expect=gate_alignment)
-    print(f"[{run_id}] gate ok: {al['reads_mapped']} aligned ({al['pct_mapped']}%); stage 3/4 call x{N_WINDOWS}", flush=True)
-    # Natural fan-out: the 105 kb slice is cut into N disjoint windows called in parallel. Because
-    # calling is per-position over the one full BAM, this is equivalent to a single whole-region
-    # call (verified: identical sites on this data), not an approximation. pilot=1: window 0 must
-    # pass its gate before the rest are submitted.
+    bam, ref, manifest = inputs(data)
+    memo: dict[str, Any] = {}
+    opts: dict[str, Any] = {"memo": True, "memo_salt": salt}
+
+    def stage(label: str, fn: Any, *args: Any, **kw: Any) -> Any:
+        t = time.time()
+        fut = sk8s.submit(fn, *args, **opts, **kw)
+        res = fut.result()
+        memo[label] = "HIT" if fut.memo_hit else "computed"
+        print(f"[{run_id}] {label}: {memo[label]} ({time.time() - t:.1f}s)", flush=True)  # `sk8s logs <wf>`
+        return res
+
+    fq = stage("fetch_fastq", fetch_fastq, bam, ref, manifest, requests=R_FETCH, expect=gate_fastq)
+    al = stage("align", align, fq["r1"], fq["r2"], ref, requests=R_ALIGN, expect=gate_alignment)
+    # Natural fan-out: the 105 kb slice is cut into N disjoint windows called in parallel. Calling is
+    # per-position over the one full BAM (passed by hash), so this equals a single whole-region call
+    # (verified on this data: identical sites), not an approximation. pilot=1: window 0 must pass
+    # its gate before the rest are submitted.
     size = -(-SLICE_LEN // N_WINDOWS)
     spans = [(i, i * size + 1, min((i + 1) * size, SLICE_LEN)) for i in range(N_WINDOWS)]
-    calls = sk8s.starmap(
+    t = time.time()
+    futs = sk8s.submit_starmap(
         call_window,
-        [(data, work, i, s, e) for i, s, e in spans],
-        pilot=1,
-        requests=R_CALL,
-        expect=gate_window,
+        [(al["bam"], ref, i, s, e) for i, s, e in spans],
+        pilot=1, requests=R_CALL, expect=gate_window, **opts,
     )
-    print(f"[{run_id}] gates ok: windows {[c['records'] for c in calls]}; stage 4/4 merge_publish", flush=True)
-    upstream = {"fastq": fq, "alignment": al, "windows": calls}
-    final = sk8s.run(
-        merge_publish, data, work, out, N_WINDOWS, upstream, requests=R_MERGE, expect=gate_calls
+    calls = [f.result() for f in futs]
+    memo["call_window"] = ["HIT" if f.memo_hit else "computed" for f in futs]
+    print(f"[{run_id}] call_window x{N_WINDOWS}: {memo['call_window']} ({time.time() - t:.1f}s)", flush=True)
+    upstream = {
+        "fastq": fq["stats"],
+        "alignment": al["stats"],
+        "windows": [c["stats"] for c in calls],
+    }
+    final = stage(
+        "merge", merge_calls, [c["vcf"] for c in calls], ref, upstream,
+        requests=R_MERGE, expect=gate_calls,
     )
-    final["driver_seconds"] = round(time.time() - t0, 1)
-    print(f"[{run_id}] gate ok: {final['variants']['total']} variants, ts/tv {final['variants']['ts_tv']}", flush=True)
-    return final
+    # Publish: a permanent, legible home. copy=True keeps the CAS copy as well, so a later memo
+    # hit can still find the bytes even if this results prefix is cleaned up.
+    published = {
+        k: final[k].publish(out + name, copy=True).uri
+        for k, name in (
+            ("vcf", "NA12878.BRCA2.vcf.gz"),
+            ("tbi", "NA12878.BRCA2.vcf.gz.tbi"),
+            ("stats_json", "stats.json"),
+        )
+    }
+    print(f"[{run_id}] published {len(published)} objects under {out}", flush=True)
+    return {
+        "run_id": run_id,
+        "stats": final["stats"],
+        "memo": memo,
+        "published": published,
+        "produced_by": final["vcf"].produced_by,
+        "driver_seconds": round(time.time() - t0, 1),
+    }
 
 
 # ----------------------------------------------------------------------------------------------
@@ -377,29 +414,32 @@ def new_run_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + uuid.uuid4().hex[:4]
 
 
-def preview(run_id: str) -> None:
-    """dry_run the whole plan: nothing is created on the cluster."""
-    work, out = f"{RESULTS}{run_id}/work/", f"{RESULTS}{run_id}/"
+def preview(run_id: str, salt: str) -> None:
+    """dry_run the whole plan: nothing is created, pinned, hashed or looked up."""
     size = -(-SLICE_LEN // N_WINDOWS)
+    bam, ref, manifest = inputs(DATA)
+    # Downstream inputs do not exist yet; stand-ins with the right shape are enough to size the plan.
+    fake = lambda name: sk8s.artifact(f"{RESULTS}{run_id}/placeholder/{name}")  # noqa: E731
+    o: dict[str, Any] = {"dry_run": True, "memo": True, "memo_salt": salt}
     plan: list[tuple[str, Any]] = [
-        ("driver (detached)", sk8s.submit_workflow(pipeline, run_id, DATA, RESULTS, dry_run=True)),
-        ("1 fetch_fastq", sk8s.submit(fetch_fastq, DATA, work, dry_run=True, requests=R_FETCH, expect=gate_fastq)),
-        ("2 align", sk8s.submit(align, DATA, work, dry_run=True, requests=R_ALIGN, expect=gate_alignment)),
+        ("driver (detached)", sk8s.submit_workflow(pipeline, run_id, DATA, RESULTS, salt, dry_run=True)),
+        ("1 fetch_fastq", sk8s.submit(fetch_fastq, bam, ref, manifest, requests=R_FETCH, expect=gate_fastq, **o)),
+        ("2 align", sk8s.submit(align, fake("r1.fq.gz"), fake("r2.fq.gz"), ref, requests=R_ALIGN, expect=gate_alignment, **o)),
         (
             f"3 call_window x{N_WINDOWS}",
             sk8s.starmap(
                 call_window,
-                [(DATA, work, i, i * size + 1, min((i + 1) * size, SLICE_LEN)) for i in range(N_WINDOWS)],
-                dry_run=True, pilot=1, requests=R_CALL, expect=gate_window,
+                [(fake("aln.bam"), ref, i, i * size + 1, min((i + 1) * size, SLICE_LEN)) for i in range(N_WINDOWS)],
+                pilot=1, requests=R_CALL, expect=gate_window, **o,
             ),
         ),
-        ("4 merge_publish", sk8s.submit(merge_publish, DATA, work, out, N_WINDOWS, {}, dry_run=True, requests=R_MERGE, expect=gate_calls)),
+        ("4 merge", sk8s.submit(merge_calls, [fake("win00.vcf.gz")], ref, {}, requests=R_MERGE, expect=gate_calls, **o)),
     ]
-    print(f"PLAN for run {run_id}  (dry_run: nothing created)")
+    print(f"PLAN for run {run_id}  (dry_run: nothing created; memo salt {salt!r})")
     for label, dr in plan:
         print(
             f"  {label:<22} jobs={dr.n_jobs}  cpu={dr.total_cpu_request:g}  "
-            f"mem={dr.total_memory_request / 2**30:.0f}Gi  ns={dr.namespace}"
+            f"mem={dr.total_memory_request / 2**30:.0f}Gi  artifacts={dr.n_artifacts}  ns={dr.namespace}"
         )
     first = plan[0][1]
     print(f"  image: {first.image}\n  store: {first.store}")
@@ -408,22 +448,31 @@ def preview(run_id: str) -> None:
             print(f"  note[{label}]: {note}")
 
 
-def run_once(run_id: str) -> dict[str, Any]:
+def run_once(run_id: str, salt: str, tethered: bool) -> dict[str, Any]:
     t0 = time.time()
-    wf = sk8s.submit_workflow(pipeline, run_id, DATA, RESULTS)
-    print(f"submitted detached workflow  wf.id={wf.id}  run_id={run_id}", flush=True)
-    print(f"  watch:  sk8s explain {wf.id}   |   sk8s logs {wf.id}", flush=True)
-    stats: dict[str, Any] = wf.result(delete=False)  # raises the driver's error (e.g. ExpectationFailed)
-    stats["wf_id"] = wf.id
-    stats["wall_seconds"] = round(time.time() - t0, 1)
-    return stats
+    if tethered:
+        print(f"driving run_id={run_id} from this process (tethered; no driver pod)", flush=True)
+        summary: dict[str, Any] = pipeline(run_id, DATA, RESULTS, salt)
+        summary["wf_id"] = "(tethered)"
+    else:
+        wf = sk8s.submit_workflow(pipeline, run_id, DATA, RESULTS, salt)
+        print(f"submitted detached workflow  wf.id={wf.id}  run_id={run_id}", flush=True)
+        print(f"  watch:  sk8s explain {wf.id}   |   sk8s logs {wf.id}", flush=True)
+        summary = wf.result(delete=False)  # raises the driver's error (e.g. ExpectationFailed)
+        summary["wf_id"] = wf.id
+    summary["wall_seconds"] = round(time.time() - t0, 1)
+    return summary
 
 
-def prove_gate(work: str) -> None:
-    """Show a gate FAILING: call a 200 bp window (a handful of variants at best) against the
-    alignment of an earlier run. ``work`` is that run's .../work/ prefix. Cheap, one tiny job."""
+def prove_gate(salt: str) -> None:
+    """Show a gate FAILING on a real result: stages 1-2 are memo hits (free), then a 200 bp window
+    is called and must be rejected before anything is uploaded or memoized."""
+    bam, ref, manifest = inputs(DATA)
+    opts: dict[str, Any] = {"memo": True, "memo_salt": salt}
+    fq = sk8s.run(fetch_fastq, bam, ref, manifest, requests=R_FETCH, expect=gate_fastq, **opts)
+    al = sk8s.run(align, fq["r1"], fq["r2"], ref, requests=R_ALIGN, expect=gate_alignment, **opts)
     try:
-        sk8s.run(call_window, DATA, work, 99, 1, 200, requests=R_CALL, expect=gate_window)
+        sk8s.run(call_window, al["bam"], ref, 99, 1, 200, requests=R_CALL, expect=gate_window, **opts)
     except sk8s.ExpectationFailed as e:
         print(f"gate correctly REJECTED a bad result: ExpectationFailed: {e.message}")
     else:
@@ -432,39 +481,41 @@ def prove_gate(work: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--repeat", type=int, default=1, help="fresh end-to-end runs; counts must match")
+    ap.add_argument("--repeat", type=int, default=1, help="runs in sequence (fresh run-id each); counts must match")
+    ap.add_argument("--memo-salt", default="v1", help="change it to invalidate every stage's cache")
+    ap.add_argument("--tethered", action="store_true", help="drive the pipeline from this process, no driver pod")
     ap.add_argument("--preview-only", action="store_true", help="describe + dry_run, then stop")
-    ap.add_argument("--prove-gate", metavar="WORK_PREFIX", help="gs://.../results/<run-id>/work/ of a finished run: show expect= rejecting a bad result")
+    ap.add_argument("--prove-gate", action="store_true", help="show expect= rejecting a bad result")
     args = ap.parse_args()
     if args.prove_gate:
-        prove_gate(args.prove_gate)
+        prove_gate(args.memo_salt)
         return 0
 
     d = sk8s.describe(DATA)
     print("DESCRIBE", DATA)
     print(" ", d["headline"])
     print(json.dumps({k: d[k] for k in ("formats", "patterns") if k in d}, indent=2))
-    preview(new_run_id())
+    preview(new_run_id(), args.memo_salt)
     if args.preview_only:
         return 0
 
     runs = []
     for _ in range(args.repeat):
-        s = run_once(new_run_id())
-        v = s["variants"]
+        s = run_once(new_run_id(), args.memo_salt, args.tethered)
+        v, up = s["stats"]["variants"], s["stats"]["upstream"]
         print(
-            f"RUN {s['run_id']} wf={s['wf_id']}: {s['upstream']['fastq']['bam_records']} reads in -> "
-            f"{s['upstream']['alignment']['reads_mapped']} aligned "
-            f"({s['upstream']['alignment']['pct_mapped']}%) -> {v['total']} variants "
-            f"{v['by_type']} ts/tv={v['ts_tv']}  het={v['het']} hom={v['hom_alt']}  "
+            f"RUN {s['run_id']} wf={s['wf_id']}: {up['fastq']['bam_records']} reads in -> "
+            f"{up['alignment']['reads_mapped']} aligned ({up['alignment']['pct_mapped']}%) -> "
+            f"{v['total']} variants {v['by_type']} ts/tv={v['ts_tv']}  het={v['het']} hom={v['hom_alt']}  "
             f"wall={s['wall_seconds']}s",
             flush=True,
         )
-        print("  outputs:", *s["outputs"], sep="\n    ")
+        print(f"  memo: {s['memo']}")
+        print("  published:", *s["published"].values(), sep="\n    ")
         runs.append(s)
     if len(runs) > 1:
-        counts = [r["variants"]["total"] for r in runs]
-        md5s = [r["records_md5"] for r in runs]
+        counts = [r["stats"]["variants"]["total"] for r in runs]
+        md5s = [r["stats"]["records_md5"] for r in runs]
         assert len(set(counts)) == 1, f"variant counts differ between runs: {counts}"
         print(f"REPRODUCIBLE: {len(runs)} runs, identical variant count {counts[0]}; record md5 identical: {len(set(md5s)) == 1}")
     return 0
