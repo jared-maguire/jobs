@@ -453,6 +453,11 @@ def _volume_entries(pvcs: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+# Shown wherever a driver's log is empty: a detached driver's log is only what it prints, so a
+# silent driver looks exactly like a broken log reader.
+EMPTY_DRIVER_LOG_NOTE = "driver produced no output; print() from the driver appears here"
+
+
 def _driver_logs(ctx: _Ctx, pods: list[Any], warnings: list[str]) -> list[str] | None:
     if not pods:
         return []
@@ -478,7 +483,7 @@ def explain(workflow_id: str, cluster: Any | None = None) -> dict[str, Any]:
     ``attach`` does). Nothing is created, patched or deleted.
 
     Keys: ``workflow`` (id, namespace, detached, created_at, age, age_seconds, retention_days,
-    anchor), ``driver`` (job, phase, logs_tail; None for a workflow with no recorded driver),
+    anchor), ``driver`` (job, phase, logs_tail, logs_note; None for a workflow with no recorded driver),
     ``jobs`` (name, role, phase, timings, requests, pods, ``waiting_code``/``waiting_reason`` for
     stuck pods, ``failure_reason`` for failed jobs), ``counts`` (running/pending/succeeded/failed/
     total, driver included), ``volumes``, ``store`` (url, prefix, blob_count), ``blocking`` (plain
@@ -550,7 +555,14 @@ def explain(workflow_id: str, cluster: Any | None = None) -> dict[str, Any]:
             "job": driver_name,
             "phase": found["phase"] if found is not None else "unknown",
             "logs_tail": _driver_logs(ctx, pods_by_job.get(driver_name, []), warnings),
+            "logs_note": None,
         }
+        tail_read = driver["logs_tail"]
+        started = found is not None and found["phase"] != "pending"
+        if started and pods_by_job.get(driver_name) and tail_read is not None and not any(
+            line.strip() for line in tail_read
+        ):
+            driver["logs_note"] = EMPTY_DRIVER_LOG_NOTE
         if found is None:
             driver["note"] = "the driver job no longer exists (finished and reaped by its TTL, or the workflow was killed)"
         elif found["phase"] == "failed":
@@ -629,6 +641,8 @@ def render(report: dict[str, Any]) -> str:
         lines.append(f"driver {driver['job']}  {driver['phase']}")
         if driver.get("note"):
             lines.append(f"  ({driver['note']})")
+        if driver.get("logs_note"):
+            lines.append(f"  ({driver['logs_note']})")
         if driver["logs_tail"]:
             lines.append("  last log lines:")
             lines.extend(f"    {line}" for line in driver["logs_tail"])

@@ -546,6 +546,8 @@ def _cmd_logs(args: argparse.Namespace) -> int:
     ]
     text = "\n".join(chunks)
     sys.stdout.write(text if text.endswith("\n") or not text else text + "\n")
+    if not text.strip():  # on stderr: stdout stays exactly the log, for pipes
+        print(f"note: {explaining.EMPTY_DRIVER_LOG_NOTE}", file=sys.stderr)
     return 0
 
 

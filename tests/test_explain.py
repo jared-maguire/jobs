@@ -486,6 +486,48 @@ def test_unreadable_driver_logs_degrade_to_a_warning(tmp_path: Path) -> None:
     assert any("log" in w for w in report["warnings"])
 
 
+def test_empty_driver_log_gets_a_note(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    make_anchor(h, driver="drv")
+    make_job(h, "drv", active=1, start=ago(hours=1))
+    make_pod(h, "drv", phase="Running")
+    report = sk8s.explain(WF, cluster=h.cluster)
+    assert report["driver"]["logs_tail"] == []
+    assert report["driver"]["logs_note"] == explaining.EMPTY_DRIVER_LOG_NOTE
+    assert "print() from the driver appears here" in explaining.render(report)
+
+
+def test_whitespace_only_driver_log_gets_the_note_too(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    make_anchor(h, driver="drv")
+    make_job(h, "drv", succeeded=1, start=ago(hours=1), end=ago(minutes=5))
+    make_pod(h, "drv", phase="Succeeded")
+    h.core.pod_logs["drv-pod"] = "\n  \n"
+    assert sk8s.explain(WF, cluster=h.cluster)["driver"]["logs_note"] == explaining.EMPTY_DRIVER_LOG_NOTE
+
+
+@pytest.mark.parametrize("case", ["has-output", "reaped", "pending", "unreadable"])
+def test_no_note_when_the_log_is_not_simply_empty(tmp_path: Path, case: str) -> None:
+    h = Harness(tmp_path)
+    make_anchor(h, driver="drv")
+    if case == "reaped":
+        pass  # no job, no pod: nothing was read, so nothing can be called empty
+    elif case == "pending":
+        make_job(h, "drv", active=1, start=ago(minutes=1))
+        make_pod(h, "drv", phase="Pending")  # not started: no log yet is not "no output"
+    else:
+        make_job(h, "drv", active=1, start=ago(hours=1))
+        make_pod(h, "drv", phase="Running")
+        h.core.pod_logs["drv-pod"] = "stage 1 done"
+        if case == "unreadable":
+            def boom(name: str, namespace: str, **kw: Any) -> str:
+                raise ApiException(status=403, reason="Forbidden")
+            h.core.read_namespaced_pod_log = boom  # type: ignore[method-assign]
+    report = sk8s.explain(WF, cluster=h.cluster)
+    assert report["driver"]["logs_note"] is None
+    assert "appears here" not in explaining.render(report)
+
+
 # --- volumes, store, cost ---------------------------------------------------------------------------
 
 

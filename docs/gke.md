@@ -546,7 +546,7 @@ submitted wf-7qyo1c
 ```
 
 `sk8s workflows`, `sk8s logs <id>` and `sk8s kill <id>` list, read and delete workflows
-from the command line. Services (`sk8s.serve`) and `ReadWriteOnce` volumes
+from the command line. A detached driver's log is only what it prints (`sk8s logs` and `sk8s explain` show an empty log as "driver produced no output"), so `print(..., flush=True)` a line per stage from the driver: it is the cheapest progress channel there is, and the first thing `sk8s explain` shows (its last log lines). Services (`sk8s.serve`) and `ReadWriteOnce` volumes
 (`sk8s.create_volume`) work on GKE as they do anywhere; the README tour covers them, and
 the integration suites run against this setup. Volumes that many pods on many nodes read
 at once are [section 6](#6-read-many-volumes). Check that the session left nothing

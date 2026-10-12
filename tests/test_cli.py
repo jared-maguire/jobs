@@ -1060,6 +1060,22 @@ def test_logs_reads_driver_pod_logs(monkeypatch: pytest.MonkeyPatch, capsys: pyt
     assert capsys.readouterr().out == "log of drv-9-pod in ctx-ns\n"
 
 
+@pytest.mark.parametrize("log,noted", [("", True), ("\n \n", True), ("stage 1\n", False)])
+def test_logs_notes_an_empty_driver_log(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], log: str, noted: bool
+) -> None:
+    core, _, _ = _fakes(monkeypatch)
+    _anchor(core, "wf-1", age=datetime.timedelta(minutes=10), driver="drv-9")
+    core.list_namespaced_pod = lambda namespace, label_selector="": SimpleNamespace(  # type: ignore[method-assign]
+        items=[SimpleNamespace(metadata=SimpleNamespace(name="drv-9-pod"))]
+    )
+    core.read_namespaced_pod_log = lambda name, namespace: log  # type: ignore[method-assign]
+    assert cli.run(["logs", "wf-1"]) == 0
+    out, err = capsys.readouterr()
+    assert out == (log if log.endswith("\n") or not log else log + "\n")  # stdout stays the log, verbatim
+    assert ("driver produced no output; print() from the driver appears here" in err) is noted
+
+
 @pytest.mark.parametrize("driver,wf,fragment", [
     ("drv", "wf-nope", "unknown workflow"),
     ("", "wf-1", "no driver job"),

@@ -188,6 +188,8 @@ print(same.result(timeout=300))          # 285, then the finished workflow is de
 `sk8s workflows` lists workflows, `sk8s logs <id>` prints a driver's output and
 `sk8s kill <id>` deletes one with everything it owns.
 
+A detached driver's log is only what it prints (`sk8s logs` and `sk8s explain` show an empty log as "driver produced no output"), so `print(..., flush=True)` a line per stage from the driver: it is the cheapest progress channel there is, and the first thing `sk8s explain` shows (its last log lines).
+
 **11. Serve a function.** `serve()` runs a function that blocks forever (here an HTTP
 server) as a Deployment plus a ClusterIP Service. The URL works inside the cluster, so we
 call it from a Job (from your machine, `kubectl port-forward -n sk8s service/hello 8080`):

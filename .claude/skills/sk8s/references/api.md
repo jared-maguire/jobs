@@ -215,7 +215,7 @@ an exact preview.
 **`sk8s.explain("wf-...")`** (CLI: `sk8s explain wf-...`, `--json` for the dict)
 rebuilds the whole picture from cluster + store state, from any process — an
 agent with zero context needs nothing else. Read-only. Keys: `workflow` (id,
-namespace, detached, age, retention), `driver` (phase, `logs_tail`), `jobs`
+namespace, detached, age, retention), `driver` (phase, `logs_tail`, `logs_note` when the log is empty), `jobs`
 (name, role, phase `pending|running|succeeded|failed`, timings, requests, pods,
 and for stuck pods `waiting_code`/`waiting_reason` — image-pull, unschedulable,
 volume attach/provision, crash loops — or `failure_reason` for failed jobs: OOM
