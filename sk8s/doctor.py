@@ -293,9 +293,6 @@ def doctor(
 
     checks.append(guarded("role permissions", role_check))
 
-    # TODO(spec 3.3 rule 2, deferred): a store-conformance probe for the conditional-write primitives
-    # (put_if_absent / put_if_version must really refuse: other S3 implementations may silently
-    # ignore If-None-Match/If-Match) belongs here as another in-pod check; not built yet.
     # 5. store writable. Only a cluster-backed store depends on the cluster being reachable.
     def store_check() -> Check:
         if not reachable and profile.store == "k8s":

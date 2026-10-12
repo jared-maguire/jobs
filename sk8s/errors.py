@@ -20,15 +20,6 @@ class BlobTooLarge(StoreError):
     pass
 
 
-class VersionChanged(StoreError):
-    """An object's pinned version (GCS generation / S3 ETag / ConfigMap resourceVersion) no longer
-    matches: it was overwritten or deleted since the pin was taken."""
-
-
-class RetryExhausted(StoreError):
-    """A conditional-write loop kept losing its race and gave up after its bounded retries."""
-
-
 class VersionMismatch(Sk8sError):
     pass
 
@@ -328,21 +319,3 @@ class PilotFailed(Sk8sError):
             f"{total - pilot} items were not submitted; "
             f"first failure at index {first_i}: {type(first_e).__name__}: {first_e}"
         )
-
-
-class ArtifactError(Sk8sError):
-    """Base class for artifact-layer failures."""
-
-
-class ArtifactNotFound(ArtifactError):
-    """No known location of the artifact holds its bytes any more."""
-
-
-class ArtifactChanged(ArtifactError):
-    """An input artifact is not what was pinned: overwritten in place (new generation / ETag) or
-    its bytes hash to something else. A changed input is a different artifact, so the run must
-    not silently use it."""
-
-
-class PublishConflict(ArtifactError):
-    """The publish destination already holds different content; publish never overwrites."""

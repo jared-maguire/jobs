@@ -5,10 +5,6 @@ executes the user function. It only ever deletes *anchors* (via
 ``anchors.delete_anchor``: Kubernetes garbage collection cascades to the owned jobs
 and blob ConfigMaps, and the object-store prefix is removed explicitly). Objects
 labeled ``sk8s/kind=service`` are never selected or deleted.
-
-After the workflows, ``clean()`` also sweeps the artifact CAS (see ``sk8s.gc``): content-addressed
-objects no workflow reference set, memo entry or published copy keeps alive, older than an age
-floor, are deleted. Workers pass ``artifacts=False`` - a pod start must not LIST the CAS.
 """
 from __future__ import annotations
 
@@ -17,7 +13,7 @@ import datetime
 import logging
 from typing import Any, Collection
 
-from sk8s import anchors, gc
+from sk8s import anchors
 from sk8s.cluster import job_phase
 
 log = logging.getLogger("sk8s.cleaning")
@@ -65,19 +61,9 @@ class CleanReport:
 
     deleted: list[str] = dataclasses.field(default_factory=list)
     kept: list[dict[str, str]] = dataclasses.field(default_factory=list)
-    sweep: gc.SweepReport | None = None  # the artifact CAS sweep, when one ran
 
     def as_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"deleted": list(self.deleted), "kept": [dict(k) for k in self.kept]}
-        sw = self.sweep
-        if sw is not None and (sw.scanned or sw.aborted or sw.memo_expired):
-            out["artifacts"] = {
-                "scanned": sw.scanned, "deleted": list(sw.deleted), "deleted_bytes": sw.deleted_bytes,
-                "kept_reachable": sw.kept_reachable, "kept_young": sw.kept_young,
-                "kept_published": sw.kept_published, "memo_expired": list(sw.memo_expired),
-                "aborted": sw.aborted,
-            }
-        return out
+        return {"deleted": list(self.deleted), "kept": [dict(k) for k in self.kept]}
 
 
 def clean(
@@ -89,23 +75,15 @@ def clean(
     store: Any | None = None,
     batch_api: Any | None = None,
     exclude: Collection[str] = (),
-    artifacts: bool = True,
-    report: gc.SweepReport | None = None,
-    extra_stores: Collection[str] = (),
 ) -> list[str]:
     """Delete expired workflows in ``namespace`` and return the deleted workflow ids.
 
-    See :func:`clean_report` for the rules; this is its ``deleted`` list. Pass a
-    ``gc.SweepReport`` as ``report`` to receive what the artifact sweep did.
+    See :func:`clean_report` for the rules; this is its ``deleted`` list.
     """
-    result = clean_report(
+    return clean_report(
         namespace, older_than_days=older_than_days, workflow=workflow, core_api=core_api,
-        store=store, batch_api=batch_api, exclude=exclude, artifacts=artifacts,
-        extra_stores=extra_stores,
-    )
-    if report is not None and result.sweep is not None:
-        report.merge(result.sweep)
-    return result.deleted
+        store=store, batch_api=batch_api, exclude=exclude,
+    ).deleted
 
 
 def clean_report(
@@ -117,74 +95,6 @@ def clean_report(
     store: Any | None = None,
     batch_api: Any | None = None,
     exclude: Collection[str] = (),
-    artifacts: bool = True,
-    extra_stores: Collection[str] = (),
-) -> CleanReport:
-    """:func:`_clean_workflows` (workflow retention), then - unless ``artifacts=False`` - a sweep
-    of the artifact CAS of the stores the deleted anchors named, of ``store=`` if given, and of
-    ``extra_stores`` (store specs, e.g. the configured one: the CLI passes it, so artifacts of
-    workflows whose anchors are already gone are still collected). Only stores named here are
-    ever touched - never the user's config implicitly. The sweep never raises."""
-    if older_than_days is not None and older_than_days < 0:
-        raise ValueError(f"older_than_days must be >= 0, got {older_than_days}")
-    if namespace is None:
-        from sk8s import k8s
-
-        namespace = k8s.current_namespace()
-    if core_api is None:
-        from sk8s import k8s
-
-        core_api = k8s.core_api()
-    opened: dict[str, Any] = {}  # store spec -> opened store (None if it could not be opened)
-    report = _clean_workflows(
-        namespace, older_than_days=older_than_days, workflow=workflow, core_api=core_api,
-        store=store, batch_api=batch_api, exclude=exclude, stores=opened,
-    )
-    if artifacts:
-        report.sweep = _sweep_artifacts(namespace, core_api, store, opened, set(extra_stores))
-    return report
-
-
-def _sweep_artifacts(
-    namespace: str, core_api: Any, store: Any | None, opened: dict[str, Any], extra_specs: set[str],
-) -> gc.SweepReport:
-    """Sweep the CAS of every store in play. Best-effort and never raises."""
-    total = gc.SweepReport()
-    try:
-        targets: list[Any] = []
-        if store is not None:
-            targets.append(store)
-        else:
-            from sk8s.store import get_store
-
-            for spec in sorted(set(opened) | extra_specs):
-                if spec not in opened:
-                    try:
-                        opened[spec] = get_store(spec, namespace=namespace, core_api=core_api)
-                    except Exception:  # noqa: BLE001
-                        log.warning("cannot open store %r to sweep its artifacts", spec, exc_info=True)
-                        opened[spec] = None
-                if opened[spec] is not None:
-                    targets.append(opened[spec])
-        for target in targets:
-            result = gc.sweep(target)
-            log.info(result.summary())
-            total.merge(result)
-    except Exception:  # noqa: BLE001 — artifact GC must never fail a clean()
-        log.warning("artifact sweep failed", exc_info=True)
-    return total
-
-
-def _clean_workflows(
-    namespace: str,
-    *,
-    older_than_days: float | None,
-    workflow: str | None,
-    core_api: Any,
-    store: Any | None,
-    batch_api: Any | None,
-    exclude: Collection[str],
-    stores: dict[str, Any],
 ) -> CleanReport:
     """Delete expired workflows in ``namespace``; report what was deleted and what was kept, why.
 
@@ -212,6 +122,7 @@ def _clean_workflows(
         core_api = k8s.core_api()
 
     report = CleanReport()
+    stores: dict[str, Any] = {}
 
     def keep(wf: str, reason: str) -> None:
         report.kept.append({"workflow": wf, "reason": reason})

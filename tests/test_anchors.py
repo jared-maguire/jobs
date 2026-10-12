@@ -119,7 +119,7 @@ def test_delete_anchor_uses_recorded_prefix(tmp_path) -> None:  # type: ignore[n
 
     _create(core, "wf-a", store_prefix="custom/prefix")
     anchors.delete_anchor(core, Spy(tmp_path), namespace=NS, workflow_id="wf-a")
-    assert calls == ["custom/prefix", "workflows/wf-a"]  # blobs, then the artifact reference set
+    assert calls == ["custom/prefix"]
 
 
 def test_delete_anchor_best_effort(tmp_path) -> None:  # type: ignore[no-untyped-def]

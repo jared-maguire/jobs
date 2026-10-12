@@ -37,9 +37,6 @@ class DryRun:
     n_items: int | None = None
     payload_bytes: int = 0
     notes: list[str] = dataclasses.field(default_factory=list)
-    # Staging, from the Artifacts' declared metadata only (a preview pins and hashes nothing):
-    n_artifacts: int = 0  # distinct Artifact arguments of the representative job
-    artifact_input_bytes: int | None = None  # their summed declared sizes; None if none declared
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

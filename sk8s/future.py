@@ -16,8 +16,6 @@ class JobFuture(concurrent.futures.Future):  # type: ignore[type-arg]
     job even if it has already started running.
     """
 
-    memo_hit = False  # True for a future resolved from a memo entry: no job ever ran
-
     def __init__(self, job_name: str, workflow_id: str, backend: JobBackend) -> None:
         super().__init__()
         self.job_name = job_name

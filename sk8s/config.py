@@ -52,9 +52,6 @@ class Config:
     volume_provision_grace_seconds: float = 300.0
     retention_days: int = 7
     keep_results: bool = False
-    # Memoize every run/submit/map: look up (function, args, input artifacts, image) in the store
-    # before submitting and return the recorded result on a hit. Opt-in (SPEC decision A1).
-    memo: bool = False
     # Extra env vars exported to worker pods (e.g. AWS_* creds for an S3-compatible store).
     # Config file / kwargs only: values are never read from SK8S_* env vars.
     store_env: dict[str, str] = field(default_factory=dict)
@@ -68,7 +65,7 @@ def _coerce(name: str, raw: str) -> Any:
         return int(raw)
     if name in ("volume_wait_seconds", "volume_attach_grace_seconds", "volume_provision_grace_seconds"):
         return float(raw)
-    if name in ("keep_results", "memo"):
+    if name == "keep_results":
         return raw.strip().lower() in ("1", "true", "yes")
     return raw
 

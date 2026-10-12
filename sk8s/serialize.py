@@ -9,13 +9,6 @@ An "err" body is the cloudpickled exception, or b"" when it wasn't picklable. An
 "expect_failed" body is the cloudpickled result VALUE the expectation rejected, so the
 result stays inspectable (``load_result_value``).
 
-Artifact additions (no envelope bump: the BODY is unchanged): a payload header may carry
-"artifacts": [descriptor, ...] (the pinned input Artifacts, informational) and an "ok" result
-header may carry "artifacts": [...] (what the job produced). Old readers ignore the keys; a
-worker that predates artifacts cannot unpickle ``sk8s.artifacts.Artifact`` / ``OutDir`` at all
-and fails loudly before running anything. A payload with no artifacts is byte-identical to the
-previous release's.
-
 Envelope versions: 1 (v2.0 and earlier) had no ``envelope`` field and a 3-tuple body
 ``(func, args, kwargs)``. 2 adds ``expect=``: a payload with an expectation has a 4-tuple
 body ``(func, args, kwargs, expect)``, so a worker that predates it fails the decode loudly
@@ -56,7 +49,6 @@ def encode_payload(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     expect: Callable[..., Any] | None = None,
-    extra_header: dict[str, Any] | None = None,
 ) -> bytes:
     header: dict[str, Any] = {
         "kind": "payload",
@@ -64,7 +56,6 @@ def encode_payload(
         "sk8s": __version__,
         "cloudpickle": cloudpickle.__version__,
         "python": _python_minor(),
-        **(extra_header or {}),
     }
     packed: tuple[Any, ...] = (func, args, kwargs)
     if expect is not None:
@@ -103,14 +94,9 @@ def decode_payload(data: bytes) -> tuple[Callable[..., Any], tuple[Any, ...], di
     return func, args, kwargs
 
 
-def encode_result(value: Any, artifacts: list[dict[str, Any]] | None = None) -> bytes:
-    """``artifacts``: descriptors of the Artifacts the job produced, for tooling that wants the
-    list without unpickling (the value itself carries them too)."""
+def encode_result(value: Any) -> bytes:
     body: bytes = cloudpickle.dumps(value)
-    header: dict[str, Any] = {"kind": "ok", "envelope": ENVELOPE_VERSION}
-    if artifacts:
-        header["artifacts"] = artifacts
-    return json.dumps(header).encode() + b"\n" + body
+    return json.dumps({"kind": "ok", "envelope": ENVELOPE_VERSION}).encode() + b"\n" + body
 
 
 def encode_expect_failed(value: Any, error: ExpectationFailed, tb: str) -> bytes:

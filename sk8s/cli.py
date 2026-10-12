@@ -566,24 +566,13 @@ def _cmd_explain(args: argparse.Namespace) -> int:
 
 
 def _cmd_clean(args: argparse.Namespace) -> int:
-    from sk8s import gc
-
-    cfg = _load_cfg()
     if args.json:
-        _print_json(cleaning.clean_report(
-            _namespace(cfg=cfg), older_than_days=args.older_than, extra_stores=[cfg.store],
-        ).as_dict())
+        _print_json(cleaning.clean_report(_namespace(), older_than_days=args.older_than).as_dict())
         return 0
-    report = gc.SweepReport()
-    deleted = cleaning.clean(
-        _namespace(cfg=cfg), older_than_days=args.older_than, report=report,
-        extra_stores=[cfg.store],
-    )
+    deleted = cleaning.clean(_namespace(), older_than_days=args.older_than)
     if deleted:
         print("\n".join(f"deleted {wf}" for wf in deleted))
-    if report.deleted or report.aborted or report.memo_expired:
-        print(report.summary())
-    if not deleted and not (report.deleted or report.aborted or report.memo_expired):
+    else:
         print("nothing to clean")
     return 0
 

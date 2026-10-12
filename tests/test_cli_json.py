@@ -140,7 +140,7 @@ def test_clean_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtu
 
     monkeypatch.setattr(cleaning, "clean_report", fake)
     assert cli.run(["clean", "--older-than", "36h", "--json"]) == 0
-    assert calls == [("ctx-ns", {"older_than_days": 1.5, "extra_stores": ["k8s"]})]  # + the configured store, for the artifact sweep
+    assert calls == [("ctx-ns", {"older_than_days": 1.5})]
     assert json.loads(capsys.readouterr().out) == {
         "deleted": ["wf-1"],
         "kept": [{"workflow": "wf-2", "reason": "not expired: 1.00 days old, limit 7 days"}],
