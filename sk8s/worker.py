@@ -57,7 +57,7 @@ def _sweep(environ: Mapping[str, str]) -> None:
         own = environ.get("SK8S_WORKFLOW_ID")
         clean(
             environ.get("SK8S_NAMESPACE"), core_api=_core_api(), batch_api=_batch_api(),
-            exclude=(own,) if own else (),
+            exclude=(own,) if own else (), artifacts=False,
         )
     except Exception:  # noqa: BLE001 — a sweep must never fail the job
         log.warning("retention sweep failed", exc_info=True)

@@ -46,7 +46,7 @@ _STUCK_PHASES = ("imagepull", "volume-stuck")
 _DRY_RUN_UID = "<assigned-when-the-workflow-anchor-is-created>"
 _SELECTOR = "app.kubernetes.io/managed-by=sk8s"
 # Workflow ids that collide with non-workflow key prefixes in the store.
-RESERVED_WORKFLOW_IDS = frozenset({"svc", "doctor"})
+RESERVED_WORKFLOW_IDS = frozenset({"svc", "doctor", "artifacts", "workflows"})
 _FETCH_ATTEMPTS = 3
 _RETRY_DELAY = 0.5  # seconds between result-fetch attempts (store write visibility lag)
 _K8S_DEFAULT_BACKOFF_LIMIT = 6
