@@ -6,8 +6,8 @@ Needs the worker image built from THIS branch, tagged ``sk8s-dev-artifacts:lates
     SK8S_INTEGRATION=1 SK8S_NAMESPACE=sk8s-it-art SK8S_CONFIG=/tmp/none.toml \\
         KUBECONFIG=.kubeconfig-minikube .venv/bin/pytest tests/integration/test_artifacts.py -v
 
-Override the tag with ``SK8S_ARTIFACTS_TEST_IMAGE``. The suite creates its namespace (via
-``sk8s config``'s own machinery) if absent; delete it afterwards with ``kubectl delete ns``.
+Override the tag with ``SK8S_ARTIFACTS_TEST_IMAGE``. The suite creates its own namespace
+(``sk8s-it-art``, see ``artifacts_env``) via ``sk8s config``'s machinery and deletes it at exit.
 """
 from __future__ import annotations
 
@@ -27,22 +27,16 @@ from sk8s.cas import ArtifactStore, cas_key
 from sk8s.cluster import Cluster
 from sk8s.config import load_config
 from sk8s.local import LocalCluster
-from sk8s.profile import apply, profile_for
 from sk8s.store.configmap import ConfigMapStore
 from sk8s.store.retry import update_blob
-from tests.integration.conftest import requires_cluster, suite_namespace, suite_pull_policy
+from tests.integration.artifacts_env import IMAGE, ensure_namespace
+from tests.integration.conftest import requires_cluster, suite_pull_policy
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(300)]
 
-IMAGE = os.environ.get("SK8S_ARTIFACTS_TEST_IMAGE", "sk8s-dev-artifacts:latest")
-
-
 @pytest.fixture(scope="module")
 def ns() -> str:
-    name = suite_namespace()
-    assert name.startswith("sk8s-it-"), f"refusing to run artifact tests in namespace {name!r}"
-    apply(profile_for("local", namespace=name, store="k8s"))
-    return name
+    return ensure_namespace()  # a namespace of the suite's own, whatever SK8S_NAMESPACE says
 
 
 def new_cluster(ns: str) -> Cluster:
