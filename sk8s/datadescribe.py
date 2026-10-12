@@ -2,7 +2,8 @@
 
 ``describe(path_or_uri)`` answers the first question of any analysis ("what do I have?") from
 the bytes themselves: for one file, the detected format plus the facts its header carries
-(read length, BAM sort order and references, VCF samples, CSV columns, ...); for a directory
+(read length, BAM sort order and references, VCF samples, CSV columns, FASTA contigs, FASTA / BAM
+index contents, ...); for a directory
 or ``gs://`` / ``s3://`` prefix, a cohort summary (counts by format, sizes, naming patterns such
 as FASTQ R1/R2 pairing, and per-file facts for the first few files).
 
@@ -65,7 +66,7 @@ _EXT_FORMATS = {
 _GZ_EXTS = (".gz", ".bgz")
 _PRIORITY = ("fastq", "bam", "cram", "vcf", "csv", "tsv", "fasta")  # headline tie-break, most interesting first
 _AUXILIARY_FORMATS = {"index", "unknown", "text"}
-_CHECKED_FORMATS = {"fastq", "bam", "cram", "vcf", "csv", "tsv"}  # extensions we hold content to
+_CHECKED_FORMATS = {"fastq", "bam", "cram", "vcf", "csv", "tsv", "fasta"}  # extensions we hold content to
 
 
 def extension_format(name: str) -> str:
@@ -211,6 +212,100 @@ def _fastq_facts(lines: list[str], *, countable: bool, notes: list[str]) -> Fact
             notes.append(f"line count ({len(lines)}) is not a multiple of 4: truncated or malformed FASTQ")
     else:
         facts["records"] = "not counted"
+    return facts
+
+
+# --- FASTA and its indexes ----------------------------------------------------------------------
+
+_FASTA_SEQ = re.compile(r"^[A-Za-z*\-.]+$")
+_FASTA_PROBE_LINES = 5000  # lines checked to decide "this is FASTA"; counting then trusts the rest
+_NUCLEOTIDES = frozenset("ACGTUNacgtun")
+PARTIAL_HEAD_NOTE = "at least this many: only the first part of the file was read"
+FASTA_INDEX_FORMAT = "fasta-index (fai)"
+BAM_INDEX_FORMAT = "bam-index (bai)"
+
+
+def _looks_like_fasta(lines: list[str]) -> bool:
+    probe = [ln.rstrip() for ln in lines[:_FASTA_PROBE_LINES] if ln.strip()]
+    # at least one sequence line: a file of nothing but "> ..." lines is quoted text, not FASTA
+    return bool(probe) and probe[0].startswith(">") and any(not ln.startswith(">") for ln in probe) and all(
+        ln.startswith(">") or _FASTA_SEQ.match(ln) is not None for ln in probe
+    )
+
+
+def _fasta_facts(lines: list[str], *, countable: bool) -> Facts:
+    names: list[str] = []
+    contigs = 0
+    residues = 0
+    nucleotides = 0
+    width_votes: Counter[int] = Counter()
+    prev_len: int | None = None  # the previous sequence line of the current record (not its last line)
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            contigs += 1
+            if len(names) < _FIRST_N:
+                header = line[1:].split(None, 1)
+                names.append(header[0] if header else "")
+            prev_len = None
+            continue
+        if prev_len is not None:
+            width_votes[prev_len] += 1
+        prev_len = len(line)
+        residues += len(line)
+        if residues <= 1_000_000:  # the alphabet guess needs a sample, not every residue
+            nucleotides += sum(1 for c in line if c in _NUCLEOTIDES)
+    sampled = min(residues, 1_000_000)
+    facts: Facts = {
+        "contigs": names,
+        "contig_count": contigs,
+        "sequence_type": "nucleotide" if sampled and nucleotides / sampled >= 0.9 else ("protein" if sampled else "none"),
+        "line_width": width_votes.most_common(1)[0][0] if width_votes else None,
+    }
+    if countable:
+        facts["total_residues"] = residues
+    else:
+        facts["total_residues"] = "not counted"
+        facts["contig_count_note"] = PARTIAL_HEAD_NOTE
+    return facts
+
+
+def _parse_fai(lines: list[str]) -> list[tuple[str, int]] | None:
+    """(name, length) per row of a FASTA index (name, length, offset, linebases, linewidth), or None."""
+    rows: list[tuple[str, int]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        cols = line.rstrip("\r").split("\t")
+        if len(cols) not in (5, 6) or not cols[0]:
+            return None
+        try:
+            length, *rest = (int(c) for c in cols[1:5])
+        except ValueError:
+            return None
+        if length < 0 or any(v < 0 for v in rest):
+            return None
+        rows.append((cols[0], length))
+    return rows or None
+
+
+def _fai_facts(rows: list[tuple[str, int]], *, complete: bool) -> Facts:
+    facts: Facts = {
+        "contig_count": len(rows),
+        "contigs": [{"name": n, "length": ln} for n, ln in rows[:_FIRST_N]],
+        "total_length": sum(ln for _, ln in rows),
+    }
+    if not complete:
+        facts["contig_count_note"] = PARTIAL_HEAD_NOTE
+    return facts
+
+
+def _bai_facts(head: bytes) -> Facts:
+    facts: Facts = {}
+    if len(head) >= 8:
+        facts["reference_count"] = struct.unpack_from("<i", head, 4)[0]
     return facts
 
 
@@ -461,6 +556,9 @@ def _sniff(
             facts["file_id"] = head[6:26].rstrip(b"\x00").decode("ascii", "replace")
         return _result("cram", "magic", None, facts, notes)
 
+    if head[:4] == b"BAI\x01":
+        return _result(BAM_INDEX_FORMAT, "magic", None, _bai_facts(head), notes)
+
     compression: str | None = None
     data = head
     data_complete = complete
@@ -481,14 +579,28 @@ def _sniff(
         if _looks_like_fastq(lines):
             countable = data_complete and size < small_file_bytes
             return _result("fastq", "content", compression, _fastq_facts(lines, countable=countable, notes=notes), notes)
+        is_fai_name = name.lower().removesuffix(".gz").removesuffix(".bgz").endswith(".fai")
+        if is_fai_name:  # a headerless 5-column table is only called an index when its name says so
+            fai = _parse_fai(lines)
+            if fai is not None:
+                return _result(FASTA_INDEX_FORMAT, "content", compression, _fai_facts(fai, complete=data_complete), notes)
+            if any(ln.strip() for ln in lines):
+                notes.append(
+                    "name ends in .fai but the content is not a FASTA index "
+                    "(tab-separated name, length, offset, line bases, line width)"
+                )
+        if _looks_like_fasta(lines):
+            countable = data_complete and size < small_file_bytes
+            return _result("fasta", "content", compression, _fasta_facts(lines, countable=countable), notes)
         delim = _sniff_delimiter(lines)
         if delim is not None:
             fmt = {",": "csv", "\t": "tsv"}.get(delim, "delimited")
             return _result(fmt, "content", compression, _table_facts(lines, delim), notes)
         # Nothing matched: lean on the extension only where the content is too thin to contradict it.
         thin = not any(ln.strip() for ln in lines)
-        if ext_fmt in ("fastq", "vcf", "csv", "tsv") and (
-            thin or (ext_fmt == "fastq" and lines[0].startswith("@")) or (ext_fmt in ("csv", "tsv") and lines)
+        if ext_fmt in ("fastq", "vcf", "csv", "tsv", "fasta") and (
+            thin or (ext_fmt == "fastq" and lines[0].startswith("@"))
+            or (ext_fmt == "fasta" and lines[0].startswith(">")) or (ext_fmt in ("csv", "tsv") and lines)
         ):
             notes.append("too little content to confirm the format; identified from the file extension")
             facts = {}
@@ -969,6 +1081,12 @@ def _summary(d: dict[str, Any]) -> str:
         parts = [f["fileformat"], f"{f.get('sample_count', '?')} samples", f"{f['contig_count']} contigs"]
     elif fmt in ("csv", "tsv", "delimited"):
         parts = [f"{f['column_count']} columns", "header" if f["has_header"] else "no header"]
+    elif fmt == "fasta":
+        parts = [f"{f['contig_count']} contigs", f"{f['sequence_type']}"]
+    elif fmt == FASTA_INDEX_FORMAT:
+        parts = [f"{f['contig_count']} contigs"]
+    elif fmt == BAM_INDEX_FORMAT:
+        parts = [f"{f['reference_count']} refs"] if "reference_count" in f else []
     else:
         parts = []
     comp = f"{d['compression']}, " if d.get("compression") else ""

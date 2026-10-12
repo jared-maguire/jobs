@@ -169,7 +169,11 @@ sk8s data describe gs://lab/runs/oct/ [--json] [--samples 5] [--max-objects 1000
 - One file -> `{"kind": "file", "format", "confidence", "compression", "facts", "notes"}`.
   Formats: FASTQ(.gz) (read length, phred offset guess, record count only if the file is
   <10MB), BAM (sort order, references, read groups, aligner), CRAM (version), VCF(.gz)
-  (samples, contigs, reference), CSV/TSV (delimiter, header, column types), gzip/unknown.
+  (samples, contigs, reference), FASTA by content, whatever the name (first 5 contig names,
+  contig count, sequence type, line width; total residues only if the file is <10MB, else
+  the count is a lower bound and says so), `.fai` (`fasta-index (fai)`: contig names and
+  lengths), `.bai` (`bam-index (bai)`, by magic: reference count), CSV/TSV (delimiter,
+  header, column types), gzip/unknown.
 - Directory or `gs://`/`s3://` prefix -> `{"kind": "cohort", ...}`: counts and bytes by
   format, size stats, `patterns` (FASTQ R1/R2 pairing + samples estimate, BAM index
   pairing), and full facts for the first 5 files (sorted by path).
