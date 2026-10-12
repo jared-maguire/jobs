@@ -24,7 +24,7 @@ deadline for the whole map, **not** a per-job kill; `submit`/`submit_map` accept
 and ignore `timeout` (bound the wait at `fut.result(timeout=...)` instead).
 `namespace` must equal the cluster's namespace (`ValueError` otherwise) — switch
 namespaces via config, not per-job.
-`timeout`, `expect` and `pilot` are reserved option names like `image`: they are consumed by
+`timeout`, `expect`, `pilot` and `budget` are reserved option names like `image`: they are consumed by
 sk8s and never forwarded to your function (`serve()` rejects `expect=` with `ValueError`).
 
 `sk8s.configure(namespace=..., image=..., store=...)` overrides config for the
@@ -259,10 +259,18 @@ What is enforced, honestly:
   sk8s cannot know how long a job runs) and `usd = cpu-hours x $0.04` (the
   `sk8s.explain` rate). Over `max_cpu_hours` / `max_estimated_usd` -> `BudgetExceeded`
   before anything is created. A fan-out (`pilot` included) is admitted **whole**, before
-  its first job. Jobs with no `requests`/`limits` estimate to 0 (the verdict says so):
-  set `requests=` for the cost limits to bite. Memory, GPUs and storage are not costed.
-  Admission runs before memoization and artifact lookups, so a `memo=True` hit is charged as
-  if it had run (conservative: it costs nothing in fact).
+  its first job. **A job that requests no cpu estimates to 0 and passes any cost limit**: by
+  default the cost limits are blind to it (the verdict carries a note and the first such
+  submission per cluster logs a warning). Close the hole by setting `requests=`, or set
+  `Budget(assumed_cpu_when_unset=1)` to charge such jobs that many cores each. Memory, GPUs and
+  storage are not costed.
+- **Memoization.** A single `memo=True` job is admitted *after* the memo lookup, so a hit is
+  never refused for what it would have cost; a miss is refused as usual (it leaves at most a
+  swept anchor and staged-input record, no payload or Job). A **fan-out is admitted whole before
+  any lookup**, so its memo hits are charged as if they ran (the error says so): raise the
+  budget or preview with `dry_run=True`.
+- **Per-call vs configured.** A per-call `budget=` *replaces* the configured one outright
+  (it may loosen it); there is no "tighter wins" merge.
 - **Concurrency is a cap, not a failure.** `max_concurrent_pods` tightens `max_concurrent`
   (the min applies) for each `map`/`submit_map`/`starmap` call, so submission blocks
   instead of raising. It is per fan-out call: not across separate calls or a plain
@@ -286,11 +294,18 @@ sk8s sandbox delete try1                                   # namespace + store p
 `create` applies the normal profile (local/generic; gke only when the kube context is a GKE
 one; `--gsa` for Workload Identity), carves the store (`s3://b/p` -> `s3://b/p/sbx-try1`, `local:` likewise;
 `k8s` is already namespace-scoped and kept), and writes an isolated 0600 config (namespace, store, budget, image
-settings, `store_env`) next to you; your own config is untouched. `--ttl` (default 24h) is an
+settings, `store_env`) next to you; your own config is untouched. Use `--assume-cpu 1` with
+`--budget-usd` (it sets `assumed_cpu_when_unset`), otherwise the usd limit cannot see jobs that
+request no cpu. `--ttl` (default 24h) is an
 annotation: `sk8s clean` / `sk8s.clean()` reaps **expired** sandboxes cluster-wide, under the
 workflow rules (300s minimum age; never with active jobs or running services; unprovable ->
 kept; `clean --json` lists them under `sandboxes`). Worker start-up sweeps never reap
-sandboxes. `delete` is unconditional (live jobs die) but refuses any namespace that is not
+sandboxes; `sk8s clean` prints `reaped sandbox X (ttl expired)` for each. Whoever runs
+`delete`/`clean` needs credentials for the sandbox's base store (bucket access for s3/gs): the
+store prefix is removed first and a sandbox whose prefix cannot be removed is kept. The
+isolated `.sk8s-sandbox-<name>.toml` is removed by `delete` run from the directory holding it;
+a reap (or a delete from elsewhere) leaves that stale file behind. `--ttl` is capped at 3650d.
+`delete` is unconditional (live jobs die) but refuses any namespace that is not
 labelled as a sandbox, and keeps the namespace if the store prefix cannot be deleted.
 
 ## CLI

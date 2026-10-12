@@ -19,6 +19,7 @@ from typing import Any, Collection
 
 from sk8s import anchors, gc
 from sk8s.cluster import job_phase
+from sk8s.sandbox import ReapReport
 
 log = logging.getLogger("sk8s.cleaning")
 
@@ -102,17 +103,22 @@ def clean(
     extra_stores: Collection[str] = (),
     sandboxes: bool = True,
     apps_api: Any | None = None,
+    sandbox_report: ReapReport | None = None,
 ) -> list[str]:
     """Delete expired workflows in ``namespace`` and return the deleted workflow ids.
 
     See :func:`clean_report` for the rules; this is its ``deleted`` list. Pass a
-    ``gc.SweepReport`` as ``report`` to receive what the artifact sweep did.
+    ``sandbox.ReapReport`` as ``sandbox_report`` to receive which sandboxes were reaped / kept,
+    and a ``gc.SweepReport`` as ``report`` to receive what the artifact sweep did.
     """
     result = clean_report(
         namespace, older_than_days=older_than_days, workflow=workflow, core_api=core_api,
         store=store, batch_api=batch_api, exclude=exclude, artifacts=artifacts,
         extra_stores=extra_stores, sandboxes=sandboxes, apps_api=apps_api,
     )
+    if sandbox_report is not None:
+        sandbox_report.deleted.extend(result.sandboxes_deleted)
+        sandbox_report.kept.extend(result.sandboxes_kept)
     if report is not None and result.sweep is not None:
         report.merge(result.sweep)
     return result.deleted

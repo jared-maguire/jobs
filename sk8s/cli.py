@@ -593,15 +593,18 @@ def _cmd_clean(args: argparse.Namespace) -> int:
         ).as_dict())
         return 0
     report = gc.SweepReport()
+    reaped = sandbox.ReapReport()
     deleted = cleaning.clean(
         _namespace(cfg=cfg), older_than_days=args.older_than, report=report,
-        extra_stores=[cfg.store],
+        extra_stores=[cfg.store], sandbox_report=reaped,
     )
     if deleted:
         print("\n".join(f"deleted {wf}" for wf in deleted))
+    if reaped.deleted:
+        print("\n".join(f"reaped sandbox {name} (ttl expired)" for name in reaped.deleted))
     if report.deleted or report.aborted or report.memo_expired:
         print(report.summary())
-    if not deleted and not (report.deleted or report.aborted or report.memo_expired):
+    if not (deleted or reaped.deleted or report.deleted or report.aborted or report.memo_expired):
         print("nothing to clean")
     return 0
 
@@ -637,7 +640,7 @@ def _cmd_sandbox_create(args: argparse.Namespace) -> int:
         raise Sk8sError(f"--gsa is a GKE option; provider is {provider!r} (use --provider gke)")
     made = sandbox.create(
         args.name, cfg=cfg, provider=provider, provider_args=provider_args, ttl_seconds=ttl,
-        budget_usd=args.budget_usd,
+        budget_usd=args.budget_usd, assume_cpu=args.assume_cpu,
     )
     box = made.sandbox
     if args.json:
@@ -903,6 +906,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", help="sandbox name (default: random); namespace is sk8s-sbx-<name>")
     p.add_argument("--budget-usd", type=_positive_float, metavar="X",
                    help="default budget: max estimated spend per submission (estimate-based admission)")
+    p.add_argument("--assume-cpu", type=_positive_float, metavar="CORES",
+                   help="with --budget-usd: charge jobs that request no cpu this many cores "
+                   "(without it the usd limit cannot see them; recommended, e.g. 1)")
     p.add_argument("--ttl", default="24h", metavar="T",
                    help="time to live before 'sk8s clean' may reap it: 90m, 24h, 7d (default: 24h)")
     p.add_argument("--provider", help="local | generic | gke (default: detected from the kube context)")

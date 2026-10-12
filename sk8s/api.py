@@ -93,6 +93,12 @@ def _fan_budget(opts: dict[str, Any]) -> Budget | None:
     return budget if isinstance(budget, Budget) else None
 
 
+_MEMO_HINT = (
+    "memo is on, but a fan-out is admitted whole before any memo lookup: memo hits are charged "
+    "as if they run. Raise the budget, or use dry_run=True to see the estimate"
+)
+
+
 def _admit_fan_out(budget: Budget, n_items: int, opts: dict[str, Any]) -> None:
     """Raise ``BudgetExceeded`` if the WHOLE fan-out (all its jobs, ``pilot`` included) is over
     ``budget``. Pure arithmetic on the options; runs before the first job is submitted."""
@@ -102,9 +108,11 @@ def _admit_fan_out(budget: Budget, n_items: int, opts: dict[str, Any]) -> None:
     _positive("max_concurrent", max_concurrent)
     n_jobs = -(-n_items // batch_size)
     cpu, _ = resource_totals(opts.get("requests"), opts.get("limits"))
+    memo = bool(opts.get("memo")) or bool(getattr(getattr(_cluster(), "config", None), "memo", False))
     budget.evaluate(
-        n_jobs=n_jobs, cpu_cores=cpu * n_jobs, max_concurrent=max_concurrent
-    ).raise_if_exceeded()
+        n_jobs=n_jobs, cpu_cores=cpu * n_jobs, max_concurrent=max_concurrent,
+        unrequested_jobs=n_jobs if cpu == 0 else 0,
+    ).raise_if_exceeded(hint=_MEMO_HINT if memo else None)
 
 
 def _dry_run_with(call: Callable[[Any], DryRun]) -> DryRun:
@@ -436,7 +444,8 @@ def _dry_run_many(
     if verdict is not None:  # the single-job verdict becomes the whole fan-out's
         notes = [n for n in notes if not n.startswith("BUDGET EXCEEDED")]
         verdict = Budget(**verdict.budget).evaluate(
-            n_jobs=n_jobs, cpu_cores=one.total_cpu_request * n_jobs, max_concurrent=max_concurrent
+            n_jobs=n_jobs, cpu_cores=one.total_cpu_request * n_jobs, max_concurrent=max_concurrent,
+            unrequested_jobs=n_jobs if one.total_cpu_request == 0 else 0,
         )
         if not verdict.ok:
             notes.append("BUDGET EXCEEDED (a real submission would raise BudgetExceeded): "
@@ -543,8 +552,10 @@ def submit_map(
       until the pilot finishes, and the futures for the non-pilot items exist only after
       the pilot passes. ``timeout=`` (discarded without ``pilot``) bounds this wait.
 
-    ``expect=`` (a job option) is applied to every item's result. ``expect`` and ``pilot``
-    are reserved names: they are never forwarded to ``func``.
+    ``expect=`` (a job option) is applied to every item's result. ``expect``, ``pilot`` and
+    ``budget`` are reserved names: they are never forwarded to ``func``. ``budget=`` (a
+    :class:`sk8s.Budget`) REPLACES the configured budget for this call; the whole fan-out is
+    admitted against it before the first job, and its ``max_concurrent_pods`` caps ``max_concurrent``.
 
     ``dry_run=True`` submits nothing and returns a :class:`sk8s.DryRun`: one representative
     Job body, ``n_jobs`` (batches, with ``batch_size``) and request totals; 10k bodies are

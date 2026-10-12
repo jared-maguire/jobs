@@ -7,6 +7,12 @@ it cleans itself up. Everything needed to find and delete the sandbox later live
 itself (label ``sk8s/kind=sandbox`` plus annotations), so ``list`` / ``delete`` / ``reap`` need no
 local state and no config file.
 
+Whoever runs ``delete`` / ``clean`` / ``reap`` needs credentials for the sandbox's BASE store
+(bucket access for s3/gs): removing the store prefix is part of deleting a sandbox, and a sandbox
+whose prefix cannot be removed is kept, not half-deleted. The isolated config file is written to
+the creator's working directory and its location is not recorded, so ``delete`` from that
+directory removes it but a reap (or delete from elsewhere) leaves it behind: harmless, stale.
+
 Reaping follows the same rules as workflow retention (``sk8s.cleaning``): an expired sandbox is
 deleted only if it is older than a minimum age, has no active jobs, and has no running services;
 anything that cannot be proven idle is kept.
@@ -56,6 +62,7 @@ _NAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 _MAX_NAME = 63 - len(NAMESPACE_PREFIX)  # a namespace is a DNS label
 _TTL = re.compile(r"(\d+(?:\.\d+)?)([smhd])")
 _UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+MAX_TTL_SECONDS = 3650 * 86400.0  # ten years: past that a datetime would overflow, and it is no ttl
 
 
 # --- names, ttl, store ---------------------------------------------------------------------------------
@@ -94,6 +101,8 @@ def parse_ttl(text: str) -> float:
         raise Sk8sError(
             f"invalid ttl {text!r}: a positive number and a unit, e.g. 90m, 24h, 7d (s/m/h/d)"
         )
+    if seconds > MAX_TTL_SECONDS:
+        raise Sk8sError(f"ttl {text!r} is too long: at most 3650d")
     return seconds
 
 
@@ -254,6 +263,7 @@ def create(
     provider_args: Mapping[str, Any] | None = None,
     ttl_seconds: float = DEFAULT_TTL_SECONDS,
     budget_usd: float | None = None,
+    assume_cpu: float | None = None,
     config_dir: Path | None = None,
     core_api: Any | None = None,
     rbac_api: Any | None = None,
@@ -268,9 +278,14 @@ def create(
     for gke) goes through the same ``profile_for`` ``sk8s config`` uses. Refuses an existing
     namespace; if applying the profile fails the namespace is deleted again.
     """
-    if ttl_seconds <= 0:
-        raise Sk8sError(f"ttl must be positive, got {ttl_seconds}")
-    budget = Budget(max_estimated_usd=budget_usd) if budget_usd is not None else None
+    if not 0 < ttl_seconds <= MAX_TTL_SECONDS:
+        raise Sk8sError(f"ttl must be positive and at most 3650d, got {ttl_seconds}s")
+    if assume_cpu is not None and budget_usd is None:
+        raise Sk8sError("--assume-cpu only means something with --budget-usd")
+    budget = (
+        Budget(max_estimated_usd=budget_usd, assumed_cpu_when_unset=assume_cpu)
+        if budget_usd is not None else None
+    )
     name = new_name(name)
     namespace = namespace_for(name)
     stamp = now or datetime.datetime.now(datetime.timezone.utc)
@@ -336,7 +351,7 @@ def create(
 def _clean_store(box: Sandbox, core_api: Any) -> str | None:
     """Delete the sandbox's key prefix from its base store; the line to report, or None if the
     store needs nothing (k8s: the namespace owns the blobs). Raises Sk8sError if it cannot."""
-    if not box.store_base or box.store_base == "k8s" or not box.store_prefix:
+    if box.store_base == "k8s":
         return None
     from sk8s.store import get_store
 
@@ -353,7 +368,21 @@ def _clean_store(box: Sandbox, core_api: Any) -> str | None:
     return f"deleted store prefix {box.store_prefix} under {box.store_base}"
 
 
+def _validate_record(box: Sandbox) -> None:
+    """The store prefix is deleted from whatever the namespace's annotations say, so trust none of
+    it blindly: a sandbox's prefix is exactly ``sbx-<name>`` and it must name a base store. A
+    mismatch (hand-edited or damaged annotations) deletes nothing."""
+    if box.store_prefix != STORE_PREFIX + box.name or not box.store_base:
+        raise Sk8sError(
+            f"sandbox {box.name!r} has an inconsistent store record (prefix {box.store_prefix!r}, "
+            f"base {box.store_base!r}; expected prefix {STORE_PREFIX + box.name!r} and a base "
+            "store); refusing to delete anything from it on that basis. Fix the namespace "
+            f"annotations {ANN_STORE_PREFIX} / {ANN_STORE_BASE}, or delete the namespace by hand"
+        )
+
+
 def _remove(box: Sandbox, core_api: Any) -> list[str]:
+    _validate_record(box)
     lines = []
     line = _clean_store(box, core_api)
     if line:

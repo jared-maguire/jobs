@@ -84,11 +84,44 @@ def test_concurrency_is_a_cap_never_a_violation() -> None:
     assert v.peak_pods == 2
 
 
-def test_no_cpu_request_is_noted_when_cost_limits_are_set() -> None:
-    v = Budget(max_estimated_usd=1.0).evaluate(n_jobs=1, cpu_cores=0.0)
-    assert v.ok and any("requests" in n for n in v.notes)
-    v = Budget(max_concurrent_pods=2).evaluate(n_jobs=1, cpu_cores=0.0)
-    assert not v.notes
+def test_unrequested_jobs_are_uncosted_and_flagged_when_a_cost_limit_is_set() -> None:
+    v = Budget(max_estimated_usd=1.0).evaluate(n_jobs=3, cpu_cores=0.0, unrequested_jobs=3)
+    assert v.ok and v.uncosted_jobs == 3 and any("requests" in n for n in v.notes)
+    # no cost limit, nothing to be blind about
+    v = Budget(max_concurrent_pods=2).evaluate(n_jobs=1, cpu_cores=0.0, unrequested_jobs=1)
+    assert not v.notes and v.uncosted_jobs == 0
+
+
+def test_assumed_cpu_when_unset_charges_jobs_that_request_nothing() -> None:
+    b = Budget(max_estimated_usd=0.05, assumed_cpu_when_unset=1.0)
+    v = b.evaluate(n_jobs=2, cpu_cores=0.0, unrequested_jobs=2)  # 2 cores x 1h x $0.04 = $0.08
+    assert not v.ok and v.estimated_cpu_hours == pytest.approx(2.0) and v.uncosted_jobs == 0
+    assert "max_estimated_usd" in v.violations[0]
+    assert any("assumed_cpu_when_unset" in n for n in v.notes)
+    # jobs that DO request cpu are charged what they request, not the assumption
+    v = b.evaluate(n_jobs=2, cpu_cores=0.5, unrequested_jobs=0)
+    assert v.ok and v.estimated_cpu_hours == pytest.approx(0.5)
+
+
+def test_assumed_cpu_when_unset_validates_and_roundtrips() -> None:
+    for bad in (0, -1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            Budget(assumed_cpu_when_unset=bad)
+    b = Budget(max_cpu_hours=1.0, assumed_cpu_when_unset=0.5)
+    assert Budget.coerce(b.to_json()) == b and b.to_dict()["assumed_cpu_when_unset"] == 0.5
+    assert "assumed_cpu_when_unset" not in Budget().to_dict()
+
+
+def test_nan_and_infinite_assumptions_are_rejected() -> None:
+    with pytest.raises(ValueError):
+        Budget(max_cpu_hours=float("nan"))
+    with pytest.raises(ValueError):
+        Budget(max_estimated_usd=float("nan"))
+    with pytest.raises(ValueError):
+        Budget(assumed_job_hours=float("nan"))
+    with pytest.raises(ValueError):
+        Budget(assumed_job_hours=float("inf"))
+    Budget(max_cpu_hours=float("inf"))  # an infinite LIMIT is just "no limit"
 
 
 def test_cap_concurrency_helper() -> None:
@@ -107,6 +140,9 @@ def test_budget_exceeded_is_typed_exported_and_pickles() -> None:
     assert ei.value.violations == v.violations
     assert ei.value.verdict["estimated_cpu_hours"] == pytest.approx(4.0)
     assert "max_cpu_hours" in str(ei.value)
+    with pytest.raises(sk8s.BudgetExceeded, match=r"\(a hint\)") as hi:
+        v.raise_if_exceeded(hint="a hint")
+    assert pickle.loads(pickle.dumps(hi.value)).hint == "a hint"
     again = pickle.loads(pickle.dumps(ei.value))
     assert isinstance(again, sk8s.BudgetExceeded) and again.violations == v.violations
     assert str(again) == str(ei.value)

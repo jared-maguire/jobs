@@ -186,3 +186,56 @@ def test_clean_help_mentions_sandboxes(capsys: pytest.CaptureFixture[str]) -> No
     with pytest.raises(SystemExit):
         cli.run(["clean", "--help"])
     assert "sandbox" in capsys.readouterr().out
+
+
+def _expire(cluster: FakeCoreV1, name: str) -> None:
+    import datetime as dt
+
+    now = dt.datetime.now(dt.timezone.utc)
+    ann = cluster.namespaces[sandbox.namespace_for(name)].metadata.annotations
+    ann[sandbox.ANN_CREATED] = (now - dt.timedelta(days=3)).isoformat()
+    ann[sandbox.ANN_EXPIRES] = (now - dt.timedelta(days=2)).isoformat()
+
+
+def test_clean_text_says_which_sandboxes_it_reaped(
+    cluster: FakeCoreV1, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.fakes import FakeAppsV1
+
+    monkeypatch.setattr(k8s, "apps_api", lambda: FakeAppsV1())
+    cli.run(["sandbox", "create", "--name", "old"])
+    cli.run(["sandbox", "create", "--name", "young"])
+    _expire(cluster, "old")
+    capsys.readouterr()
+    assert cli.run(["clean"]) == 0
+    out = capsys.readouterr().out
+    assert out == "reaped sandbox old (ttl expired)\n"  # not "nothing to clean"
+    assert "sk8s-sbx-old" not in cluster.namespaces and "sk8s-sbx-young" in cluster.namespaces
+    assert cli.run(["clean"]) == 0
+    assert capsys.readouterr().out == "nothing to clean\n"  # nothing involved: the pinned line
+
+
+def test_clean_text_lists_workflows_and_sandboxes_together(
+    cluster: FakeCoreV1, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sk8s import cleaning
+    from tests.fakes import FakeAppsV1
+
+    monkeypatch.setattr(k8s, "apps_api", lambda: FakeAppsV1())
+    cli.run(["sandbox", "create", "--name", "old"])
+    _expire(cluster, "old")
+    real = cleaning.clean
+    monkeypatch.setattr(cleaning, "clean", lambda *a, **k: (real(*a, **k), ["wf-1"])[1])
+    capsys.readouterr()
+    cli.run(["clean"])
+    assert capsys.readouterr().out == "deleted wf-1\nreaped sandbox old (ttl expired)\n"
+
+
+def test_create_assume_cpu_flag_and_ttl_cap(cluster: FakeCoreV1, env: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.run(["sandbox", "create", "--name", "a", "--budget-usd", "1", "--assume-cpu", "2"]) == 0
+    assert tomllib.loads((env / ".sk8s-sandbox-a.toml").read_text())["budget"]["assumed_cpu_when_unset"] == 2.0
+    assert cli.run(["sandbox", "create", "--name", "b", "--assume-cpu", "2"]) == 1
+    assert "budget-usd" in capsys.readouterr().err
+    assert cli.run(["sandbox", "create", "--name", "c", "--ttl", "99999999d"]) == 1
+    assert "too long" in capsys.readouterr().err
+    assert "sk8s-sbx-b" not in cluster.namespaces and "sk8s-sbx-c" not in cluster.namespaces

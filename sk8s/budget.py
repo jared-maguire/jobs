@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from sk8s.errors import BudgetExceeded
 
-_FIELDS = ("max_concurrent_pods", "max_cpu_hours", "max_estimated_usd", "assumed_job_hours")
+_FIELDS = (
+    "max_concurrent_pods", "max_cpu_hours", "max_estimated_usd", "assumed_job_hours",
+    "assumed_cpu_when_unset",
+)
 
 
 def _non_negative(name: str, value: Any) -> None:
@@ -26,8 +30,15 @@ def _non_negative(name: str, value: Any) -> None:
         return
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"budget {name} must be a number, got {value!r}")
-    if value < 0:
+    if math.isnan(value) or value < 0:
         raise ValueError(f"budget {name} must be >= 0, got {value!r}")
+
+
+UNCOSTED_NOTE = (
+    "no cpu request or limit on these jobs, so their cost estimates to 0 and the cpu-hour / usd "
+    "limits cannot see them: set requests= (or limits=), or set the budget's "
+    "assumed_cpu_when_unset to charge them a fixed number of cores"
+)
 
 
 @dataclass(frozen=True)
@@ -49,13 +60,16 @@ class BudgetVerdict:
     effective_max_concurrent: int | None = None
     violations: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Jobs that request no cpu at all while a cost limit is set and no assumed_cpu_when_unset
+    # charges them: the jobs the cost limits cannot see. 0 when nothing slips through.
+    uncosted_jobs: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
-    def raise_if_exceeded(self) -> None:
+    def raise_if_exceeded(self, hint: str | None = None) -> None:
         if not self.ok:
-            raise BudgetExceeded(self.violations, self.to_dict())
+            raise BudgetExceeded(self.violations, self.to_dict(), hint=hint)
 
 
 @dataclass(frozen=True)
@@ -67,15 +81,20 @@ class Budget:
       than fails. It is enforced per fan-out call, not across separate calls or plain
       ``submit()`` loops.
     - ``max_cpu_hours`` / ``max_estimated_usd``: admission tests on the estimate; exceeding
-      them raises :class:`sk8s.BudgetExceeded` before anything is created. Jobs that request no
-      cpu estimate to 0, so set ``requests=``/``limits=`` for these to bite.
+      them raises :class:`sk8s.BudgetExceeded` before anything is created.
     - ``assumed_job_hours``: how long each job is assumed to run for the estimate (default 1.0).
+    - ``assumed_cpu_when_unset``: a job that requests no cpu (``requests=``/``limits=``) is
+      charged this many cores. The default None keeps the cost limits BLIND to such jobs: they
+      estimate to 0 and pass any ``max_cpu_hours`` / ``max_estimated_usd`` (admission logs a
+      warning once per cluster, and the verdict carries a note). Set it (e.g. 1) wherever the
+      cost limits are meant to be a real guard, as in a sandbox.
     """
 
     max_concurrent_pods: int | None = None
     max_cpu_hours: float | None = None
     max_estimated_usd: float | None = None
     assumed_job_hours: float = 1.0
+    assumed_cpu_when_unset: float | None = None
 
     def __post_init__(self) -> None:
         pods = self.max_concurrent_pods
@@ -87,8 +106,17 @@ class Budget:
         _non_negative("max_cpu_hours", self.max_cpu_hours)
         _non_negative("max_estimated_usd", self.max_estimated_usd)
         _non_negative("assumed_job_hours", self.assumed_job_hours)
+        _non_negative("assumed_cpu_when_unset", self.assumed_cpu_when_unset)
+        for name in ("assumed_job_hours", "assumed_cpu_when_unset"):
+            value = getattr(self, name)
+            if value is not None and not math.isfinite(value):
+                raise ValueError(f"budget {name} must be finite, got {value!r}")
         if self.assumed_job_hours <= 0:
             raise ValueError(f"budget assumed_job_hours must be > 0, got {self.assumed_job_hours!r}")
+        if self.assumed_cpu_when_unset is not None and self.assumed_cpu_when_unset <= 0:
+            raise ValueError(
+                f"budget assumed_cpu_when_unset must be > 0, got {self.assumed_cpu_when_unset!r}"
+            )
 
     @classmethod
     def coerce(cls, value: Any) -> Budget | None:
@@ -123,11 +151,21 @@ class Budget:
 
     def evaluate(
         self, *, n_jobs: int, cpu_cores: float, max_concurrent: int | None = None,
+        unrequested_jobs: int = 0,
     ) -> BudgetVerdict:
         """Measure a submission of ``n_jobs`` jobs requesting ``cpu_cores`` cores IN TOTAL
-        (summed over all jobs, as ``DryRun.total_cpu_request``) against this budget."""
+        (summed over all jobs, as ``DryRun.total_cpu_request``) against this budget.
+
+        ``unrequested_jobs`` of those jobs request no cpu at all: each is charged
+        ``assumed_cpu_when_unset`` cores on top (if that is set), else it goes uncosted (see the
+        verdict's ``uncosted_jobs``).
+        """
         from sk8s.explaining import CPU_HOUR_USD  # lazy: explaining imports the cluster
 
+        assumed = self.assumed_cpu_when_unset
+        charged = unrequested_jobs if assumed is not None else 0
+        if assumed is not None:
+            cpu_cores = cpu_cores + unrequested_jobs * assumed
         cpu_hours = cpu_cores * self.assumed_job_hours
         usd = cpu_hours * CPU_HOUR_USD
         effective = self.cap_concurrency(max_concurrent)
@@ -144,10 +182,14 @@ class Budget:
                 f"exceeds max_estimated_usd={self.max_estimated_usd:g}"
             )
         notes: list[str] = []
-        if cpu_cores == 0 and (self.max_cpu_hours is not None or self.max_estimated_usd is not None):
+        cost_limited = self.max_cpu_hours is not None or self.max_estimated_usd is not None
+        uncosted = unrequested_jobs if (cost_limited and assumed is None) else 0
+        if uncosted:
+            notes.append(UNCOSTED_NOTE)
+        if cost_limited and charged:
             notes.append(
-                "no cpu request or limit on these jobs, so their cost estimates to 0 and the "
-                "cpu-hour / usd limits cannot bite: set requests= (or limits=)"
+                f"{charged} job(s) request no cpu; each is charged assumed_cpu_when_unset="
+                f"{assumed:g} cores"
             )
         if effective is not None and effective < (n_jobs if max_concurrent is None else max_concurrent):
             notes.append(
@@ -157,5 +199,5 @@ class Budget:
         return BudgetVerdict(
             ok=not violations, budget=self.to_dict(), n_jobs=n_jobs, peak_pods=peak,
             estimated_cpu_hours=cpu_hours, estimated_usd=usd, effective_max_concurrent=effective,
-            violations=violations, notes=notes,
+            violations=violations, notes=notes, uncosted_jobs=uncosted,
         )

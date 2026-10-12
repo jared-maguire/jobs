@@ -84,7 +84,8 @@ def test_parse_ttl(text: str, seconds: float) -> None:
     assert sandbox.parse_ttl(text) == seconds
 
 
-@pytest.mark.parametrize("text", ["", "24", "h", "1w", "-1h", "0h", "abc", "1 h", "nanh"])
+@pytest.mark.parametrize("text", ["", "24", "h", "1w", "-1h", "0h", "abc", "1 h", "nanh",
+                                  "3651d", "9" * 400 + "d", "99999999999999999d"])
 def test_parse_ttl_rejects(text: str) -> None:
     with pytest.raises(Sk8sError, match="ttl"):
         sandbox.parse_ttl(text)
@@ -98,6 +99,13 @@ def test_sandbox_store_prefixes_the_configured_store() -> None:
     assert sandbox.sandbox_store("gs://bkt/team/", "a") == ("gs://bkt/team/sbx-a", "sbx-a")
     with pytest.raises(Sk8sError, match="store"):
         sandbox.sandbox_store("ftp://x", "a")
+
+
+def test_parse_ttl_accepts_the_cap_and_create_enforces_it_too(env: "Env") -> None:
+    assert sandbox.parse_ttl("3650d") == 3650 * 86400
+    with pytest.raises(Sk8sError, match="ttl"):
+        env.create("huge", ttl_seconds=3651 * 86400.0)
+    assert not env.core.namespaces
 
 
 # --- create ---------------------------------------------------------------------------------------------
@@ -369,3 +377,45 @@ def test_the_worker_startup_sweep_does_not_reap_sandboxes(monkeypatch: pytest.Mo
 
 def test_sandbox_symbols_are_reachable_from_the_package() -> None:
     assert sk8s.sandbox.create is sandbox.create
+
+
+# --- the store record is validated before anything is deleted ---------------------------------------------
+
+
+@pytest.mark.parametrize("annotation,value", [
+    (sandbox.ANN_STORE_PREFIX, "sbx-other"),   # points at someone else's blobs
+    (sandbox.ANN_STORE_PREFIX, ""),
+    (sandbox.ANN_STORE_PREFIX, "/"),
+    (sandbox.ANN_STORE_BASE, ""),
+])
+def test_delete_refuses_an_inconsistent_store_record_and_deletes_nothing(
+    env: Env, annotation: str, value: str
+) -> None:
+    env.create("alpha")
+    env.create("other")
+    store = LocalStore(env.base)
+    store.put("sbx-alpha/x", b"1")
+    store.put("sbx-other/y", b"2")
+    env.core.namespaces["sk8s-sbx-alpha"].metadata.annotations[annotation] = value
+    with pytest.raises(Sk8sError, match="inconsistent store record"):
+        sandbox.delete("alpha", core_api=env.core)
+    assert "sk8s-sbx-alpha" in env.core.namespaces
+    assert store.count_prefix("sbx-alpha") == 1 and store.count_prefix("sbx-other") == 1
+
+
+def test_reap_keeps_a_sandbox_whose_store_record_does_not_validate(env: Env) -> None:
+    env.create("alpha")
+    _age(env.core, "alpha", created=NOW - datetime.timedelta(days=3), expires=NOW - datetime.timedelta(days=2))
+    env.core.namespaces["sk8s-sbx-alpha"].metadata.annotations[sandbox.ANN_STORE_PREFIX] = "sbx-other"
+    LocalStore(env.base).put("sbx-other/y", b"2")
+    report = env.reap(NOW)
+    assert report.deleted == [] and "inconsistent store record" in report.kept[0]["reason"]
+    assert LocalStore(env.base).count_prefix("sbx-other") == 1
+
+
+def test_create_with_assume_cpu_writes_it_into_the_budget(env: Env) -> None:
+    made = env.create("alpha", budget_usd=1.0, assume_cpu=2.0)
+    assert tomllib.loads(made.config_path.read_text())["budget"]["assumed_cpu_when_unset"] == 2.0
+    assert made.sandbox.budget == Budget(max_estimated_usd=1.0, assumed_cpu_when_unset=2.0)
+    with pytest.raises(Sk8sError, match="budget-usd"):
+        env.create("beta", assume_cpu=2.0)

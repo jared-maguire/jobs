@@ -98,10 +98,91 @@ def test_per_submission_budget_option_overrides_config_and_is_not_a_func_kwarg(t
     assert fut.result(timeout=10) == (1, {})  # budget= was consumed as a job option
 
 
-def test_jobs_without_cpu_requests_pass_a_cost_budget_with_a_note(tmp_path: Path) -> None:
+def test_jobs_without_cpu_requests_pass_a_cost_budget_but_say_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The blind spot is real (such a job costs 0 to the estimate) but never silent: the preview
+    carries a note and a real submission logs a warning, once per cluster."""
     c = strict_cluster(tmp_path, budget=Budget(max_estimated_usd=0.0001))
     dr = c.submit(double, 1, dry_run=True)
-    assert dr.budget is not None and dr.budget.ok and any("requests" in n for n in dr.budget.notes)
+    assert dr.budget is not None and dr.budget.ok and dr.budget.uncosted_jobs == 1
+    assert any("requests" in n for n in dr.budget.notes)
+
+    h = Harness(tmp_path / "real")
+    h.cluster.config = Config(namespace="ns1", image="sk8s:dev", budget=Budget(max_estimated_usd=0.0001))
+    with caplog.at_level("WARNING", logger="sk8s.cluster"):
+        h.cluster.submit(double, 1)
+        h.cluster.submit(double, 2)
+    warnings = [r for r in caplog.records if "cannot see this job" in r.getMessage()]
+    assert len(warnings) == 1 and "assumed_cpu_when_unset" in warnings[0].getMessage()
+    assert len(h.batch.jobs) == 2  # still admitted: that is the documented default
+
+
+def test_assumed_cpu_when_unset_closes_the_bypass(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    b = Budget(max_estimated_usd=0.01, assumed_cpu_when_unset=1.0)  # 1 core x 1h = $0.04 > $0.01
+    h = Harness(tmp_path)
+    h.cluster.config = Config(namespace="ns1", image="sk8s:dev", budget=b)
+    with caplog.at_level("WARNING", logger="sk8s.cluster"), pytest.raises(sk8s.BudgetExceeded):
+        h.cluster.submit(double, 1)  # no requests at all
+    assert not [r for r in caplog.records if "cannot see this job" in r.getMessage()]  # nothing blind
+    assert untouched(h)
+    dr = strict_cluster(tmp_path / "s", budget=b).submit(double, 1, dry_run=True)
+    assert dr.budget is not None and not dr.budget.ok
+    h.cluster.submit(double, 1, requests={"cpu": "100m"})  # a real request is charged as asked: $0.004
+
+
+def test_fan_out_without_requests_is_charged_the_assumption() -> None:
+    stub = StubCluster()
+    sk8s.configure(cluster=stub)
+    b = Budget(max_cpu_hours=3.0, assumed_cpu_when_unset=1.0)
+    with pytest.raises(sk8s.BudgetExceeded):
+        sk8s.submit_map(double, range(5), budget=b)
+    assert stub.n_submitted() == 0
+    assert len(sk8s.submit_map(double, range(3), budget=b)) == 3
+
+
+# --- memoization ----------------------------------------------------------------------------------------
+
+
+def test_a_memo_hit_is_not_refused_for_what_it_would_have_cost(tmp_path: Path) -> None:
+    from tests.test_memo import Harness as MemoHarness
+
+    h = MemoHarness(tmp_path)
+    first = h.cluster.submit(double, 21, memo=True, requests={"cpu": "1"})
+    h.finish(first.job_name)
+    assert first.result(timeout=10) == 42
+    tight = Budget(max_cpu_hours=0.1)
+    hit = h.cluster.submit(double, 21, memo=True, requests={"cpu": "1"}, budget=tight)
+    assert hit.memo_hit and hit.result() == 42  # runs nothing: costs nothing
+    jobs = dict(h.batch.jobs)
+
+    def payloads() -> int:
+        return len([i for i in h.store.list_blobs(f"{h.cluster.workflow_id}/") if i.key.endswith("/payload")])
+
+    before = payloads()
+    with pytest.raises(sk8s.BudgetExceeded):  # a MISS will really run: admitted late, refused
+        h.cluster.submit(double, 22, memo=True, requests={"cpu": "1"}, budget=tight)
+    assert dict(h.batch.jobs) == jobs
+    assert payloads() == before  # the late refusal uploaded no payload
+
+
+def test_non_memo_jobs_are_still_refused_before_anything_exists(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    with pytest.raises(sk8s.BudgetExceeded):
+        h.cluster.submit(double, 1, requests={"cpu": "4"}, budget=Budget(max_cpu_hours=1))
+    assert untouched(h)
+
+
+def test_a_memo_fan_out_is_admitted_whole_and_the_error_says_what_that_means() -> None:
+    stub = StubCluster()
+    sk8s.configure(cluster=stub)
+    with pytest.raises(sk8s.BudgetExceeded) as ei:
+        sk8s.submit_map(double, range(5), memo=True, requests={"cpu": "1"}, budget=Budget(max_cpu_hours=1))
+    assert "memo hits are charged as if they run" in str(ei.value) and ei.value.hint
+    with pytest.raises(sk8s.BudgetExceeded) as plain:
+        sk8s.submit_map(double, range(5), requests={"cpu": "1"}, budget=Budget(max_cpu_hours=1))
+    assert plain.value.hint is None
+    assert stub.n_submitted() == 0
 
 
 # --- fan-out --------------------------------------------------------------------------------------------
