@@ -72,6 +72,7 @@ and are self-sufficient for agents.
 | Layer Python deps on your base image | `sk8s image build --tag TAG --base YOURBASE --pip numpy --push` |
 | apt/system deps in an image | custom Dockerfile `FROM` your base (references/api.md) |
 | Try the API with no cluster | `sk8s.configure(cluster=sk8s.LocalCluster())` |
+| What is this data? (format, size, cohort) | `sk8s data describe gs://B/prefix/ --json` / `sk8s.describe(uri)` (references/api.md) |
 | Watch / kill / clean | `sk8s workflows`, `sk8s kill <id>`, `sk8s clean --older-than 7d` |
 
 ## Common mistakes
