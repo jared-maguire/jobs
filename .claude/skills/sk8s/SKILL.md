@@ -84,6 +84,7 @@ and are self-sufficient for agents.
 | `OSError: Read-only file system` in your function | mounts default ro → `{"access_mode": "rw"}` for the writer |
 | Everything gone after closing the laptop | tethered `submit` → `submit_workflow` |
 | Workflow gone when you attach the next day | `result()` deletes on success by default → `result(delete=False)` |
+| Job "succeeded" with a wrong answer; fan-out of 48 should have been piloted | `expect=` (QC gate) + `pilot=3` on map → `ExpectationFailed` / `PilotFailed` (references/advanced.md) |
 | `map` raised and you want the 47 good results | they are on the exception: `e.results[i]`; use `submit_map` + per-future harvest for streaming/timeout control |
 | `sk8s doctor` red right after `--apply-cloud` on GKE | IAM propagation (~60s) → retry before debugging |
 | Writes to the config file clobbered another session | global default path → set `SK8S_CONFIG` per agent/CI run |

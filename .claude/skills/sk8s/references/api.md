@@ -14,8 +14,11 @@ futs = sk8s.submit_map(f, items)   # the futures, when you need per-item control
 
 Job options (kwargs): `image`, `requests`, `limits` (e.g. `requests={"cpu":
 "500m", "memory": "1Gi"}`), `volumes`, `backoff_limit`, `service_account`,
-`name_prefix`, `privileged`, `pull_policy`, `keep_results`. `map`/`starmap` add
-`batch_size` (N items per job), `max_concurrent`, and `timeout` — one overall
+`name_prefix`, `privileged`, `pull_policy`, `keep_results`, `expect` (a QC gate run
+in the worker on the result: `None`/`True` passes, a string or a raise fails with
+`ExpectationFailed`; see references/advanced.md). `map`/`starmap`/`submit_map` add
+`batch_size` (N items per job), `max_concurrent`, `pilot` (run the first N items,
+rest only if all N are green; else `PilotFailed`), and `map`/`starmap` also `timeout` — one overall
 deadline for the whole map, **not** a per-job kill; `submit`/`submit_map` accept
 and ignore `timeout` (bound the wait at `fut.result(timeout=...)` instead).
 `namespace` must equal the cluster's namespace (`ValueError` otherwise) — switch
@@ -38,6 +41,15 @@ bake your package into the image.
 - `MapFailed` — `.failures` is `[(index, exception), ...]`, `.results` is
   `{index: value}` for every item that succeeded, `.total` the item count. For
   streaming or per-item timeouts see the per-future pattern in references/advanced.md.
+- `ExpectationFailed` — the function returned but its `expect=` check rejected the
+  result (semantic failure, not operational). `.message` is the expectation's
+  explanation, `.result_repr` a truncated repr of the offending result;
+  `__cause__` is a `RemoteTraceback`. In a `map` it is a per-item failure inside
+  `MapFailed` (whose message counts `N failed their expectation, M errored`).
+- `PilotFailed` — a `pilot=` run failed; the remainder was **not submitted**.
+  `.failures` is `[(index, exception), ...]` over the pilot items, `.results` is
+  `{index: value}` for the pilot items that succeeded, `.pilot` how many ran, `.total`
+  how many were given.
 - `ResultDecodeError` — job *succeeded* but the client can't unpickle the result
   (missing module locally). `JobTimeout` (also a `TimeoutError`); `PodFailed`;
   `ImagePullError` (an image IS set but nodes can't pull it); `ImageNotConfigured`
