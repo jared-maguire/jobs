@@ -4,6 +4,36 @@ Brainstormed 2026-10-11, right after v2 completed (plans 1–11, PRs #70–#87).
 Ideas, not commitments; no designs or plans exist yet. The theme: **v2 made jobs
 reliable; v3 makes workflows cheap and durable.**
 
+## The first principle (candidate first sentence of any v3 spec)
+
+> **Your outputs are supposed to be pure functions of your inputs — that's what
+> "science" means.**
+
+(Landed in discussion 2026-10-11; Jared: felt for years, never put to words.)
+A methods section is a derivation written in prose; "couldn't reproduce" means
+the function had hidden inputs; the replication crisis is, in build-system
+terms, undeclared inputs and non-hermetic builds. Content-addressed
+materialization (item 8, greenfield inversion #2) is not a metaphor borrowed
+from software — it is what the methods section always wanted to be: executable,
+with provenance you hand a reviewer instead of a promise.
+
+Design consequences: execution IS cache-miss materialization ("should this be
+cacheable?" is never a debate again); impurity becomes the thing that must be
+*declared* (like `unsafe` blocks) rather than purity being the thing achieved
+by discipline; a result is an artifact hash with a derivation trail.
+
+Context, from the greenfield thought experiment ("rebuild from scratch with the
+Star Trek goal primary"): keep v2's engine room (jobs, stores, RBAC, GKE,
+doctor, typed errors, plan-first), rebuild the deck — the system lives in the
+cluster with clients as stateless views; execution is cache-miss handling over
+a content-addressed world; cloudpickle demoted to dev-mode sugar in favor of
+declared task-card interfaces; contracts/budgets/policy in the kernel; the
+event log as the primary artifact. The two breaks evolution can't deliver
+politely: build-system semantics and no-pickle boundaries — and the cheapest
+moment to make them is before v2 grows an installed base. Keep
+`sk8s.run(lambda: 42)` alive as the dev-mode hello-world, whatever happens
+underneath.
+
 ## 1. Memoization / content-addressed caching
 
 Hash (function code + args + image digest) → check the store before submitting;
