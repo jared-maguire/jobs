@@ -113,6 +113,9 @@ class FakeBlob:
         with self._client.lock:
             if self._key not in self._client.objects:
                 raise NotFound(f"No such object: {self._bucket}/{self.name}")
+            pinned = self.generation
+            if pinned is not None and pinned != self._client.meta_of(self._key).generation:
+                raise NotFound(f"No such object: {self._bucket}/{self.name} (generation {pinned})")
             self._populate()
 
     def rewrite(

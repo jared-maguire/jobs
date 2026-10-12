@@ -20,6 +20,11 @@ class BlobTooLarge(StoreError):
     pass
 
 
+class VersionChanged(StoreError):
+    """An object's pinned version (GCS generation / S3 ETag / ConfigMap resourceVersion) no longer
+    matches: it was overwritten or deleted since the pin was taken."""
+
+
 class RetryExhausted(StoreError):
     """A conditional-write loop kept losing its race and gave up after its bounded retries."""
 

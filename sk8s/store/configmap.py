@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import Any
+from typing import Any, Iterator
 
 from kubernetes import client
 from kubernetes.client import ApiException
 
 from sk8s.errors import BlobNotFound, BlobTooLarge
-from sk8s.store.base import BlobStore
+from sk8s.store.base import BlobInfo, BlobStat, BlobStore
 
 MAX_CONFIGMAP_BLOB = 950_000
 MANAGED_BY = {"app.kubernetes.io/managed-by": "sk8s"}
@@ -137,6 +137,33 @@ class ConfigMapStore(BlobStore):
                 raise BlobNotFound(uri) from None
             raise
         return base64.b64decode(cm.binary_data["blob"])
+
+    def stat(self, uri: str) -> BlobStat | None:
+        ns, name = self._split(uri)
+        try:
+            cm = self.core_api.read_namespaced_config_map(name=name, namespace=ns)
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+        return BlobStat(
+            uri=uri, size=len(base64.b64decode(cm.binary_data["blob"])),
+            version=str(cm.metadata.resource_version), updated=cm.metadata.creation_timestamp,
+        )
+
+    def list_blobs(self, prefix: str) -> Iterator[BlobInfo]:
+        root = prefix.split("/", 1)[0]  # the first segment is a label (see _blob_labels)
+        selector = ",".join(f"{k}={v}" for k, v in _blob_labels(root).items())
+        cms = self.core_api.list_namespaced_config_map(
+            namespace=self.namespace, label_selector=selector
+        )
+        for cm in cms.items:
+            key = (cm.metadata.annotations or {}).get(KEY_ANNOTATION, "")
+            if key.startswith(prefix):
+                yield BlobInfo(
+                    key=key, size=len(base64.b64decode(cm.binary_data["blob"])),
+                    updated=cm.metadata.creation_timestamp,
+                )
 
     def delete(self, uri: str) -> None:
         ns, name = self._split(uri)
