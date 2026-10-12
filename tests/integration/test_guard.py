@@ -6,7 +6,7 @@ enforces it in the pod), tagged ``sk8s-dev-guard:latest``::
     minikube image build -t sk8s-dev-guard:latest -f docker/Dockerfile.dev .
     SK8S_INTEGRATION=1 .venv/bin/pytest tests/integration/test_guard.py -v
 
-Override the tag with ``SK8S_GUARD_TEST_IMAGE``. Sandboxes are named ``itguard*`` (namespaces
+Override the tag with ``SK8S_GUARD_TEST_IMAGE`` (CI's ``SK8S_TEST_IMAGE`` is the fallback). Sandboxes are named ``itguard*`` (namespaces
 ``sk8s-sbx-itguard*``) and the workflow test uses ``sk8s-it-guard``; every one is deleted
 afterwards. The CLI runs as a subprocess with ``HOME`` and the working directory in a temp dir,
 so the real user's config is never read or written and the sandbox config files land in the temp
@@ -32,10 +32,11 @@ from sk8s.cluster import Cluster
 from sk8s.config import load_config
 from sk8s.profile import apply, profile_for
 from tests.integration.conftest import requires_cluster, suite_pull_policy
+from tests.integration.suite_image import suite_image
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(400)]
 
-IMAGE = os.environ.get("SK8S_GUARD_TEST_IMAGE", "sk8s-dev-guard:latest")
+IMAGE = suite_image("SK8S_GUARD_TEST_IMAGE", "sk8s-dev-guard:latest")
 NS_WORKFLOW = "sk8s-it-guard"
 SANDBOXES = ("itguard", "itguard-old")
 
