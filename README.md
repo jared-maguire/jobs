@@ -33,6 +33,11 @@ sk8s.map(lambda x: x ** 2, range(1000), batch_size=50)  # 20 Jobs, results in or
 > documentation lives on the `main` branch and the `v0.1` tag; upgrading is covered in the
 > [migration guide](docs/migration-v1-to-v2.md). The quickstart targets minikube; for
 > Google Cloud see the [GKE (Autopilot) guide](docs/gke.md). An EKS guide is forthcoming.
+>
+> **Working with an AI agent?** This repo ships an agent skill at
+> [`.claude/skills/sk8s/`](.claude/skills/sk8s/SKILL.md) — setup, API, and advanced
+> workflow patterns in agent-ready form. Copy or symlink it into your own project's
+> skills directory to make any agent sk8s-fluent.
 
 ## Quickstart (about 5 minutes)
 
