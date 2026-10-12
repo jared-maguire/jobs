@@ -50,7 +50,7 @@ against the v2 code in this repository.
    `sk8s.RemoteTraceback` holding the remote traceback. If the exception class cannot be
    rebuilt locally you get `sk8s.RemoteException` (with `.type_name`, `.message`,
    `.tb_text`). Infrastructure problems have their own types, all subclasses of
-   `sk8s.Sk8sError`: `PodFailed`, `ImagePullError`, `JobTimeout` (also a `TimeoutError`),
+   `sk8s.Sk8sError`: `PodFailed`, `ImagePullError`, `ImageNotConfigured` (no worker image is set anywhere; raised before anything is created), `JobTimeout` (also a `TimeoutError`),
    `JobRejected` (the API server refused to create the Job — an admission denial such as
    `privileged=True` on GKE Autopilot, an RBAC `403`, or an invalid spec; in v1 these
    escaped as raw `kubernetes.client.ApiException`s), `StoreError`, `BlobNotFound`,
@@ -91,6 +91,14 @@ against the v2 code in this repository.
    must say so: `volumes={"data": {"access_mode": "rw"}}`. A write through a read-only
    mount fails inside the job with `OSError` (`EROFS`), not as a hang, so a ported call
    site that forgot is easy to find. See the `volumes` rows below.
+
+10. **No image configured is an immediate error.** sk8s publishes no worker image you can
+    rely on; you build your own and name it. With no `image=` option, no `image` /
+    `SK8S_IMAGE` setting and no `image_prefix`, `run` / `submit` / `map` (and `serve`,
+    `sk8s shell`) raise `sk8s.ImageNotConfigured` *before creating anything*, with the build
+    commands in the message, instead of timing out later as an `ImagePullError`. Setting
+    `image_prefix` still composes a default name from it. Unaffected: `LocalCluster`, and
+    jobs submitted from inside a pod (every pod is given `SK8S_IMAGE`).
 
 ## API mapping
 
@@ -171,7 +179,7 @@ These keyword arguments are recognised by `run`, `submit`, `map`, `starmap`, `su
 
 | v1 keyword | v2 keyword | Notes |
 |---|---|---|
-| `image` | `image` | Default: the official image for this version (`image_prefix` is prepended to its name). |
+| `image` | `image` | No built-in default: unset everywhere raises `ImageNotConfigured`. With only `image_prefix` set, the default name is the official image name for this version with the prefix prepended. |
 | `requests`, `limits` | `requests`, `limits` | Dicts, e.g. `{"cpu": "2", "memory": "4Gi"}`. |
 | `volumes` | `volumes` | See above. |
 | `privileged` | `privileged` | |

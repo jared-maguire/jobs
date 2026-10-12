@@ -340,7 +340,7 @@ and each stage names a missing layer. Each sub-item is independently shippable.
 
 ## Candidate v2.x fixes (small, could land before any v3)
 
-- `MapFailed` should carry the successes (`e.results`), not just failures.
-- Fail fast at submit when no image is configured (build-your-own doctrine means
-  the default name can never pull): "no image configured — build one: …" instead
-  of an `ImagePullError` timeout.
+- Done in v2.x: `MapFailed` carries the successes (`e.results`, `{index: value}`).
+- Done in v2.x: fail fast at submit when no image is configured. Build-your-own doctrine
+  means the default name can never pull, so `run`/`submit`/`map` raise `ImageNotConfigured`
+  (with the build commands) before creating anything, instead of an `ImagePullError` timeout.

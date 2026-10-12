@@ -1,6 +1,6 @@
 ---
 name: sk8s
-description: Use when running Python functions on a Kubernetes cluster with sk8s — submitting jobs, maps, or detached workflows; setting up a cluster or namespace for sk8s (minikube or GKE, as user or admin); building worker images; using volumes (scratch, shared-read reference data); or debugging sk8s errors like ImagePullError, VolumeWaitTimeout, MapFailed, ResultDecodeError, or pods stuck Pending.
+description: Use when running Python functions on a Kubernetes cluster with sk8s — submitting jobs, maps, or detached workflows; setting up a cluster or namespace for sk8s (minikube or GKE, as user or admin); building worker images; using volumes (scratch, shared-read reference data); or debugging sk8s errors like ImageNotConfigured, ImagePullError, VolumeWaitTimeout, MapFailed, ResultDecodeError, or pods stuck Pending.
 ---
 
 # sk8s: Python functions as Kubernetes jobs
@@ -46,8 +46,8 @@ and are self-sufficient for agents.
    docker/Dockerfile.worker --build-arg PYTHON_VERSION=3.X .`), push it to *your*
    registry, and layer deps on it. The worker's Python minor **must match the
    client's**, and the base has **no scientific stack**. Failures:
-   `ImagePullError` (unconfigured image), `VersionMismatch`, remote
-   `ModuleNotFoundError`.
+   `ImageNotConfigured` (no image set anywhere; raised at submit, before anything
+   is created), `VersionMismatch`, remote `ModuleNotFoundError`.
 3. **Volume mounts default to read-only.** Any job that writes passes
    `volumes={"name": {"access_mode": "rw"}}`. Failure: `OSError: Read-only file
    system` raised *by your function*.
@@ -79,7 +79,7 @@ and are self-sufficient for agents.
 | Symptom | Cause → fix |
 |---|---|
 | `ResultDecodeError` on a *successful* job | client lacks the result type's module → install it client-side, or return builtins |
-| `ImagePullError` with no image configured | nothing is published — build your own base, set `image=`/`SK8S_IMAGE` |
+| `ImageNotConfigured` at submit | nothing is published — build your own base, set `image=`/`SK8S_IMAGE`/config `image` (or `image_prefix`) |
 | Remote `ModuleNotFoundError` | base image has no deps → `sk8s image build` or a Dockerfile layer |
 | `OSError: Read-only file system` in your function | mounts default ro → `{"access_mode": "rw"}` for the writer |
 | Everything gone after closing the laptop | tethered `submit` → `submit_workflow` |

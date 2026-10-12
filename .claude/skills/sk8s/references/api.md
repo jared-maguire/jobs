@@ -40,7 +40,10 @@ bake your package into the image.
   streaming or per-item timeouts see the per-future pattern in references/advanced.md.
 - `ResultDecodeError` — job *succeeded* but the client can't unpickle the result
   (missing module locally). `JobTimeout` (also a `TimeoutError`); `PodFailed`;
-  `ImagePullError`; `JobRejected` (admission refused the Job: privileged on
+  `ImagePullError` (an image IS set but nodes can't pull it); `ImageNotConfigured`
+  (no `image=` / `SK8S_IMAGE` / config `image` / `image_prefix` anywhere: raised by
+  `run`/`submit`/`map`/`serve` before anything is created; `LocalCluster` and in-pod
+  nested submits are exempt); `JobRejected` (admission refused the Job: privileged on
   Autopilot, RBAC 403, invalid spec — carries the server's message + a gated
   hint); `VersionMismatch` (client/worker Python minor); `StoreError`,
   `BlobNotFound`, `BlobTooLarge`.
