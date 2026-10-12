@@ -506,3 +506,59 @@ def test_kept_volume_is_never_touched(tmp_path) -> None:  # type: ignore[no-unty
     # an explicit workflow= can neither reach it nor be pointed at it
     assert _clean(NS, workflow="keepme", core_api=core, store=store) == []
     assert (NS, "keepme") in core.pvcs
+
+
+# --- clean_report: what was deleted, what was kept and why --------------------------------------
+
+
+def _kept(report: Any) -> dict[str, str]:
+    return {k["workflow"]: k["reason"] for k in report.kept}
+
+
+def test_report_explains_every_kept_workflow(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from sk8s.cleaning import clean_report
+
+    core, store, batch = FakeCoreV1(), LocalStore(tmp_path), FakeBatchV1()
+    _make(core, "wf-old", age_days=8)
+    _make(core, "wf-new", age_days=2)
+    _make(core, "wf-live", age_days=9)
+    _make(core, "wf-excl", age_days=9)
+    _make(core, "wf-young", age_days=0.001, retention=0)  # over the limit, under the 300s floor
+    bad = _make(core, "wf-bad", age_days=9)
+    del bad.metadata.annotations[anchors.RETENTION_DAYS]
+    batch.jobs[(NS, "j")] = client.V1Job(
+        metadata=client.V1ObjectMeta(name="j", labels={anchors.WORKFLOW_LABEL: "wf-live"}),
+        spec=client.V1JobSpec(backoff_limit=0, template=client.V1PodTemplateSpec(spec=client.V1PodSpec(containers=[]))),
+        status=client.V1JobStatus(active=1),
+    )
+    report = clean_report(NS, core_api=core, store=store, batch_api=batch, exclude={"wf-excl"})
+    assert report.deleted == ["wf-old"]
+    kept = _kept(report)
+    assert set(kept) == {"wf-new", "wf-live", "wf-excl", "wf-young", "wf-bad"}
+    assert "not expired" in kept["wf-new"] and "7" in kept["wf-new"]
+    assert "active jobs" in kept["wf-live"]
+    assert "excluded" in kept["wf-excl"]
+    assert "minimum age" in kept["wf-young"]
+    assert "malformed" in kept["wf-bad"]
+    assert report.as_dict() == {"deleted": ["wf-old"], "kept": report.kept}
+
+
+def test_report_matches_clean_and_keeps_unopenable_stores(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from sk8s.cleaning import clean_report
+
+    core = FakeCoreV1()
+    _make(core, "wf-odd", age_days=9, store="bogus://x")
+    report = clean_report(NS, core_api=core, batch_api=FakeBatchV1())
+    assert report.deleted == [] and "cannot open its store" in _kept(report)["wf-odd"]
+    assert _has(core, "wf-odd")
+    assert _clean(NS, core_api=core) == report.deleted
+
+
+def test_report_for_a_forced_workflow(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from sk8s.cleaning import clean_report
+
+    core, store = FakeCoreV1(), LocalStore(tmp_path)
+    _make(core, "wf-x", age_days=0)
+    assert clean_report(NS, workflow="wf-x", core_api=core, store=store).deleted == ["wf-x"]
+    report = clean_report(NS, workflow="wf-x", core_api=core, store=store)
+    assert report.deleted == [] and "no such workflow" in _kept(report)["wf-x"]

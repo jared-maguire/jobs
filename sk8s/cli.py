@@ -27,7 +27,7 @@ from kubernetes.client import ApiException
 from kubernetes.config import ConfigException
 from urllib3.exceptions import HTTPError
 
-from sk8s import __version__, anchors, cleaning, datadescribe, images, k8s, spec, workflows
+from sk8s import __version__, anchors, cleaning, datadescribe, explaining, images, k8s, spec, workflows
 from sk8s import config as config_mod
 from sk8s import doctor as doctor_mod
 from sk8s import profile as profile_mod
@@ -412,6 +412,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001
         pass
     checks = doctor_mod.doctor(prof, store=store, store_endpoint=cfg.store_endpoint)
+    if args.json:
+        _print_json([{"name": c.name, "ok": c.ok, "fix_hint": c.fix_hint} for c in checks])
+        return 0 if all(c.ok for c in checks) else 1
     width = max((len(c.name) for c in checks), default=0)
     for c in checks:
         print(f"{'PASS' if c.ok else 'FAIL'}  {c.name:<{width}}".rstrip())
@@ -439,22 +442,26 @@ def _cmd_image_push(args: argparse.Namespace) -> int:
     return 0
 
 
-def _format_age(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
-        if seconds >= size:
-            return f"{int(seconds // size)}{unit}"
-    return f"{int(seconds)}s"
+_format_age = explaining.format_age
 
 
-def _anchor_age(anchor: Any, now: datetime.datetime) -> str:
+def _print_json(data: Any) -> None:
+    print(json.dumps(data, indent=2))
+
+
+def _anchor_age_seconds(anchor: Any, now: datetime.datetime) -> float | None:
     try:
         created = datetime.datetime.fromisoformat(anchor.metadata.annotations[anchors.CREATED_AT])
         if created.tzinfo is None:
             created = created.replace(tzinfo=datetime.timezone.utc)
-        return _format_age((now - created).total_seconds())
+        return (now - created).total_seconds()
     except (KeyError, TypeError, ValueError):
-        return "?"
+        return None
+
+
+def _anchor_age(anchor: Any, now: datetime.datetime) -> str:
+    seconds = _anchor_age_seconds(anchor, now)
+    return "?" if seconds is None else _format_age(seconds)
 
 
 def _driver_phase(batch: Any, namespace: str, driver: str) -> str:
@@ -466,6 +473,29 @@ def _driver_phase(batch: Any, namespace: str, driver: str) -> str:
         return "unknown"
 
 
+def _oldest_first(items: list[Any]) -> list[Any]:
+    return sorted(items, key=lambda c: (c.metadata.annotations or {}).get(anchors.CREATED_AT, ""))
+
+
+def _workflow_records(items: list[Any], batch: Any, namespace: str) -> list[dict[str, Any]]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    records = []
+    for cm in _oldest_first(items):
+        ann = cm.metadata.annotations or {}
+        seconds = _anchor_age_seconds(cm, now)
+        driver = ann.get(anchors.DRIVER_JOB, "")
+        records.append({
+            "id": (cm.metadata.labels or {}).get(anchors.WORKFLOW_LABEL, cm.metadata.name),
+            "detached": ann.get(anchors.DETACHED) == "true",
+            "created_at": ann.get(anchors.CREATED_AT),
+            "age_seconds": seconds,
+            "age": "?" if seconds is None else _format_age(seconds),
+            "driver_job": driver,
+            "driver": _driver_phase(batch, namespace, driver),
+        })
+    return records
+
+
 def _cmd_workflows(args: argparse.Namespace) -> int:
     namespace = _namespace()
     core: Any = k8s.core_api()
@@ -473,12 +503,15 @@ def _cmd_workflows(args: argparse.Namespace) -> int:
     items = core.list_namespaced_config_map(
         namespace=namespace, label_selector=f"{anchors.ANCHOR_KIND_LABEL}={anchors.ANCHOR_KIND}"
     ).items
+    if args.json:
+        _print_json(_workflow_records(items, batch, namespace))
+        return 0
     if not items:
         print(f"no workflows in namespace {namespace}")
         return 0
     now = datetime.datetime.now(datetime.timezone.utc)
     rows = [("ID", "DETACHED", "AGE", "DRIVER")]
-    for cm in sorted(items, key=lambda c: (c.metadata.annotations or {}).get(anchors.CREATED_AT, "")):
+    for cm in _oldest_first(items):
         ann = cm.metadata.annotations or {}
         rows.append((
             (cm.metadata.labels or {}).get(anchors.WORKFLOW_LABEL, cm.metadata.name),
@@ -522,7 +555,20 @@ def _cmd_kill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_explain(args: argparse.Namespace) -> int:
+    _load_cfg()  # a broken config file is a friendly error, not a traceback
+    report = explaining.explain(args.workflow)
+    if args.json:
+        _print_json(report)
+    else:
+        sys.stdout.write(explaining.render(report))
+    return 0
+
+
 def _cmd_clean(args: argparse.Namespace) -> int:
+    if args.json:
+        _print_json(cleaning.clean_report(_namespace(), older_than_days=args.older_than).as_dict())
+        return 0
     deleted = cleaning.clean(_namespace(), older_than_days=args.older_than)
     if deleted:
         print("\n".join(f"deleted {wf}" for wf in deleted))
@@ -646,6 +692,10 @@ def _cmd_data_describe(args: argparse.Namespace) -> int:
 # --- parser ------------------------------------------------------------------------------------
 
 
+def _add_json(p: argparse.ArgumentParser, shape: str) -> None:
+    p.add_argument("--json", action="store_true", help=f"print machine-readable JSON instead: {shape}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sk8s", description="Run Python functions on Kubernetes.")
     parser.add_argument("--version", action="version", version=f"sk8s {__version__}")
@@ -667,6 +717,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_config)
 
     p = sub.add_parser("doctor", help="check that the cluster is ready for sk8s")
+    _add_json(p, "a list of {name, ok, fix_hint}, one per check")
     p.set_defaults(func=_cmd_doctor)
 
     img = sub.add_parser("image", help="build or push worker images")
@@ -685,7 +736,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_image_push)
 
     p = sub.add_parser("workflows", help="list workflows in the namespace")
+    _add_json(p, "a list of {id, detached, created_at, age, age_seconds, driver_job, driver}")
     p.set_defaults(func=_cmd_workflows)
+
+    p = sub.add_parser(
+        "explain", help="everything about one workflow in one report: driver, jobs, what is blocking"
+    )
+    p.add_argument("workflow")
+    _add_json(p, "the full report (see sk8s.explain); exit 0 even when unhealthy, 1 if unknown")
+    p.set_defaults(func=_cmd_explain)
 
     p = sub.add_parser("logs", help="print a workflow's driver logs")
     p.add_argument("workflow")
@@ -700,6 +759,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--older-than", type=parse_duration_days, metavar="D",
         help="age limit instead of each workflow's retention: 7d, 36h, or bare days (7)",
     )
+    _add_json(p, '{"deleted": [ids], "kept": [{workflow, reason}]}')
     p.set_defaults(func=_cmd_clean)
 
     p = sub.add_parser("shell", help="open a shell in a pod in the cluster (needs kubectl)")
