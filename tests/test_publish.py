@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -295,3 +296,34 @@ def test_download_of_a_bare_external_ref(tmp_path: Path) -> None:
     assert artifact(str(ext)).download(tmp_path / "copy.txt").read_bytes() == b"abc"
     with pytest.raises(ArtifactNotFound):
         artifact(str(tmp_path / "ghost")).download(tmp_path / "x")
+
+
+# --- review regressions ----------------------------------------------------------------------------
+
+
+def test_a_failed_pinned_read_never_unlinks_devnull(tmp_path: Path) -> None:
+    ext = tmp_path / "e.fq"
+    ext.write_bytes(DATA)
+    from sk8s import staging
+
+    pinned = staging.pin(ArtifactStore(LocalStore(tmp_path / "s"), "local:x"), artifact(str(ext)))
+    ext.write_bytes(b"Z" * len(DATA))
+    with pytest.raises(ArtifactChanged):
+        cas.fetch(LocalStore("/"), pinned.uri, Path(os.devnull), version=pinned.version, expected_sha=None)
+    assert os.path.exists(os.devnull)
+
+
+def test_publish_checks_an_asserted_hash_before_stamping_it(world: dict[str, Any], tmp_path: Path) -> None:
+    ext = tmp_path / "e.fq"
+    ext.write_bytes(DATA)
+    liar = artifact(str(ext), sha256="0" * 64)
+    with pytest.raises(ArtifactChanged, match="not what was pinned"):
+        liar.publish("gs://lab/runs/liar.fq")
+    assert ("lab", "runs/liar.fq") not in world["gcs"].objects
+
+
+def test_uri_access_reuses_the_configured_stores_client() -> None:
+    fake = FakeS3Client()
+    hint = S3Store("cfg-bucket", "p", client=fake)
+    other, key = cas.store_for_uri("s3://elsewhere/a/b", hint)
+    assert other._client is fake and key == "a/b"  # carries the configured endpoint/credentials

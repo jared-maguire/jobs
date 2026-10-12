@@ -16,8 +16,8 @@ delete, and roots are re-read immediately before deleting so a workflow that ado
 object while the sweep was running is honoured.
 
 Known residual race (documented, loud rather than silent): a workflow that starts referencing an
-old unreferenced object in the few milliseconds between the final re-mark and that object's
-delete loses it; its staging then fails with ArtifactNotFound.
+old unreferenced object between this object's final index re-read and its delete (one round
+trip) loses it; its staging then fails with ArtifactNotFound.
 """
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ log = logging.getLogger("sk8s.gc")
 # Same family as cleaning._MIN_ANCHOR_AGE_SECONDS: nothing younger than this is ever collected.
 CAS_MIN_AGE_SECONDS = 300.0
 MEMO_RETENTION_DAYS = 7.0
+_REMARK_EVERY = 10  # deletes between root re-reads
 
 
 class SweepAborted(Sk8sError):
@@ -184,9 +185,18 @@ def sweep(
             # Re-mark immediately before deleting: a workflow that recorded one of these hashes
             # while we were scanning is a root now.
             roots2, _ = mark(store, _utc_now() if now is None else when, memo_retention_days)
-            for sha, key, size in survivors:
+            for n, (sha, key, size) in enumerate(survivors):
+                if n and n % _REMARK_EVERY == 0:  # the delete loop is long: keep the roots fresh
+                    roots2, _ = mark(store, _utc_now() if now is None else when, memo_retention_days)
                 if sha in roots2:
                     report.kept_reachable += 1
+                    continue
+                # Re-read the index immediately before this delete: a workflow that adopted the
+                # object (touch, then record) since the scan makes it young again.
+                idx = _read_json(store, cas.index_key(sha))
+                last = cas._parse_ts((idx or {}).get("last_referenced"))
+                if last is not None and (_utc_now() if now is None else when) - last < floor:
+                    report.kept_young += 1
                     continue
                 uri = store.uri_for(key)
                 store.delete(uri)

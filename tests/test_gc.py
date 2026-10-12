@@ -286,3 +286,24 @@ def test_worker_startup_sweep_never_touches_the_cas(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("sk8s.cleaning.clean", lambda *a, **k: seen.update(k))
     worker._sweep({"SK8S_RESULT_KEY": "wf/j/result", "SK8S_NAMESPACE": "ns", "SK8S_WORKFLOW_ID": "wf"})
     assert seen["artifacts"] is False
+
+
+def test_an_object_adopted_during_the_delete_loop_is_spared(env: dict[str, Any]) -> None:
+    """Between the scan and ITS delete, a later survivor is touched by a workflow."""
+    first, second = make(env, "a", b"first garbage"), make(env, "b", b"second garbage")
+    order = sorted([first, second], key=lambda a: cas_key(a.sha256 or ""))
+    victim = order[1]
+
+    class Racy(LocalStore):
+        fired = False
+
+        def delete(self, uri: str) -> None:
+            super().delete(uri)
+            if not self.fired and uri.endswith(order[0].sha256 or "?"):
+                self.fired = True  # right after the first object goes, a workflow adopts the second
+                ArtifactStore(self, env["astore"].spec).update_index(victim.sha256 or "", touch=True)
+
+    racy = Racy(env["root"])
+    report = gc.sweep(racy)
+    assert racy.fired and order[0].sha256 in report.deleted and victim.sha256 not in report.deleted
+    assert alive(env, victim)

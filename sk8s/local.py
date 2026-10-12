@@ -84,8 +84,9 @@ class LocalCluster:
                 func, prepared.args, prepared.kwargs, image="local", salt=memo_salt, expect=expect
             )
             hit = memolib.lookup(self.artifact_store, memo_key)
-            if hit is not None:
-                memolib.adopt_outputs(self.artifact_store, self.workflow_id, hit)
+            if hit is not None and memolib.adopt_outputs(
+                self.artifact_store, self.workflow_id, hit
+            ):
                 return memolib.hit_future(self.workflow_id, hit)
         payload_uri = self.store.put(
             f"{self.workflow_id}/{name}/payload",

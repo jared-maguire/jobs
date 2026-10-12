@@ -159,12 +159,40 @@ def _fp_global(name: str, value: Any, h: Any, seen: set[int], depth: int) -> Non
     elif isinstance(value, (types.FunctionType,)):
         h.update(_fp_function(value, seen, depth + 1).encode())
     elif isinstance(value, type):
-        h.update(b"C" + f"{value.__module__}.{value.__qualname__}".encode())
+        h.update(_fp_class(value, seen, depth + 1).encode())
     else:
         try:
             h.update(canonical(value))
         except _Opaque:
-            h.update(b"O" + type(value).__qualname__.encode())  # an object: only its type is visible
+            # An object (a config, a model): its state is an input. Pickle bytes may differ
+            # between processes (a spurious miss) but never hide a change; unpicklable -> type only.
+            try:
+                h.update(b"P" + bytes(cloudpickle.dumps(value)))
+            except Exception:  # noqa: BLE001
+                h.update(b"O" + type(value).__qualname__.encode())
+            if type(value).__module__ != "builtins":  # pickle names the class; its code is input too
+                h.update(_fp_class(type(value), seen, depth + 1).encode())
+
+
+def _fp_class(cls: type, seen: set[int], depth: int) -> str:
+    """A class global: its methods' code and plain attributes (not just its name)."""
+    h = hashlib.sha256(f"C{cls.__module__}.{cls.__qualname__}".encode())
+    if id(cls) in seen or depth > _MAX_FP_DEPTH:
+        return h.hexdigest()
+    seen.add(id(cls))
+    for name in sorted(vars(cls)):
+        attr = vars(cls)[name]
+        if isinstance(attr, (staticmethod, classmethod)):
+            attr = attr.__func__
+        h.update(b"." + name.encode())
+        if isinstance(attr, types.FunctionType):
+            h.update(_fp_function(attr, seen, depth + 1).encode())
+        elif not name.startswith("__"):
+            try:
+                h.update(canonical(attr))
+            except _Opaque:
+                h.update(b"O" + type(attr).__qualname__.encode())
+    return h.hexdigest()
 
 
 def _fp_function(func: Callable[..., Any], seen: set[int], depth: int) -> str:
@@ -175,6 +203,10 @@ def _fp_function(func: Callable[..., Any], seen: set[int], depth: int) -> str:
     if isinstance(func, functools.partial):
         h.update(b"partial" + _fp_function(func.func, seen, depth).encode())
         h.update(canonical_or_pickle((func.args, func.keywords)))
+        return h.hexdigest()
+    if isinstance(func, types.MethodType):  # a bound method: the instance's state is an input
+        h.update(b"method" + _fp_function(func.__func__, seen, depth).encode())
+        h.update(canonical_or_pickle(func.__self__))
         return h.hexdigest()
     code = getattr(func, "__code__", None)
     if isinstance(code, types.CodeType):
@@ -313,11 +345,14 @@ def write(astore: ArtifactStore, key: str, value: Any, *, function: str, produce
     return True
 
 
-def adopt_outputs(astore: ArtifactStore, workflow: str, hit: MemoHit) -> None:
-    """A memo hit makes this workflow depend on the outputs: record them (intent first)."""
+def adopt_outputs(astore: ArtifactStore, workflow: str, hit: MemoHit) -> bool:
+    """A memo hit makes this workflow depend on the outputs: record them (intent first), THEN
+    confirm they still exist (a sweep may have collected one between lookup and recording).
+    False means the hit is void and the caller must run the job."""
     hashes = [a.sha256 for a in hit.outputs if a.sha256]
     if hashes:
         astore.record_refs(workflow, hashes)
+    return _outputs_available(astore, hit.outputs)
 
 
 class _NoBackend:

@@ -599,3 +599,53 @@ def test_local_cluster_failure_is_not_memoized(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         lc.submit(boom, memo=True).result(timeout=60)
     assert list(lc.store.list_blobs("artifacts/memo/")) == []
+
+
+# --- review regressions: state the key must see ------------------------------------------------
+
+
+class _Model:
+    def __init__(self, k: int) -> None:
+        self.k = k
+
+    def score(self, x: int) -> int:
+        return x * self.k
+
+
+_CONFIG = _Model(2)
+
+
+def _reads_config(x: int) -> int:
+    return _CONFIG.score(x)
+
+
+def test_bound_method_state_is_part_of_the_key() -> None:
+    m = _Model(2)
+    before = key(func=m.score, args=(3,))
+    m.k = 5
+    assert key(func=m.score, args=(3,)) != before
+
+
+def test_object_globals_are_part_of_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    before = memo.function_fingerprint(_reads_config)
+    monkeypatch.setattr(_CONFIG, "k", 9)
+    assert memo.function_fingerprint(_reads_config) != before
+
+
+def test_class_globals_fingerprint_their_methods(monkeypatch: pytest.MonkeyPatch) -> None:
+    before = memo.function_fingerprint(_reads_config)
+
+    def other(self: Any, x: int) -> int:
+        return x + 1
+
+    other.__qualname__ = _Model.score.__qualname__
+    monkeypatch.setattr(_Model, "score", other)
+    assert memo.function_fingerprint(_reads_config) != before
+
+
+def test_adopt_outputs_reports_a_collected_output(astore: ArtifactStore, tmp_path: Path) -> None:
+    out = make_art(astore, tmp_path)
+    hit = memo.MemoHit(value=out, key="k", outputs=[out])
+    assert memo.adopt_outputs(astore, "wf-x", hit) is True
+    astore.store.delete(out.uri)  # swept between lookup and recording
+    assert memo.adopt_outputs(astore, "wf-y", hit) is False

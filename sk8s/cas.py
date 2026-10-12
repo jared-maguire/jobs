@@ -199,6 +199,16 @@ def store_for_uri(uri: str, hint: BlobStore | None = None) -> tuple[BlobStore, s
             ns = uri[len("k8s://"):].split("/", 1)[0]
             hint = _get("k8s", namespace=ns)
         return hint, key
+    if hint is not None and scheme in ("gs", "s3"):
+        # Reuse the configured store's own client: it already knows the endpoint/credentials
+        # (Config.store_endpoint reaches us only through it, not through the environment).
+        from sk8s.store.gcs import GCSStore
+        from sk8s.store.s3 import S3Store
+
+        if scheme == "s3" and isinstance(hint, S3Store):
+            return S3Store(bucket, client=hint._client), key
+        if scheme == "gs" and isinstance(hint, GCSStore):
+            return GCSStore(bucket, client=hint._client), key
     with _bucket_lock:
         cached = _bucket_stores.get((scheme, bucket, _endpoint() or ""))
         if cached is None:
@@ -439,6 +449,12 @@ class ArtifactStore:
 # --- fetching, publishing, downloading -----------------------------------------------------
 
 
+def _discard(dest: Path) -> None:
+    """Remove a partial download - only ever a regular file (``dest`` may be /dev/null)."""
+    if dest.is_file():
+        dest.unlink(missing_ok=True)
+
+
 def fetch(
     reader: BlobStore, uri: str, dest: Path, *, version: str | None, expected_sha: str | None
 ) -> tuple[str, int]:
@@ -448,13 +464,13 @@ def fetch(
     try:
         reader.download_file(uri, dest, version=version, hasher=h)
     except VersionChanged as exc:
-        dest.unlink(missing_ok=True)
+        _discard(dest)
         raise ArtifactChanged(f"artifact {uri} changed while it was being read") from exc
     except BlobNotFound as exc:
         raise ArtifactNotFound(f"artifact {uri} vanished before it was read") from exc
     sha = h.hexdigest()
     if expected_sha and sha != expected_sha:
-        dest.unlink(missing_ok=True)
+        _discard(dest)
         raise ArtifactChanged(
             f"artifact {uri} hashes to sha256:{sha[:16]}..., expected sha256:{expected_sha[:16]}...: "
             "its bytes are not what was pinned"
@@ -511,10 +527,13 @@ def publish(
         raise not_available(art, problems)
     reader, _ = store_for_uri(res.uri, astore.store if astore else None)
     sha = art.sha256
-    if sha is None:  # an unhashed external reference: hash it now (streamed, nothing kept)
-        sha, _ = fetch(reader, res.uri, Path(os.devnull), version=res.version, expected_sha=None)
+    if sha is None or art.store is None:
+        # An unhashed external reference, or one whose hash the caller merely ASSERTED: hash the
+        # bytes now (streamed, nothing kept). A server-side copy cannot verify content, and the
+        # object would otherwise be stamped with a hash nobody checked.
+        sha, _ = fetch(reader, res.uri, Path(os.devnull), version=res.version, expected_sha=art.sha256)
     size = res.stat.size
-    dst_store, dst_key = store_for_uri(dest_uri)
+    dst_store, dst_key = store_for_uri(dest_uri, astore.store if astore else None)
     metadata = {META_SHA: sha, META_PRODUCED_BY: art.produced_by or "unknown"}
 
     existing = dst_store.stat(dest_uri)

@@ -636,10 +636,11 @@ class Cluster:
                     salt=opts.get("memo_salt"), volumes=opts.get("volumes"), expect=expect,
                 )
                 hit = memolib.lookup(self.artifact_store, memo_key)
-                if hit is not None:
-                    # The result already exists: adopt its outputs into this workflow (intent
-                    # first) and answer without a payload, a Job or a pod.
-                    memolib.adopt_outputs(self.artifact_store, self.workflow_id, hit)
+                if hit is not None and memolib.adopt_outputs(
+                    self.artifact_store, self.workflow_id, hit
+                ):
+                    # The result already exists and its outputs are now ours (recorded, then
+                    # re-verified): answer without a payload, a Job or a pod.
                     self._settle_writers(plan, name, wrote=False)
                     return memolib.hit_future(self.workflow_id, hit)
             payload_uri = self.store.put(
