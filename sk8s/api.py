@@ -11,7 +11,8 @@ from typing import Any, Callable, Iterable, Literal, overload
 import cloudpickle  # type: ignore[import-untyped]  # no py.typed marker upstream
 
 from sk8s import expect as expectations
-from sk8s.dryrun import DryRun
+from sk8s.budget import Budget
+from sk8s.dryrun import DryRun, resource_totals
 from sk8s.errors import MapFailed, PilotFailed, RemoteException
 from sk8s.future import JobFuture
 
@@ -80,6 +81,38 @@ def run(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
     (see docs/artifacts.md).
     """
     return _cluster().run(func, *args, **kwargs)
+
+
+def _fan_budget(opts: dict[str, Any]) -> Budget | None:
+    """The budget governing a fan-out: its own ``budget=`` option, else the default cluster's
+    ``Config.budget``. A cluster object with no ``config`` (a stub, ``LocalCluster``) has none."""
+    explicit = Budget.coerce(opts.get("budget"))
+    if explicit is not None:
+        return explicit
+    budget = getattr(getattr(_cluster(), "config", None), "budget", None)
+    return budget if isinstance(budget, Budget) else None
+
+
+_MEMO_HINT = (
+    "memo is on, but a fan-out is admitted whole before any memo lookup: memo hits are charged "
+    "as if they run. Raise the budget, or use dry_run=True to see the estimate"
+)
+
+
+def _admit_fan_out(budget: Budget, n_items: int, opts: dict[str, Any]) -> None:
+    """Raise ``BudgetExceeded`` if the WHOLE fan-out (all its jobs, ``pilot`` included) is over
+    ``budget``. Pure arithmetic on the options; runs before the first job is submitted."""
+    batch_size = opts.get("batch_size", 1)
+    max_concurrent = opts.get("max_concurrent")
+    _positive("batch_size", batch_size)
+    _positive("max_concurrent", max_concurrent)
+    n_jobs = -(-n_items // batch_size)
+    cpu, _ = resource_totals(opts.get("requests"), opts.get("limits"))
+    memo = bool(opts.get("memo")) or bool(getattr(getattr(_cluster(), "config", None), "memo", False))
+    budget.evaluate(
+        n_jobs=n_jobs, cpu_cores=cpu * n_jobs, max_concurrent=max_concurrent,
+        unrequested_jobs=n_jobs if cpu == 0 else 0,
+    ).raise_if_exceeded(hint=_MEMO_HINT if memo else None)
 
 
 def _dry_run_with(call: Callable[[Any], DryRun]) -> DryRun:
@@ -223,6 +256,9 @@ def _submit_many(
     max_concurrent: int | None = opts.pop("max_concurrent", None)
     _positive("batch_size", batch_size)
     _positive("max_concurrent", max_concurrent)
+    budget = _fan_budget(opts)
+    if budget is not None:  # a cap, not a failure: submission blocks until a slot frees up
+        max_concurrent = budget.cap_concurrency(max_concurrent)
     items = list(iterable)
     sem = threading.BoundedSemaphore(max_concurrent) if max_concurrent else None
     expired = False
@@ -343,7 +379,11 @@ def _fan_out(
         )
     if opts.pop("dry_run", False):
         return _dry_run_many(func, list(iterable), star, opts)
-    return _submit_many(func, iterable, star, deadline=deadline, timeout=timeout, **opts)
+    items = list(iterable)
+    budget = _fan_budget(opts)
+    if budget is not None:
+        _admit_fan_out(budget, len(items), opts)  # before the first job (or pilot) exists
+    return _submit_many(func, items, star, deadline=deadline, timeout=timeout, **opts)
 
 
 def _dry_run_many(
@@ -400,6 +440,16 @@ def _dry_run_many(
             "waits for all of them to pass (results and expect=) before submitting the rest; "
             "nothing was submitted here"
         )
+    verdict = one.budget
+    if verdict is not None:  # the single-job verdict becomes the whole fan-out's
+        notes = [n for n in notes if not n.startswith("BUDGET EXCEEDED")]
+        verdict = Budget(**verdict.budget).evaluate(
+            n_jobs=n_jobs, cpu_cores=one.total_cpu_request * n_jobs, max_concurrent=max_concurrent,
+            unrequested_jobs=n_jobs if one.total_cpu_request == 0 else 0,
+        )
+        if not verdict.ok:
+            notes.append("BUDGET EXCEEDED (a real submission would raise BudgetExceeded): "
+                         + "; ".join(verdict.violations))
     return dataclasses.replace(
         one,
         jobs=one.jobs if n_jobs else [],
@@ -408,6 +458,7 @@ def _dry_run_many(
         total_memory_request=one.total_memory_request * n_jobs,
         n_items=len(items),
         notes=notes,
+        budget=verdict,
     )
 
 
@@ -492,7 +543,8 @@ def submit_map(
       every item in that job ends up cancelled.
     - ``max_concurrent`` (default None): at most this many jobs may be unresolved
       at once. Submission blocks the caller until a slot frees up, with no
-      time limit (``map``/``starmap`` bound this wait by their ``timeout``).
+      time limit (``map``/``starmap`` bound this wait by their ``timeout``). An active
+      ``Budget.max_concurrent_pods`` tightens it (the min of the two applies).
     - ``pilot`` (default None): submit only the first N items and WAIT for all N
       (results and any ``expect=`` checks). All green: the remainder is submitted and
       the full list of futures returned. Any failure: raises ``PilotFailed`` and the
@@ -500,8 +552,10 @@ def submit_map(
       until the pilot finishes, and the futures for the non-pilot items exist only after
       the pilot passes. ``timeout=`` (discarded without ``pilot``) bounds this wait.
 
-    ``expect=`` (a job option) is applied to every item's result. ``expect`` and ``pilot``
-    are reserved names: they are never forwarded to ``func``.
+    ``expect=`` (a job option) is applied to every item's result. ``expect``, ``pilot`` and
+    ``budget`` are reserved names: they are never forwarded to ``func``. ``budget=`` (a
+    :class:`sk8s.Budget`) REPLACES the configured budget for this call; the whole fan-out is
+    admitted against it before the first job, and its ``max_concurrent_pods`` caps ``max_concurrent``.
 
     ``dry_run=True`` submits nothing and returns a :class:`sk8s.DryRun`: one representative
     Job body, ``n_jobs`` (batches, with ``batch_size``) and request totals; 10k bodies are

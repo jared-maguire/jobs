@@ -227,6 +227,8 @@ def test_clean_wiring(
     ((ns, kw),) = calls
     report = kw.pop("report")  # clean() also sweeps the artifact CAS; the CLI collects its report
     stores = kw.pop("extra_stores")  # ... of the configured store too
+    reaped = kw.pop("sandbox_report")  # ... and which expired sandboxes it reaped
+    assert reaped.deleted == []
     assert (ns, kw) == ("ctx-ns", {"older_than_days": expected}) and hasattr(report, "summary")
     assert len(stores) == 1
     out = capsys.readouterr().out

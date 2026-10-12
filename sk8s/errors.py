@@ -76,6 +76,27 @@ class JobRejected(Sk8sError):
         )
 
 
+class BudgetExceeded(Sk8sError):
+    """A submission's estimated cost is over the active ``Budget``; nothing was created.
+
+    ``violations`` is one sentence per exceeded limit; ``verdict`` is the full
+    ``BudgetVerdict`` as a dict (estimates, applied limits, notes). Client-side, estimate-based
+    admission: see :mod:`sk8s.budget` for what is and is not enforced.
+    """
+
+    def __init__(
+        self, violations: list[str], verdict: dict[str, Any] | None = None, hint: str | None = None,
+    ) -> None:
+        self.violations = list(violations)
+        self.verdict = dict(verdict or {})
+        self.hint = hint
+        tail = f" ({hint})" if hint else ""
+        super().__init__("budget exceeded: " + "; ".join(self.violations) + tail)
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (type(self), (self.violations, self.verdict, self.hint))
+
+
 class ImagePullError(PodFailed):
     def __init__(self, job_name: str, image: str) -> None:
         super().__init__(job_name, reason=f"cannot pull image {image!r}")

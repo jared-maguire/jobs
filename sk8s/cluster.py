@@ -19,6 +19,7 @@ from kubernetes.client import ApiException
 
 import sk8s
 from sk8s import anchors, clones, serialize, spec, staging, volumes
+from sk8s.budget import UNCOSTED_NOTE, Budget, BudgetVerdict
 from sk8s import expect as expectations
 from sk8s import memo as memolib
 from sk8s.cas import ArtifactStore
@@ -39,7 +40,7 @@ from sk8s.watch import JobEvent, JobWatcher
 JOB_OPTIONS = {
     "image", "requests", "limits", "volumes", "timeout", "backoff_limit",
     "service_account", "namespace", "name_prefix", "privileged",
-    "pull_policy", "keep_results", "expect", "dry_run", "memo", "memo_salt",
+    "pull_policy", "keep_results", "expect", "dry_run", "memo", "memo_salt", "budget",
 }
 
 _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
@@ -231,6 +232,7 @@ class Cluster:
             lambda: datetime.datetime.now(datetime.timezone.utc)
         )
         self._events_forbidden = False
+        self._warned_uncosted = False  # the budget's "no cpu request" warning is once per cluster
         self._sleep: Callable[[float], None] = time.sleep
         self._watcher = JobWatcher(
             watcher_events if watcher_events is not None else self._k8s_events,
@@ -553,6 +555,27 @@ class Cluster:
             expectations.require_callable(expect)
         return expect
 
+    def _budget(self, opts: dict[str, Any]) -> Budget | None:
+        """The budget governing this submission: the per-call ``budget=`` option if given (it
+        replaces the configured one outright), else ``Config.budget``."""
+        explicit = Budget.coerce(opts.get("budget"))
+        return explicit if explicit is not None else self.config.budget
+
+    def _warn_uncosted(self, verdict: BudgetVerdict) -> None:
+        """Once per cluster: a cost limit is set but this job requests no cpu, so it passes unseen."""
+        if verdict.uncosted_jobs and not self._warned_uncosted:
+            self._warned_uncosted = True
+            log.warning("budget cost limits cannot see this job: %s", UNCOSTED_NOTE)
+
+    def _budget_verdict(self, opts: dict[str, Any]) -> BudgetVerdict | None:
+        """This one job measured against its budget (None if there is none). Pure arithmetic on
+        the job's requests: no I/O, so submit and dry_run share it."""
+        budget = self._budget(opts)
+        if budget is None:
+            return None
+        cpu, _ = resource_totals(opts.get("requests"), opts.get("limits"))
+        return budget.evaluate(n_jobs=1, cpu_cores=cpu, unrequested_jobs=1 if cpu == 0 else 0)
+
     def _job_settings(self, opts: dict[str, Any]) -> tuple[str, str, str, list[volumes.Mount]]:
         """(job name, namespace, image, parsed mounts) for a submission; ValueError before any
         side effect. Shared by ``submit`` and ``dry_run`` so a preview validates the same way."""
@@ -573,6 +596,7 @@ class Cluster:
         result_key: str, pod_mounts: list[spec.PodMount], owner: Any, anchor_name: str,
         anchor_uid: str,
     ) -> Any:
+        budget = self._budget(opts)
         return spec.build_job(
             name,
             image=image,
@@ -594,6 +618,7 @@ class Cluster:
             owner=owner,
             anchor_name=anchor_name,
             anchor_uid=anchor_uid,
+            budget_json=budget.to_json() if budget is not None else None,
         )
 
     @overload
@@ -613,6 +638,17 @@ class Cluster:
             return self._dry_run(func, args, kwargs, opts)
         expect = self._expectation(opts)  # before any side effect
         name, namespace, image, mounts = self._job_settings(opts)
+        verdict = self._budget_verdict(opts)
+        # A memoized job is admitted LATE (after a memo miss, below): a hit runs nothing and must
+        # not be refused for what it would have cost. Every other job is admitted here, before any
+        # mount, anchor or payload exists.
+        from sk8s.api import _run_batch
+
+        memo_on = bool(opts.get("memo", self.config.memo)) and func is not _run_batch
+        if verdict is not None:
+            self._warn_uncosted(verdict)
+            if not memo_on:
+                verdict.raise_if_exceeded()
         # Order matters (see sk8s.clones, "Races"): writers are held back and MARKED first, before
         # anything slow; read-only mounts are resolved to a clone as LATE as possible, right before
         # the Job that references it. Everything after the markers cleans them up on failure.
@@ -635,9 +671,7 @@ class Cluster:
             memo_key: str | None = None
             # (A config-level memo=true never memoizes the batch wrapper job; an explicit memo=True with
             # batch_size > 1 is refused earlier, in api._fan_out.)
-            from sk8s.api import _run_batch
-
-            if opts.get("memo", self.config.memo) and func is not _run_batch:
+            if memo_on:
                 memo_key = memolib.memo_key(
                     func, prepared.args, prepared.kwargs, image=image,
                     salt=opts.get("memo_salt"), volumes=opts.get("volumes"), expect=expect,
@@ -650,6 +684,10 @@ class Cluster:
                     # re-verified): answer without a payload, a Job or a pod.
                     self._settle_writers(plan, name, wrote=False)
                     return memolib.hit_future(self.workflow_id, hit)
+                if verdict is not None:
+                    # Late admission of a memoized job: it missed, so it will really run. Anything
+                    # created so far (the anchor, staged-input intent) is swept like any failed submit.
+                    verdict.raise_if_exceeded()
             payload_uri = self.store.put(
                 payload_key,
                 serialize.encode_payload(
@@ -775,12 +813,17 @@ class Cluster:
         unset = unset_requests(opts.get("requests"), opts.get("limits"))
         if unset:
             notes.append(unset_requests_note(unset))
+        verdict = self._budget_verdict(opts)
+        if verdict is not None and not verdict.ok:
+            notes.append("BUDGET EXCEEDED (a real submission would raise BudgetExceeded): "
+                         + "; ".join(verdict.violations))
         return DryRun(
             jobs=[serialize_job(job)], image=image, store=self.config.store, namespace=namespace,
             n_jobs=1, total_cpu_request=cpu, total_memory_request=memory,
             workflow_id=self.workflow_id, payload_bytes=len(payload), unset_requests=unset, notes=notes,
             n_artifacts=len(preview.inputs),
             artifact_input_bytes=preview.ephemeral_bytes if any(a.size is not None for a in preview.inputs) else None,
+            budget=verdict,
         )
 
     @staticmethod

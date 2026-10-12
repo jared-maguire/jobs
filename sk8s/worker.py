@@ -58,6 +58,7 @@ def _sweep(environ: Mapping[str, str]) -> None:
         clean(
             environ.get("SK8S_NAMESPACE"), core_api=_core_api(), batch_api=_batch_api(),
             exclude=(own,) if own else (), artifacts=False,
+            sandboxes=False,  # cluster-wide: a pod's namespaced Role can neither list nor delete them
         )
     except Exception:  # noqa: BLE001 — a sweep must never fail the job
         log.warning("retention sweep failed", exc_info=True)

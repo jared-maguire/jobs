@@ -19,6 +19,7 @@ from typing import Any, Collection
 
 from sk8s import anchors, gc
 from sk8s.cluster import job_phase
+from sk8s.sandbox import ReapReport
 
 log = logging.getLogger("sk8s.cleaning")
 
@@ -66,9 +67,17 @@ class CleanReport:
     deleted: list[str] = dataclasses.field(default_factory=list)
     kept: list[dict[str, str]] = dataclasses.field(default_factory=list)
     sweep: gc.SweepReport | None = None  # the artifact CAS sweep, when one ran
+    # Expired sandboxes (sk8s.sandbox) reaped / kept by the same sweep: names, and {sandbox, reason}.
+    sandboxes_deleted: list[str] = dataclasses.field(default_factory=list)
+    sandboxes_kept: list[dict[str, str]] = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"deleted": list(self.deleted), "kept": [dict(k) for k in self.kept]}
+        if self.sandboxes_deleted or self.sandboxes_kept:  # the shape only grows when sandboxes exist
+            out["sandboxes"] = {
+                "deleted": list(self.sandboxes_deleted),
+                "kept": [dict(k) for k in self.sandboxes_kept],
+            }
         sw = self.sweep
         if sw is not None and (sw.scanned or sw.aborted or sw.memo_expired):
             out["artifacts"] = {
@@ -92,17 +101,24 @@ def clean(
     artifacts: bool = True,
     report: gc.SweepReport | None = None,
     extra_stores: Collection[str] = (),
+    sandboxes: bool = True,
+    apps_api: Any | None = None,
+    sandbox_report: ReapReport | None = None,
 ) -> list[str]:
     """Delete expired workflows in ``namespace`` and return the deleted workflow ids.
 
     See :func:`clean_report` for the rules; this is its ``deleted`` list. Pass a
-    ``gc.SweepReport`` as ``report`` to receive what the artifact sweep did.
+    ``sandbox.ReapReport`` as ``sandbox_report`` to receive which sandboxes were reaped / kept,
+    and a ``gc.SweepReport`` as ``report`` to receive what the artifact sweep did.
     """
     result = clean_report(
         namespace, older_than_days=older_than_days, workflow=workflow, core_api=core_api,
         store=store, batch_api=batch_api, exclude=exclude, artifacts=artifacts,
-        extra_stores=extra_stores,
+        extra_stores=extra_stores, sandboxes=sandboxes, apps_api=apps_api,
     )
+    if sandbox_report is not None:
+        sandbox_report.deleted.extend(result.sandboxes_deleted)
+        sandbox_report.kept.extend(result.sandboxes_kept)
     if report is not None and result.sweep is not None:
         report.merge(result.sweep)
     return result.deleted
@@ -119,12 +135,22 @@ def clean_report(
     exclude: Collection[str] = (),
     artifacts: bool = True,
     extra_stores: Collection[str] = (),
+    sandboxes: bool = True,
+    apps_api: Any | None = None,
 ) -> CleanReport:
     """:func:`_clean_workflows` (workflow retention), then - unless ``artifacts=False`` - a sweep
     of the artifact CAS of the stores the deleted anchors named, of ``store=`` if given, and of
     ``extra_stores`` (store specs, e.g. the configured one: the CLI passes it, so artifacts of
     workflows whose anchors are already gone are still collected). Only stores named here are
-    ever touched - never the user's config implicitly. The sweep never raises."""
+    ever touched - never the user's config implicitly. The sweep never raises.
+
+    Unless ``workflow=`` names one, the sweep also reaps EXPIRED SANDBOXES (``sk8s.sandbox``;
+    cluster-wide, by their own ttl annotation, ``older_than_days`` does not apply) under the same
+    rules: never younger than the minimum age, never with active jobs or running services,
+    anything unprovable kept. ``sandboxes=False`` skips that (workers do: their namespaced Role
+    cannot list namespaces); a caller that may not list namespaces is skipped quietly. The result
+    is in ``sandboxes_deleted`` / ``sandboxes_kept`` of the report; ``clean()`` still returns
+    workflow ids only."""
     if older_than_days is not None and older_than_days < 0:
         raise ValueError(f"older_than_days must be >= 0, got {older_than_days}")
     if namespace is None:
@@ -142,7 +168,21 @@ def clean_report(
     )
     if artifacts:
         report.sweep = _sweep_artifacts(namespace, core_api, store, opened, set(extra_stores))
+    if sandboxes and workflow is None:
+        _reap_sandboxes(report, core_api, batch_api, apps_api)
     return report
+
+
+def _reap_sandboxes(report: CleanReport, core_api: Any, batch_api: Any, apps_api: Any) -> None:
+    from sk8s import sandbox
+
+    try:
+        reaped = sandbox.reap(core_api=core_api, batch_api=batch_api, apps_api=apps_api)
+    except Exception:  # noqa: BLE001 — typically 403: this caller may not list namespaces
+        log.info("sandbox sweep skipped: could not list sandbox namespaces", exc_info=True)
+        return
+    report.sandboxes_deleted.extend(reaped.deleted)
+    report.sandboxes_kept.extend(reaped.kept)
 
 
 def _sweep_artifacts(

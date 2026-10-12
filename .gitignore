@@ -22,3 +22,4 @@ work/
 .kubeconfig-*
 .sk8s-demo.toml
 .sk8s*.toml
+.sk8s-sandbox-*.toml

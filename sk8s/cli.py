@@ -27,7 +27,7 @@ from kubernetes.client import ApiException
 from kubernetes.config import ConfigException
 from urllib3.exceptions import HTTPError
 
-from sk8s import __version__, anchors, cleaning, datadescribe, explaining, images, k8s, spec, workflows
+from sk8s import __version__, anchors, cleaning, datadescribe, explaining, images, k8s, sandbox, spec, workflows
 from sk8s import config as config_mod
 from sk8s import doctor as doctor_mod
 from sk8s import profile as profile_mod
@@ -134,6 +134,8 @@ def _toml_scalar(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):  # repr is the shortest round-tripping form, and valid TOML
+        return repr(value)
     if isinstance(value, str):
         return toml_string(value)
     raise Sk8sError(f"config file holds a value this writer cannot preserve: {value!r}")
@@ -591,16 +593,106 @@ def _cmd_clean(args: argparse.Namespace) -> int:
         ).as_dict())
         return 0
     report = gc.SweepReport()
+    reaped = sandbox.ReapReport()
     deleted = cleaning.clean(
         _namespace(cfg=cfg), older_than_days=args.older_than, report=report,
-        extra_stores=[cfg.store],
+        extra_stores=[cfg.store], sandbox_report=reaped,
     )
     if deleted:
         print("\n".join(f"deleted {wf}" for wf in deleted))
+    if reaped.deleted:
+        print("\n".join(f"reaped sandbox {name} (ttl expired)" for name in reaped.deleted))
     if report.deleted or report.aborted or report.memo_expired:
         print(report.summary())
-    if not deleted and not (report.deleted or report.aborted or report.memo_expired):
+    if not (deleted or reaped.deleted or report.deleted or report.aborted or report.memo_expired):
         print("nothing to clean")
+    return 0
+
+
+def _positive_float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid number {text!r}") from None
+    if not value > 0:  # also rejects nan
+        raise argparse.ArgumentTypeError(f"must be > 0, got {text}")
+    return value
+
+
+def _cmd_sandbox_create(args: argparse.Namespace) -> int:
+    cfg = _load_cfg()
+    ttl = sandbox.parse_ttl(args.ttl)
+    provider = args.provider or profile_mod.detect_provider()
+    provider_args: dict[str, Any] = {}
+    if provider == "gke":
+        # Same inference as `sk8s doctor`: project and region come off the gke_<p>_<loc>_<name> context.
+        parts = profile_mod.gke_context_parts(profile_mod.active_context() or "")
+        if parts is None:
+            raise Sk8sError(
+                "provider 'gke' needs a kube context named gke_<project>_<location>_<name> to "
+                "infer the project and region from (or use --provider generic)"
+            )
+        provider_args = dict(
+            project=parts[0], region=profile_mod.gke_region(parts[1]),
+            gsa=gsa_email(args.gsa, parts[0]) if args.gsa else None,
+        )
+    elif args.gsa:
+        raise Sk8sError(f"--gsa is a GKE option; provider is {provider!r} (use --provider gke)")
+    made = sandbox.create(
+        args.name, cfg=cfg, provider=provider, provider_args=provider_args, ttl_seconds=ttl,
+        budget_usd=args.budget_usd, assume_cpu=args.assume_cpu,
+    )
+    box = made.sandbox
+    if args.json:
+        _print_json({
+            **box.to_dict(), "config_path": str(made.config_path), "export": made.export_line,
+        })
+        return 0
+    print("\n".join(made.lines))
+    print(f"wrote {made.config_path}")
+    expires = box.expires_at.isoformat() if box.expires_at else "never"
+    print(f"sandbox {box.name}: namespace {box.namespace}, expires {expires}")
+    print(made.export_line)
+    return 0
+
+
+def _expires_in(box: sandbox.Sandbox, now: datetime.datetime) -> str:
+    if box.expires_at is None:
+        return "unknown"
+    left = (box.expires_at - now).total_seconds()
+    if left <= 0:
+        return "EXPIRED"
+    return f"in {left / 3600:.1f}h" if left < 48 * 3600 else f"in {left / 86400:.1f}d"
+
+
+def _cmd_sandbox_list(args: argparse.Namespace) -> int:
+    boxes = sandbox.list_sandboxes()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if args.json:
+        _print_json([{**b.to_dict(), "expired": b.expired(now)} for b in boxes])
+        return 0
+    if not boxes:
+        print("no sandboxes")
+        return 0
+    rows = [
+        (b.name, b.namespace, _expires_in(b, now),
+         f"${b.budget.max_estimated_usd:g}" if b.budget and b.budget.max_estimated_usd is not None else "-")
+        for b in boxes
+    ]
+    header = ("NAME", "NAMESPACE", "EXPIRES", "BUDGET")
+    widths = [max(len(r[i]) for r in [header, *rows]) for i in range(len(header))]
+    for row in [header, *rows]:
+        print("  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())
+    return 0
+
+
+def _cmd_sandbox_delete(args: argparse.Namespace) -> int:
+    name = sandbox.name_of(args.name)
+    print("\n".join(sandbox.delete(name)))
+    local = Path.cwd() / f".sk8s-sandbox-{name}.toml"
+    if local.is_file():
+        local.unlink()
+        print(f"removed {local}")
     return 0
 
 
@@ -783,17 +875,54 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("workflow")
     p.set_defaults(func=_cmd_kill)
 
-    p = sub.add_parser("clean", help="delete expired workflows")
+    p = sub.add_parser(
+        "clean", help="delete expired workflows (and expired, idle sandboxes)",
+        description="Delete expired workflows in the namespace. The sweep also reaps EXPIRED, idle "
+        "sandboxes (see 'sk8s sandbox list'; by their own --ttl, --older-than does not apply to "
+        "them); --json lists which under \"sandboxes\".",
+    )
     p.add_argument(
         "--older-than", type=parse_duration_days, metavar="D",
         help="age limit instead of each workflow's retention: 7d, 36h, or bare days (7)",
     )
-    _add_json(p, '{"deleted": [ids], "kept": [{workflow, reason}]}')
+    _add_json(p, '{"deleted": [ids], "kept": [{workflow, reason}]} (+ "sandboxes" when any exist)')
     p.set_defaults(func=_cmd_clean)
 
     p = sub.add_parser("shell", help="open a shell in a pod in the cluster (needs kubectl)")
     p.add_argument("--image", help="image for the shell pod (default: the worker image)")
     p.set_defaults(func=_cmd_shell)
+
+    sbx = sub.add_parser(
+        "sandbox", help="throwaway namespace + isolated config + budget, reaped by age"
+    )
+    sbx_sub = sbx.add_subparsers(dest="sandbox_command", metavar="ACTION", required=True)
+    p = sbx_sub.add_parser(
+        "create", help="create namespace sk8s-sbx-<name> (RBAC applied) and an isolated config file",
+        description="Create a sandbox: namespace sk8s-sbx-<name> through the same profile apply as "
+        "'sk8s config', a store prefix sbx-<name> inside the configured store, and "
+        ".sk8s-sandbox-<name>.toml in the current directory. Point SK8S_CONFIG at it (the export "
+        "line is printed) and everything sk8s does is confined to the sandbox.",
+    )
+    p.add_argument("--name", help="sandbox name (default: random); namespace is sk8s-sbx-<name>")
+    p.add_argument("--budget-usd", type=_positive_float, metavar="X",
+                   help="default budget: max estimated spend per submission (estimate-based admission)")
+    p.add_argument("--assume-cpu", type=_positive_float, metavar="CORES",
+                   help="with --budget-usd: charge jobs that request no cpu this many cores "
+                   "(without it the usd limit cannot see them; recommended, e.g. 1)")
+    p.add_argument("--ttl", default="24h", metavar="T",
+                   help="time to live before 'sk8s clean' may reap it: 90m, 24h, 7d (default: 24h)")
+    p.add_argument("--provider", help="local | generic | gke (default: detected from the kube context)")
+    p.add_argument("--gsa", help="gke: Google service account (name or email) workers act as")
+    _add_json(p, "{name, namespace, created_at, expires_at, store, budget, config_path, export}")
+    p.set_defaults(func=_cmd_sandbox_create)
+    p = sbx_sub.add_parser("list", help="list sandboxes (label sk8s/kind=sandbox)")
+    _add_json(p, "a list of {name, namespace, created_at, expires_at, store, budget, expired}")
+    p.set_defaults(func=_cmd_sandbox_list)
+    p = sbx_sub.add_parser(
+        "delete", help="delete a sandbox: its namespace (everything in it) and its store prefix"
+    )
+    p.add_argument("name", help="the sandbox name (or its sk8s-sbx-<name> namespace)")
+    p.set_defaults(func=_cmd_sandbox_delete)
 
     data = sub.add_parser("data", help="inspect data (formats, sizes, cohorts)")
     data_sub = data.add_subparsers(dest="data_command", metavar="ACTION", required=True)

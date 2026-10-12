@@ -24,7 +24,7 @@ deadline for the whole map, **not** a per-job kill; `submit`/`submit_map` accept
 and ignore `timeout` (bound the wait at `fut.result(timeout=...)` instead).
 `namespace` must equal the cluster's namespace (`ValueError` otherwise) — switch
 namespaces via config, not per-job.
-`timeout`, `expect` and `pilot` are reserved option names like `image`: they are consumed by
+`timeout`, `expect`, `pilot` and `budget` are reserved option names like `image`: they are consumed by
 sk8s and never forwarded to your function (`serve()` rejects `expect=` with `ValueError`).
 
 `sk8s.configure(namespace=..., image=..., store=...)` overrides config for the
@@ -49,6 +49,8 @@ bake your package into the image.
   explanation, `.result_repr` a truncated repr of the offending result;
   `__cause__` is a `RemoteTraceback`. In a `map` it is a per-item failure inside
   `MapFailed` (whose message counts `N failed their expectation, M errored`).
+- `BudgetExceeded` — a submission's *estimated* cost is over its `Budget`; nothing was
+  created. `.violations` (one sentence per limit), `.verdict` (dict). See Budgets below.
 - `PilotFailed` — a `pilot=` run failed; the remainder was **not submitted**.
   `.failures` is `[(index, exception), ...]` over the pilot items, `.results` is
   `{index: value}` for the pilot items that succeeded, `.pilot` how many ran, `.total`
@@ -234,7 +236,77 @@ a report, not a check).
 `--json` also exists on `sk8s workflows` (list of `{id, detached, age,
 age_seconds, driver_job, driver}`), `sk8s doctor` (list of `{name, ok,
 fix_hint}`; exit code unchanged) and `sk8s clean` (`{deleted: [...], kept:
-[{workflow, reason}]}`). Errors stay on stderr with exit 1.
+[{workflow, reason}]}`, plus `sandboxes` when any exist), and `sk8s sandbox create|list`. Errors stay on stderr with exit 1.
+
+## Budgets and sandboxes
+
+**Budgets** are client-side guardrails: `budget=Budget(...)` on `submit`, `run`, the `map`
+family and `submit_workflow`, or as a default via `sk8s.configure(budget=...)` /
+`Config.budget` / config file `[budget]` table / env `SK8S_BUDGET` (JSON).
+
+```python
+from sk8s import Budget
+b = Budget(max_concurrent_pods=8, max_cpu_hours=200, max_estimated_usd=10)   # all optional
+sk8s.map(align, samples, requests={"cpu": "4"}, budget=b)     # raises BudgetExceeded BEFORE any job
+dr = sk8s.map(align, samples, requests={"cpu": "4"}, budget=b, dry_run=True)
+dr.budget.ok, dr.budget.violations, dr.budget.estimated_usd   # dry_run REPORTS, never raises
+```
+
+What is enforced, honestly:
+
+- **Admission, estimate-based.** The submission's totals (the same ones `dry_run` shows:
+  `n_jobs x cpu request`) become `cpu-hours = cpu x Budget.assumed_job_hours` (default 1h:
+  sk8s cannot know how long a job runs) and `usd = cpu-hours x $0.04` (the
+  `sk8s.explain` rate). Over `max_cpu_hours` / `max_estimated_usd` -> `BudgetExceeded`
+  before anything is created. A fan-out (`pilot` included) is admitted **whole**, before
+  its first job. **A job that requests no cpu estimates to 0 and passes any cost limit**: by
+  default the cost limits are blind to it (the verdict carries a note and the first such
+  submission per cluster logs a warning). Close the hole by setting `requests=`, or set
+  `Budget(assumed_cpu_when_unset=1)` to charge such jobs that many cores each. Memory, GPUs and
+  storage are not costed.
+- **Memoization.** A single `memo=True` job is admitted *after* the memo lookup, so a hit is
+  never refused for what it would have cost; a miss is refused as usual (it leaves at most a
+  swept anchor and staged-input record, no payload or Job). A **fan-out is admitted whole before
+  any lookup**, so its memo hits are charged as if they ran (the error says so): raise the
+  budget or preview with `dry_run=True`.
+- **Per-call vs configured.** A per-call `budget=` *replaces* the configured one outright
+  (it may loosen it); there is no "tighter wins" merge.
+- **Concurrency is a cap, not a failure.** `max_concurrent_pods` tightens `max_concurrent`
+  (the min applies) for each `map`/`submit_map`/`starmap` call, so submission blocks
+  instead of raising. It is per fan-out call: not across separate calls or a plain
+  `submit()` loop.
+- **Detached workflows.** The budget rides to the driver pod as `SK8S_BUDGET`, so every
+  nested `submit`/`map` inside the workflow is admitted against it, per submission.
+- **NOT enforced:** cumulative spend across submissions or workflows, actual pod runtime
+  or metered usage, anything for a `LocalCluster` single `submit()`. A budget is
+  admission control, not metering; cumulative accounting needs the v3 event log.
+
+**Sandboxes** are the isolation pattern in one command:
+
+```
+sk8s sandbox create --name try1 --budget-usd 2 --ttl 6h   # namespace sk8s-sbx-try1 + RBAC
+export SK8S_CONFIG=$PWD/.sk8s-sandbox-try1.toml            # printed by create
+sk8s doctor; python my_experiment.py                       # confined to the sandbox
+sk8s sandbox list [--json]                                 # label sk8s/kind=sandbox
+sk8s sandbox delete try1                                   # namespace + store prefix cascade
+```
+
+`create` applies the normal profile (local/generic; gke only when the kube context is a GKE
+one; `--gsa` for Workload Identity), carves the store (`s3://b/p` -> `s3://b/p/sbx-try1`, `local:` likewise;
+`k8s` is already namespace-scoped and kept), and writes an isolated 0600 config (namespace, store, budget, image
+settings, `store_env`) next to you; your own config is untouched. Use `--assume-cpu 1` with
+`--budget-usd` (it sets `assumed_cpu_when_unset`), otherwise the usd limit cannot see jobs that
+request no cpu. `--ttl` (default 24h) is an
+annotation: `sk8s clean` / `sk8s.clean()` reaps **expired** sandboxes cluster-wide, under the
+workflow rules (300s minimum age; never with active jobs or running services; unprovable ->
+kept; `clean --json` lists them under `sandboxes`). Worker start-up sweeps never reap
+sandboxes; `sk8s clean` prints `reaped sandbox X (ttl expired)` for each. Whoever runs
+`delete`/`clean` needs credentials for the sandbox's base store (bucket access for s3/gs): the
+store prefix is removed first and a sandbox whose prefix cannot be removed is kept. The
+isolated `.sk8s-sandbox-<name>.toml` is removed by `delete` run from the directory holding it;
+a reap (or a delete from elsewhere) leaves that stale file behind. `--ttl` is capped at 3650d.
+`delete` is unconditional (live jobs die) but refuses any namespace that is not
+labelled as a sandbox, and keeps the namespace if the store prefix cannot be deleted.
 
 ## CLI
 
@@ -243,7 +315,8 @@ fix_hint}`; exit code unchanged) and `sk8s clean` (`{deleted: [...], kept:
 included, with driver phase), `sk8s explain <wf>` (everything about one
 workflow, see above), `sk8s logs <wf>` (prints the detached driver's log
 once — not a follow/tail), `sk8s kill <wf>`, `sk8s clean [--older-than 7d]`,
-`sk8s shell [--image IMG]`, `sk8s data describe <path|uri> [--json]`.
+`sk8s shell [--image IMG]`, `sk8s data describe <path|uri> [--json]`,
+`sk8s sandbox create|list|delete` (see Budgets and sandboxes).
 
 Cleanup rules: retention = older than `retention_days` AND no active jobs, with a
 300s minimum age — right after a crash `sk8s clean --older-than 0` may say
