@@ -637,7 +637,14 @@ def test_cluster_none_builds_read_only_handles_from_config(
     assert report["store"]["blob_count"] == 1  # opened from the anchor's recorded store ("k8s")
 
 
-def test_cluster_none_honors_configure_store_string(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cluster_none_honors_configure_store_string(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Fake the kube APIs like the neighboring test: CI runners have no kube config,
+    # and _context(None) must not depend on the host environment to resolve Config.
+    h = Harness(tmp_path)
+    monkeypatch.setattr(k8s, "core_api", lambda: h.core)
+    monkeypatch.setattr(k8s, "batch_api", lambda: h.batch)
     sk8s.configure(namespace=NS, store="gs://bkt/pfx")
     try:
         ctx = explaining._context(None)
