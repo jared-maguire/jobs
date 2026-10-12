@@ -151,13 +151,43 @@ everything it submits; your laptop can vanish. `sk8s.attach(workflow_id)`
 default** — pass `delete=False` to collect again later. See
 references/advanced.md.
 
+## Describing data
+
+Before planning an analysis, ask what the data is (cheap: header sniffing, never a
+full read):
+
+```python
+d = sk8s.describe("gs://lab/runs/oct/")      # or a local path, an s3:// prefix, or a single file
+d["headline"]   # "Found 48 samples (FASTQ, paired-end, 96 files, ~12 GB each)"
+```
+
+```
+sk8s data describe gs://lab/runs/oct/ [--json] [--samples 5] [--max-objects 10000]
+```
+
+- One file -> `{"kind": "file", "format", "confidence", "compression", "facts", "notes"}`.
+  Formats: FASTQ(.gz) (read length, phred offset guess, record count only if the file is
+  <10MB), BAM (sort order, references, read groups, aligner), CRAM (version), VCF(.gz)
+  (samples, contigs, reference), CSV/TSV (delimiter, header, column types), gzip/unknown.
+- Directory or `gs://`/`s3://` prefix -> `{"kind": "cohort", ...}`: counts and bytes by
+  format, size stats, `patterns` (FASTQ R1/R2 pairing + samples estimate, BAM index
+  pairing), and full facts for the first 5 files (sorted by path).
+- `confidence` is `"magic"` (format signature), `"content"` (bytes parse as the format) or
+  `"extension"` (name only). Cohort-wide `formats` are by extension (`confidence:
+  "extension"`); only the sampled files are sniffed by content (`sample_format_mismatches`
+  flags disagreements).
+- Remote: only the first 1 MiB of each *sampled* file is range-read. Listings stop at
+  10,000 objects: `listing_capped: true` and a note say so. Needs the `sk8s[gcs]` /
+  `sk8s[s3]` extra and ambient credentials; failures are typed `Sk8sError`s naming the fix.
+- Everything is JSON-serializable. Parquet, pysam-backed extras and lineage are not here yet.
+
 ## CLI
 
 `sk8s config` (plan/apply + write config; `--dry-run`), `sk8s doctor`,
 `sk8s image build|push`, `sk8s workflows` (every anchored workflow, finished
 included, with driver phase), `sk8s logs <wf>` (prints the detached driver's log
 once — not a follow/tail), `sk8s kill <wf>`, `sk8s clean [--older-than 7d]`,
-`sk8s shell [--image IMG]`.
+`sk8s shell [--image IMG]`, `sk8s data describe <path|uri> [--json]`.
 
 Cleanup rules: retention = older than `retention_days` AND no active jobs, with a
 300s minimum age — right after a crash `sk8s clean --older-than 0` may say
