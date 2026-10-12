@@ -176,8 +176,8 @@ except sk8s.MapFailed as e:                   # pilot green; later samples faile
   it inside a driver (`submit_workflow`). Its `timeout=` (ignored without `pilot`) bounds the
   pilot wait only.
 - After a green pilot, a later item failing its expectation is an ordinary per-item
-  failure (`MapFailed`); use the `submit_map` harvesting pattern above to keep the good
-  results and quarantine the rest.
+  failure (`MapFailed`): the good values are in `e.results` (`{index: value}`) and the quarantined
+  indices in `e.failures`. `PilotFailed.results` likewise holds the pilot's successes.
 - Version note: `expect=` needs a worker image built from sk8s with wire envelope 2 (this
   release). An older worker cannot unpack the payload and fails before running your function
   (a `ValueError` about unpacking), never by skipping the check. Rebuild the image.

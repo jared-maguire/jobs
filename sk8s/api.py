@@ -166,6 +166,7 @@ def _submit_many(
     star: bool,
     *,
     deadline: float | None = None,
+    timeout: float | None = None,
     **opts: Any,
 ) -> list[JobFuture]:
     """Shared body of the submit_map family.
@@ -178,7 +179,7 @@ def _submit_many(
     pilot = opts.pop("pilot", None)
     if pilot is not None:
         _positive("pilot", pilot)
-        return _submit_piloted(func, iterable, star, pilot, deadline, opts)
+        return _submit_piloted(func, iterable, star, pilot, deadline, timeout, opts)
     batch_size: int = opts.pop("batch_size", 1)
     max_concurrent: int | None = opts.pop("max_concurrent", None)
     _positive("batch_size", batch_size)
@@ -227,11 +228,16 @@ def _submit_many(
     expect = job_opts.pop("expect", None)
     if expect is not None:
         expectations.require_callable(expect)
+    # Only passed when set: a batch job without a gate keeps the exact v2 call shape
+    # (func, chunk, star, kwargs), so it still runs on a worker image that predates expect=.
+    # Positional, not a keyword: ``expect=`` to submit() is the JOB option and would be
+    # consumed by the cluster as the gate of the whole batch job.
+    extra = (expect,) if expect is not None else ()
     func_kwargs = {k: v for k, v in opts.items() if k not in JOB_OPTIONS}
     item_futures: list[JobFuture] = []
     for start in range(0, len(items), batch_size):
         chunk = items[start:start + batch_size]
-        parent = submit_job(_run_batch, func, chunk, star, func_kwargs, expect, **job_opts)
+        parent = submit_job(_run_batch, func, chunk, star, func_kwargs, *extra, **job_opts)
         if parent is None:
             item_futures.extend(_unsubmitted() for _ in chunk)
             continue
@@ -250,6 +256,7 @@ def _submit_piloted(
     star: bool,
     pilot: int,
     deadline: float | None,
+    timeout: float | None,
     opts: dict[str, Any],
 ) -> list[JobFuture]:
     """``pilot=n``: submit the first ``n`` items, wait for ALL of them (results and any
@@ -262,15 +269,16 @@ def _submit_piloted(
     """
     items = list(iterable)
     head, tail = items[:pilot], items[pilot:]
-    timeout = opts.get("timeout")
     wait_deadline = deadline if deadline is not None else _deadline(timeout)
-    pilot_futures = _submit_many(func, head, star, deadline=deadline, **opts)
-    _, failures, _ = _collect(pilot_futures, timeout, wait_deadline)
+    pilot_futures = _submit_many(func, head, star, deadline=deadline, timeout=timeout, **opts)
+    _, failures, succeeded = _collect(pilot_futures, timeout, wait_deadline)
     if failures:
-        raise PilotFailed(failures, pilot=len(head), total=len(items))
+        raise PilotFailed(failures, pilot=len(head), total=len(items), results=succeeded)
     if not tail:
         return pilot_futures
-    return pilot_futures + _submit_many(func, tail, star, deadline=deadline, **opts)
+    return pilot_futures + _submit_many(
+        func, tail, star, deadline=deadline, timeout=timeout, **opts
+    )
 
 
 def _make_unpack(group: list[_ItemFuture]) -> Callable[[concurrent.futures.Future[Any]], None]:
@@ -350,7 +358,8 @@ def submit_map(
       until the pilot finishes, and the futures for the non-pilot items exist only after
       the pilot passes. ``timeout=`` (discarded without ``pilot``) bounds this wait.
 
-    ``expect=`` (a job option) is applied to every item's result.
+    ``expect=`` (a job option) is applied to every item's result. ``expect`` and ``pilot``
+    are reserved names: they are never forwarded to ``func``.
     """
     return _submit_many(func, iterable, star=False, **opts)
 
@@ -434,7 +443,7 @@ def map(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[
     """
     timeout = opts.pop("timeout", None)
     deadline = _deadline(timeout)
-    futures = _submit_many(func, iterable, False, deadline=deadline, **opts)
+    futures = _submit_many(func, iterable, False, deadline=deadline, timeout=timeout, **opts)
     return _gather(futures, timeout, deadline)
 
 
@@ -442,5 +451,5 @@ def starmap(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> l
     """Like ``map``, but calls ``func(*item)`` for each item."""
     timeout = opts.pop("timeout", None)
     deadline = _deadline(timeout)
-    futures = _submit_many(func, iterable, True, deadline=deadline, **opts)
+    futures = _submit_many(func, iterable, True, deadline=deadline, timeout=timeout, **opts)
     return _gather(futures, timeout, deadline)

@@ -270,3 +270,9 @@ def test_logs_concatenates_pod_logs_by_selector(h: Harness) -> None:
 def test_exports() -> None:
     assert sk8s.serve is serve and sk8s.get_service is get_service and sk8s.Service is Service
     assert {"serve", "get_service", "Service"} <= set(sk8s.__all__)
+
+
+def test_serve_rejects_expect_instead_of_silently_ignoring_it(h: Harness) -> None:
+    with pytest.raises(ValueError, match="expect"):
+        _serve(h, expect=lambda r: None)
+    assert not h.apps.deployments and not h.payload_exists("api")

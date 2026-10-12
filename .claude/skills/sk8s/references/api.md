@@ -23,6 +23,8 @@ deadline for the whole map, **not** a per-job kill; `submit`/`submit_map` accept
 and ignore `timeout` (bound the wait at `fut.result(timeout=...)` instead).
 `namespace` must equal the cluster's namespace (`ValueError` otherwise) — switch
 namespaces via config, not per-job.
+`timeout`, `expect` and `pilot` are reserved option names like `image`: they are consumed by
+sk8s and never forwarded to your function (`serve()` rejects `expect=` with `ValueError`).
 
 `sk8s.configure(namespace=..., image=..., store=...)` overrides config for the
 process; `sk8s.configure()` resets; `sk8s.configure(cluster=sk8s.LocalCluster())`

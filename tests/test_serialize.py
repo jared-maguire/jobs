@@ -144,3 +144,16 @@ def test_result_value_is_recoverable_from_a_failed_expectation_blob() -> None:
 def test_result_headers_carry_the_envelope_version() -> None:
     for blob in (serialize.encode_result(1), serialize.encode_error(KeyError("k"))):
         assert json.loads(blob.partition(b"\n")[0])["envelope"] == serialize.ENVELOPE_VERSION
+
+
+def test_payload_without_expect_is_byte_identical_to_the_v2_body() -> None:
+    # The v2.0 encoding of a job with no gate: header fields aside, the body is exactly
+    # cloudpickle.dumps((func, args, kwargs)). Old worker images must keep reading it.
+    import cloudpickle
+
+    def f(x: int) -> int:
+        return x
+
+    data = serialize.encode_payload(f, (1,), {"k": 2})
+    _, _, body = data.partition(b"\n")
+    assert body == cloudpickle.dumps((f, (1,), {"k": 2}))

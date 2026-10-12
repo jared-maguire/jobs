@@ -295,14 +295,20 @@ class PilotFailed(Sk8sError):
     """A ``pilot=`` run failed, so the remaining items were never submitted.
 
     ``failures`` is ``[(index, exception), ...]`` over the pilot items (``index`` is the
-    position in the input); ``pilot`` is how many items the pilot ran and ``total`` how many
-    the call was given.
+    position in the input); ``results`` maps the index of every pilot item that succeeded to
+    its value (as on ``MapFailed``); ``pilot`` is how many items the pilot ran and ``total``
+    how many the call was given.
     """
 
     def __init__(
-        self, failures: list[tuple[int, BaseException]], pilot: int, total: int
+        self,
+        failures: list[tuple[int, BaseException]],
+        pilot: int,
+        total: int,
+        results: dict[int, Any] | None = None,
     ) -> None:
         self.failures = failures
+        self.results: dict[int, Any] = {} if results is None else results
         self.pilot = pilot
         self.total = total
         first_i, first_e = failures[0]

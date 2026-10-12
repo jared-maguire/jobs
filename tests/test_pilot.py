@@ -286,3 +286,59 @@ def test_napkin_pilot_green_then_quarantine_one_sample(tmp_path) -> None:  # typ
         assert "1 failed their expectation, 0 errored" in str(e)
     finally:
         sk8s.configure(cluster=None)
+
+
+def test_pilot_failed_results_are_the_pilot_successes(inline) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(PilotFailed) as exc_info:
+        sk8s.map(bad_for_3, range(10), pilot=5)
+    assert exc_info.value.results == {0: 0, 1: 1, 2: 2, 4: 4}
+
+
+def test_pilot_timeout_message_names_the_real_timeout(manual) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(PilotFailed) as exc_info:
+        sk8s.map(double, range(5), pilot=2, timeout=0.2)
+    msgs = {str(e) for _, e in exc_info.value.failures}
+    assert msgs == {"not finished within map timeout of 0.2s"}
+    assert "Nones" not in str(exc_info.value)
+
+
+def test_submit_map_pilot_timeout_message_names_the_real_timeout(manual) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(PilotFailed) as exc_info:
+        sk8s.submit_map(double, range(5), pilot=2, timeout=0.2)
+    assert {str(e) for _, e in exc_info.value.failures} == {
+        "not finished within map timeout of 0.2s"
+    }
+
+
+def test_batched_map_without_expect_keeps_the_v2_call_shape(manual) -> None:  # type: ignore[no-untyped-def]
+    # A batch job with no gate must not mention expect at all, so it still runs on a worker
+    # image that predates expect=: _run_batch(func, chunk, star, kwargs), four positionals.
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real_submit = manual.submit
+
+    def recording(func: Any, /, *args: Any, **kwargs: Any) -> JobFuture:
+        calls.append((args, kwargs))
+        return real_submit(func, *args, **kwargs)
+
+    manual.submit = recording  # type: ignore[method-assign]
+    sk8s.submit_map(double, range(4), batch_size=2, image="img:1")
+    assert len(calls) == 2
+    for args, kwargs in calls:
+        assert len(args) == 4  # (func, chunk, star, func_kwargs)
+        assert "expect" not in kwargs and kwargs == {"image": "img:1"}
+
+
+def test_batched_map_with_expect_rides_inside_the_batch_not_as_the_job_option(manual) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real_submit = manual.submit
+
+    def recording(func: Any, /, *args: Any, **kwargs: Any) -> JobFuture:
+        calls.append((args, kwargs))
+        return real_submit(func, *args, **kwargs)
+
+    manual.submit = recording  # type: ignore[method-assign]
+    gate_fn = lambda r: None  # noqa: E731
+    sk8s.submit_map(double, range(2), batch_size=2, expect=gate_fn)
+    (args, kwargs), = calls
+    assert len(args) == 5 and args[4] is gate_fn  # the per-item gate is a _run_batch argument
+    assert "expect" not in kwargs  # NOT the job option: that would gate the batch's outcome list

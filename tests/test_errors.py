@@ -127,3 +127,11 @@ def test_pilot_failed_carries_failures_and_says_nothing_further_submitted() -> N
     assert "45" in text and "not submitted" in text
     assert "1 failed their expectation" in text and "1 errored" in text
     assert isinstance(e, Sk8sError)
+
+
+def test_pilot_failed_carries_the_pilot_successes() -> None:
+    from sk8s.errors import PilotFailed
+
+    e = PilotFailed([(1, ValueError("x"))], pilot=3, total=9, results={0: "a", 2: "c"})
+    assert e.results == {0: "a", 2: "c"}
+    assert PilotFailed([(0, ValueError("x"))], pilot=1, total=2).results == {}
