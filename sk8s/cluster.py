@@ -743,7 +743,7 @@ class Cluster:
             claim = m.name
             if m.read_only and clones.is_clone_backed(pvcs[m.name]):
                 assert mgr is not None
-                claim = mgr.resolve_read_only(m.name, pvcs[m.name])
+                claim = mgr.resolve_read_only(m.name)
                 plan.readers.append(m.name)
                 self._read_volumes.add(m.name)
             pod_mounts.append(spec.PodMount(m.name, claim, m.mountpoint, m.read_only))

@@ -783,8 +783,10 @@ read-only: [Errno 30] Read-only file system: '/mnt/index/oops'
 The rules, stated plainly:
 
 - Readers see the volume as of the last `rw` job that **succeeded**. A writer that is still
-  running is invisible; one that failed or was cancelled never becomes visible as a
-  generation of its own.
+  running is invisible. A **failed** writer never becomes a generation of its own — but any
+  bytes it wrote before failing are on the primary, so the *next* clone can contain its
+  partial output. A **cancelled** writer (its Job deleted mid-run) is treated as completed
+  and does become the generation — sk8s prefers a needless re-clone over a stale read.
 - **A clone is never taken while a writer is running** (a copy of a disk that is mounted
   read-write is a dirty copy). A read-only job submitted while a `rw` job is running
   therefore *waits inside `submit()`* for the writer to finish, up to

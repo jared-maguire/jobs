@@ -72,9 +72,10 @@ What is still true (by design, not bugs):
 - A reader submit that creates a clone and then fails (or dies) leaves a Pending clone that
   holds writers back for up to ``CLONE_MIN_AGE`` seconds after its last use. Intended: the
   floor is what protects submits that are still in flight.
-- A clone is cut from the *live primary*. If a writer failed, or was cancelled, before the
-  next reader, whatever it had already written to the primary is captured by that reader's clone
-  even though that writer never became the generation.
+- A clone is cut from the *live primary*. A *failed* writer never bumps the generation, but
+  whatever it had already written to the primary before failing is still captured by the next
+  reader's clone. A *cancelled or vanished* writer (its Job is gone) settles as completed and
+  DOES become the generation — the conservative direction, matching the bullet below.
 - A marker whose Job is gone is treated as a *completed* writer (the conservative direction: it
   may re-clone needlessly; the alternative is stale reads).
 - With a ``WaitForFirstConsumer`` class the clone's disk is cut when its first reader pod is
@@ -299,16 +300,17 @@ class CloneManager:
 
     # --- the read-only mount ---------------------------------------------------------------------
 
-    def resolve_read_only(self, volume: str, pvc: Any) -> str:
+    def resolve_read_only(self, volume: str) -> str:
         """The claim a read-only mount of clone-backed ``volume`` should use.
 
         Waits (bounded) for running rw jobs, then ensures a clone of the current generation
         exists, sweeps superseded clones, and returns the clone's name.
         """
-        # ``pvc`` is the snapshot taken when the submit began; the payload upload since then can
-        # have taken seconds, in which time another client may have started a writer or moved the
-        # generation. Resolving from the snapshot would clone under that writer (or re-create a
-        # clone the other client just swept). Found live on GKE (Plan 10 T4); always re-read.
+        # Deliberately re-read here rather than taking the caller's submit-time snapshot: the
+        # payload upload since then can have taken seconds, in which time another client may
+        # have started a writer or moved the generation. Resolving from a snapshot would clone
+        # under that writer (or re-create a clone the other client just swept). Found live on
+        # GKE (Plan 10 T4).
         pvc = self.read_volume(volume)
         deadline = self.clock() + self.wait_seconds
         while True:
