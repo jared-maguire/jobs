@@ -176,13 +176,18 @@ class Cluster:
         batch_api: Any | None = None,
         core_api: Any | None = None,
         apps_api: Any | None = None,
-        store: BlobStore | None = None,
+        store: BlobStore | str | None = None,
         watcher_events: Callable[[], Iterator[JobEvent]] | None = None,
         detached: bool = False,
         workflow_id: str | None = None,
         watch: bool = True,
         **overrides: Any,
     ) -> None:
+        # ``store`` is two things: a BlobStore object is injected as-is; a URL string is the
+        # config field of the same name (``sk8s.configure(store="gs://...")`` lands here).
+        if isinstance(store, str):
+            overrides["store"] = store
+            store = None
         base = config if config is not None else load_config()
         self.config = dataclasses.replace(base, **overrides) if overrides else base
         if self.config.namespace is None:

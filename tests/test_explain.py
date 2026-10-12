@@ -595,6 +595,15 @@ def test_cluster_none_builds_read_only_handles_from_config(
     assert report["store"]["blob_count"] == 1  # opened from the anchor's recorded store ("k8s")
 
 
+def test_cluster_none_honors_configure_store_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    sk8s.configure(namespace=NS, store="gs://bkt/pfx")
+    try:
+        ctx = explaining._context(None)
+    finally:
+        sk8s.configure()
+    assert ctx.config.store == "gs://bkt/pfx"
+
+
 # --- human rendering ---------------------------------------------------------------------------------
 
 
