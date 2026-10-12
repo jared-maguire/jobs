@@ -288,22 +288,41 @@ def test_worker_startup_sweep_never_touches_the_cas(monkeypatch: pytest.MonkeyPa
     assert seen["artifacts"] is False
 
 
-def test_an_object_adopted_during_the_delete_loop_is_spared(env: dict[str, Any]) -> None:
-    """Between the scan and ITS delete, a later survivor is touched by a workflow."""
-    first, second = make(env, "a", b"first garbage"), make(env, "b", b"second garbage")
-    order = sorted([first, second], key=lambda a: cas_key(a.sha256 or ""))
-    victim = order[1]
+@pytest.mark.parametrize("listing", ["ascending", "descending"])
+def test_an_object_adopted_during_the_delete_loop_is_spared(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, listing: str
+) -> None:
+    """Whichever object the sweep deletes FIRST, a workflow adopts the OTHER one right after: the
+    per-delete index re-read (touch-before-record) must spare it.
+
+    (An earlier version hard-wired "the second in sorted key order is the victim" and so assumed
+    the store lists in that order; os.walk order is filesystem-defined, CI's differed, and the
+    victim was the one deleted first - a test bug, not a sweep bug. The listing order is now
+    forced both ways and the victim is picked at run time.)"""
+    a, b = make(env, "a", b"first garbage"), make(env, "b", b"second garbage")
+    shas = {a.sha256, b.sha256}
+    real = LocalStore.list_blobs
+
+    def ordered(self: LocalStore, prefix: str) -> Any:
+        return iter(sorted(real(self, prefix), key=lambda i: i.key, reverse=listing == "descending"))
+
+    monkeypatch.setattr(LocalStore, "list_blobs", ordered)
 
     class Racy(LocalStore):
-        fired = False
+        deleted_first: str | None = None
+        victim: str | None = None
 
         def delete(self, uri: str) -> None:
             super().delete(uri)
-            if not self.fired and uri.endswith(order[0].sha256 or "?"):
-                self.fired = True  # right after the first object goes, a workflow adopts the second
-                ArtifactStore(self, env["astore"].spec).update_index(victim.sha256 or "", touch=True)
+            gone = next((s for s in shas if s and uri.endswith(s)), None)
+            if gone and self.deleted_first is None:
+                self.deleted_first = gone
+                self.victim = next(s for s in shas if s != gone)  # adopted right after the first delete
+                ArtifactStore(self, env["astore"].spec).update_index(self.victim, touch=True)
 
     racy = Racy(env["root"])
     report = gc.sweep(racy)
-    assert racy.fired and order[0].sha256 in report.deleted and victim.sha256 not in report.deleted
-    assert alive(env, victim)
+    assert racy.deleted_first and racy.victim
+    assert report.deleted == [racy.deleted_first]  # the first went; the adopted one did not
+    assert racy.victim not in report.deleted and report.kept_young == 1
+    assert env["astore"].store.stat(env["astore"].store.uri_for(cas_key(racy.victim))) is not None

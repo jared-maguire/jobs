@@ -181,6 +181,7 @@ def sweep(
                 report.kept_published += 1
             else:
                 survivors.append((sha, key, size))
+        survivors.sort(key=lambda t: t[1])  # list order is store/filesystem-defined: be deterministic
         if not dry_run and survivors:
             # Re-mark immediately before deleting: a workflow that recorded one of these hashes
             # while we were scanning is a root now.

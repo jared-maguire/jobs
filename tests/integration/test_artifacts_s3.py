@@ -11,7 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
+import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -24,13 +27,76 @@ from sk8s.config import load_config
 from sk8s.store.retry import update_blob
 from sk8s.store.s3 import S3Store
 from tests.integration import minio
-from tests.integration.conftest import requires_cluster, suite_namespace, suite_pull_policy
-from tests.integration.test_store_s3_minio import s3_client  # noqa: F401  (session fixture)
+from tests.integration.artifacts_env import IMAGE, ensure_namespace
+from tests.integration.conftest import requires_cluster, suite_pull_policy
 
 pytestmark = [pytest.mark.integration, requires_cluster, pytest.mark.timeout(300)]
 
 BUCKET = "sk8s-art-it"
-IMAGE = os.environ.get("SK8S_ARTIFACTS_TEST_IMAGE", "sk8s-dev-artifacts:latest")
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.fixture(scope="module")
+def s3_client() -> Iterator[Any]:  # noqa: F811
+    """boto3 client against a MinIO deployed in the suite's namespace (port-forwarded).
+
+    SKIPS - never errors - when no MinIO can be deployed or reached (no registry access to its
+    image, no kubectl, a refused port-forward): the S3 half of the layer is then simply untested
+    in that environment."""
+    import boto3
+    from botocore.config import Config as BotoConfig
+
+    ns = ensure_namespace()
+    try:
+        minio.ensure_minio(ns, timeout=120)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"MinIO is not available in namespace {ns}: {exc}")
+    port = _free_port()
+    try:
+        pf = subprocess.Popen(
+            ["kubectl", "-n", ns, "port-forward", "svc/minio", f"{port}:{minio.PORT}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        pytest.skip(f"cannot port-forward to MinIO (kubectl missing?): {exc}")
+    keys = ("SK8S_S3_ENDPOINT", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+    saved = {k: os.environ.get(k) for k in keys}
+    endpoint = f"http://127.0.0.1:{port}"
+    os.environ.update({
+        "SK8S_S3_ENDPOINT": endpoint, "AWS_ACCESS_KEY_ID": minio.ACCESS_KEY,
+        "AWS_SECRET_ACCESS_KEY": minio.SECRET_KEY,
+    })
+    try:
+        s3 = boto3.client(
+            "s3", endpoint_url=endpoint, region_name="us-east-1",
+            config=BotoConfig(retries={"max_attempts": 1}, connect_timeout=3),
+        )
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                s3.list_buckets()
+                break
+            except Exception as exc:  # noqa: BLE001 — port-forward not accepting yet
+                if time.monotonic() > deadline or pf.poll() is not None:
+                    pytest.skip(f"MinIO endpoint {endpoint} is unreachable: {exc}")
+                time.sleep(0.5)
+        yield s3
+    finally:
+        pf.terminate()
+        try:
+            pf.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pf.kill()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 @pytest.fixture(scope="module")
@@ -181,7 +247,7 @@ def test_metadata_copy_stat_list_and_multipart(s3_client: Any, bucket: str, tmp_
 
 @pytest.fixture
 def s3_cluster(s3_client: Any, bucket: str) -> Iterator[Cluster]:  # noqa: F811
-    ns = suite_namespace()
+    ns = ensure_namespace()
     prefix = f"art-{os.urandom(3).hex()}/"
     c = Cluster(load_config(
         namespace=ns, image=IMAGE, pull_policy=suite_pull_policy(), ttl_seconds_after_finished=30,
