@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable
 import cloudpickle  # type: ignore[import-untyped]  # no py.typed marker upstream
 
 from sk8s import expect as expectations
-from sk8s.errors import MapFailed, RemoteException
+from sk8s.errors import MapFailed, PilotFailed, RemoteException
 from sk8s.future import JobFuture
 
 _lock = threading.Lock()
@@ -130,6 +130,8 @@ def _run_batch(
 
 
 def _positive(name: str, value: int | None) -> None:
+    if name == "pilot" and (not isinstance(value, int) or isinstance(value, bool)):
+        raise TypeError(f"pilot must be an integer item count, got {value!r}")
     if value is not None and value < 1:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")
 
@@ -173,6 +175,10 @@ def _submit_many(
     jobs are submitted and every remaining item gets an already-failed future
     carrying ``concurrent.futures.TimeoutError``.
     """
+    pilot = opts.pop("pilot", None)
+    if pilot is not None:
+        _positive("pilot", pilot)
+        return _submit_piloted(func, iterable, star, pilot, deadline, opts)
     batch_size: int = opts.pop("batch_size", 1)
     max_concurrent: int | None = opts.pop("max_concurrent", None)
     _positive("batch_size", batch_size)
@@ -236,6 +242,35 @@ def _submit_many(
         item_futures.extend(group)
         parent.add_done_callback(_make_unpack(group))
     return item_futures
+
+
+def _submit_piloted(
+    func: Callable[..., Any],
+    iterable: Iterable[Any],
+    star: bool,
+    pilot: int,
+    deadline: float | None,
+    opts: dict[str, Any],
+) -> list[JobFuture]:
+    """``pilot=n``: submit the first ``n`` items, wait for ALL of them (results and any
+    ``expect=`` checks), and submit the remainder only if every one is green.
+
+    The pilot is an ordinary fan-out (``batch_size``/``max_concurrent`` apply to it), so a
+    pilot failure leaves exactly the pilot's jobs behind and nothing else. The pilot wait
+    shares ``deadline`` with the rest of the call; ``submit_map`` has no deadline, so there
+    ``timeout=`` (otherwise discarded) bounds the pilot wait only.
+    """
+    items = list(iterable)
+    head, tail = items[:pilot], items[pilot:]
+    timeout = opts.get("timeout")
+    wait_deadline = deadline if deadline is not None else _deadline(timeout)
+    pilot_futures = _submit_many(func, head, star, deadline=deadline, **opts)
+    _, failures, _ = _collect(pilot_futures, timeout, wait_deadline)
+    if failures:
+        raise PilotFailed(failures, pilot=len(head), total=len(items))
+    if not tail:
+        return pilot_futures
+    return pilot_futures + _submit_many(func, tail, star, deadline=deadline, **opts)
 
 
 def _make_unpack(group: list[_ItemFuture]) -> Callable[[concurrent.futures.Future[Any]], None]:
@@ -308,6 +343,14 @@ def submit_map(
     - ``max_concurrent`` (default None): at most this many jobs may be unresolved
       at once. Submission blocks the caller until a slot frees up, with no
       time limit (``map``/``starmap`` bound this wait by their ``timeout``).
+    - ``pilot`` (default None): submit only the first N items and WAIT for all N
+      (results and any ``expect=`` checks). All green: the remainder is submitted and
+      the full list of futures returned. Any failure: raises ``PilotFailed`` and the
+      remainder is never submitted. Because of this, ``submit_map(pilot=...)`` BLOCKS
+      until the pilot finishes, and the futures for the non-pilot items exist only after
+      the pilot passes. ``timeout=`` (discarded without ``pilot``) bounds this wait.
+
+    ``expect=`` (a job option) is applied to every item's result.
     """
     return _submit_many(func, iterable, star=False, **opts)
 
@@ -317,8 +360,8 @@ def submit_starmap(
 ) -> list[JobFuture]:
     """Submit ``func(*item)`` for each item; return the futures in input order.
 
-    ``opts`` are split as in ``submit``; ``batch_size`` and ``max_concurrent``
-    behave as in ``submit_map``.
+    ``opts`` are split as in ``submit``; ``batch_size``, ``max_concurrent`` and
+    ``pilot`` behave as in ``submit_map``.
     """
     return _submit_many(func, iterable, star=True, **opts)
 
@@ -327,19 +370,21 @@ def _deadline(timeout: float | None) -> float | None:
     return None if timeout is None else time.monotonic() + timeout
 
 
-def _gather(
+def _collect(
     futures: list[JobFuture], timeout: float | None, deadline: float | None = None
-) -> list[Any]:
+) -> tuple[list[Any], list[tuple[int, BaseException]], dict[int, Any]]:
     """Collect results in input order, waiting at most ``timeout`` in total.
 
     ``deadline`` (a ``time.monotonic()`` value) is the overall cutoff; it
     defaults to ``timeout`` from now. ``map`` passes the one it started
     submission with, so submission and collection share a single budget.
 
-    Every future is visited even after a failure. Items still pending when the
-    deadline passes are recorded as ``concurrent.futures.TimeoutError``
-    failures; items already finished keep their results. ``KeyboardInterrupt``
-    and other non-``Exception`` signals propagate immediately.
+    Returns ``(results, failures, succeeded)`` (``succeeded`` maps index -> value for the
+    items that completed; ``results`` holds ``None`` for failed ones). Every future is visited even after a failure.
+    Items still pending when the deadline passes are recorded as
+    ``concurrent.futures.TimeoutError`` failures; items already finished keep
+    their results. ``KeyboardInterrupt`` and other non-``Exception`` signals
+    propagate immediately.
     """
     if deadline is None:
         deadline = _deadline(timeout)
@@ -361,6 +406,14 @@ def _gather(
                 exc = concurrent.futures.TimeoutError(f"not finished within map timeout of {timeout}s")
             results.append(None)
             failures.append((i, exc))
+    return results, failures, succeeded
+
+
+def _gather(
+    futures: list[JobFuture], timeout: float | None, deadline: float | None = None
+) -> list[Any]:
+    """``_collect`` that raises ``MapFailed`` if any item failed."""
+    results, failures, succeeded = _collect(futures, timeout, deadline)
     if failures:
         raise MapFailed(failures, total=len(futures), results=succeeded)
     return results
@@ -373,7 +426,11 @@ def map(func: Callable[..., Any], iterable: Iterable[Any], **opts: Any) -> list[
     submission (including waiting on ``max_concurrent``) and collection. Other
     ``opts`` are split as in ``submit``. Every future is collected before
     returning; if any failed, raises ``MapFailed`` with the failing indices in
-    ``.failures`` and every success in ``.results`` (``{index: value}``).
+    ``.failures`` and every success in ``.results`` (``{index: value}``); its message
+    counts expectation failures (from ``expect=``) separately from errors.
+
+    ``pilot=n`` runs the first n items first and submits the rest only if all n pass
+    (raising ``PilotFailed`` otherwise); the pilot shares the ``timeout`` budget.
     """
     timeout = opts.pop("timeout", None)
     deadline = _deadline(timeout)
