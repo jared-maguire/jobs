@@ -16,8 +16,11 @@ What it does (see examples/README.md for the one-page version):
       3. call_window   bcftools mpileup | call -mv over N windows (starmap, pilot=1)     [expect=]
       4. merge         concat, bcftools norm, lift slice coords -> chr13, bgzip+tabix,
                        stats.json                                                        [expect=]
-      5. publish       Artifact.publish() of VCF + index + stats to results/<run-id>/ with
-                       sk8s-artifact-sha256 / sk8s-produced-by metadata
+      5. concordance   our VCF vs the pinned GIAB HG001 v4.2.1 truth inside the confident BED:
+                       norm both, bcftools isec -> TP/FP/FN, GT match; site/GT matching, NOT
+                       hap.py. concordance.json + stats.json (concordance folded in)        [expect=]
+      6. publish       Artifact.publish() of VCF + index + stats + concordance.json to
+                       results/<run-id>/ with sk8s-artifact-sha256 / sk8s-produced-by metadata
     Every stage is memo=True: run it again and the whole chain is a memo hit - no stage pods.
 
 Inputs are PINNED (gs://.../demo-data/na12878-brca2/, provenance in its MANIFEST.json): 26,841
@@ -54,6 +57,7 @@ from typing import Any
 import sk8s
 
 DATA = "gs://jared-genome-analysis-sk8s/demo-data/na12878-brca2/"
+GIAB = DATA + "giab/"  # GIAB HG001 GRCh38 v4.2.1 truth sliced to the region; provenance in giab/MANIFEST.json
 RESULTS = "gs://jared-genome-analysis-sk8s/sk8s-demo/results/"
 
 CONTIG = "chr13_32305086_32410268"  # reference-slice contig name
@@ -70,12 +74,18 @@ SHA256 = {
     BAM: "e5fe6834224568732013d53d7ae0df7eb4009bd90fc08c4657d36d6a58904b60",
     REF: "b2a1f089a5470299a2d9f47b65162bba8d3044acc25982ceb308c550e411036b",
 }
+GIAB_SHA256 = {  # from giab/MANIFEST.json
+    "truth.vcf.gz": "6402bf61d60977529858c5702296647099d2ba603b5639900d1a6056951545b7",
+    "truth.vcf.gz.tbi": "f835c273f6ba7d6ad16f071963f3d76b6542875d093749398aa567e51a7d59ee",
+    "confident.bed": "0ae341e5ad3da3300fad432b507f45ca4a3daf1668e50a88877c50b4fc1d5b32",
+}
 
 # Per-stage resources. Autopilot rounds these up; nothing here asserts exact values.
 R_FETCH = {"cpu": "1", "memory": "2Gi"}
 R_ALIGN = {"cpu": "2", "memory": "4Gi"}
 R_CALL = {"cpu": "1", "memory": "2Gi"}
 R_MERGE = {"cpu": "1", "memory": "2Gi"}
+R_CONCORD = {"cpu": "1", "memory": "2Gi"}
 
 
 def inputs(data: str) -> tuple[Any, Any, Any]:
@@ -85,6 +95,11 @@ def inputs(data: str) -> tuple[Any, Any, Any]:
         sk8s.artifact(data + REF, sha256=SHA256[REF]),
         sk8s.artifact(data + "MANIFEST.json"),
     )
+
+
+def truth_inputs(giab: str) -> tuple[Any, Any, Any]:
+    """The pinned GIAB truth: high-confidence VCF, its index, and the confident-regions BED."""
+    return tuple(sk8s.artifact(giab + n, sha256=h) for n, h in GIAB_SHA256.items())  # type: ignore[return-value]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -302,6 +317,117 @@ def merge_calls(
     return {"stats": stats, "vcf": vcf, "tbi": out / "NA12878.BRCA2.vcf.gz.tbi", "stats_json": out / "stats.json"}
 
 
+def _padded_chr13(ref: Path, dest: str) -> None:
+    """chr13-coordinate FASTA for ``bcftools norm -f``: N x OFFSET then the slice, one contig named
+    chr13, 60-col lines. This lets BOTH sides be normalized and compared in chr13 space (the truth's
+    space) without reverse-lifting anything. Only positions inside the slice are ever looked up."""
+    seq = "".join(l.strip() for l in open(ref) if not l.startswith(">"))
+    with open(dest, "w") as f:
+        f.write(">chr13\n")
+        pad = "N" * OFFSET + seq
+        for i in range(0, len(pad), 60):
+            f.write(pad[i : i + 60] + "\n")
+
+
+def _ratio(num: int, den: int) -> float | None:
+    return round(num / den, 4) if den else None
+
+
+def concordance_check(
+    vcf: Path, stats_json: Path, ref: Path, truth: Path, truth_tbi: Path, bed: Path, out: sk8s.OutDir
+) -> dict[str, Any]:
+    """Our final VCF vs the GIAB HG001 v4.2.1 truth, inside the confident regions.
+
+    Both sides: ``bcftools norm -f <chr13 ref> -m -any``, then ``-R confident.bed``, then
+    ``bcftools isec`` (same POS+REF+ALT). private-to-truth = FN, private-to-calls = FP, shared = TP.
+    Genotype concordance is on the TP set: GT compared as an unordered allele pair, after normalization.
+    This is site/GT matching, NOT hap.py-style haplotype-aware comparison."""
+    import shutil
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    shutil.copy(vcf, f"{d}/calls_in.vcf.gz")
+    shutil.copy(truth, f"{d}/truth_in.vcf.gz")
+    shutil.copy(truth_tbi, f"{d}/truth_in.vcf.gz.tbi")
+    shutil.copy(bed, f"{d}/confident.bed")  # keep the .bed suffix: bcftools reads it as 0-based
+    _padded_chr13(ref, f"{d}/chr13.fa")
+    _sh("samtools faidx chr13.fa", d)
+    for name in ("calls", "truth"):
+        _sh(
+            f"bcftools norm -f chr13.fa -m -any -Oz -o {name}_norm.vcf.gz {name}_in.vcf.gz"
+            f" && bcftools index -t {name}_norm.vcf.gz"  # -R needs an index (no streaming)
+            f" && bcftools view -R confident.bed -Oz -o {name}.vcf.gz {name}_norm.vcf.gz"
+            f" && bcftools index -t {name}.vcf.gz",
+            d,
+        )
+    _sh("bcftools isec -p isec truth.vcf.gz calls.vcf.gz", d)  # 0000 FN, 0001 FP, 0002/0003 shared
+
+    fmt = "%CHROM:%POS:%REF:%ALT\\t%TYPE\\t[%GT]\\n"
+
+    def rows(path: str) -> list[list[str]]:
+        return [r.split("\t") for r in _sh(f"bcftools query -f '{fmt}' {path}", d).splitlines()]
+
+    def kind(t: str) -> str:
+        return {"SNP": "snv", "INDEL": "indel"}.get(t, "other")  # MNP/other: counted in 'all' only
+
+    def gt(g: str) -> tuple[str, ...]:
+        return tuple(sorted(g.replace("|", "/").split("/")))
+
+    fn, fp = rows("isec/0000.vcf"), rows("isec/0001.vcf")
+    tp_t = {r[0]: r for r in rows("isec/0002.vcf")}
+    tp_c = {r[0]: r for r in rows("isec/0003.vcf")}
+    classes: dict[str, dict[str, int]] = {
+        k: {"tp": 0, "fp": 0, "fn": 0, "gt_match": 0} for k in ("snv", "indel", "other", "all")
+    }
+    mismatches = []
+    for key, r in tp_t.items():
+        ok = gt(r[2]) == gt(tp_c[key][2])
+        for k in (kind(r[1]), "all"):
+            classes[k]["tp"] += 1
+            classes[k]["gt_match"] += ok
+        if not ok:
+            mismatches.append(f"{key} truth={r[2]} calls={tp_c[key][2]}")
+    for k_, rs in (("fn", fn), ("fp", fp)):
+        for r in rs:
+            for k in (kind(r[1]), "all"):
+                classes[k][k_] += 1
+    metrics: dict[str, Any] = {}
+    for k, c in classes.items():
+        rec, prec = _ratio(c["tp"], c["tp"] + c["fn"]), _ratio(c["tp"], c["tp"] + c["fp"])
+        f1 = round(2 * rec * prec / (rec + prec), 4) if rec and prec else None
+        metrics[k] = {
+            **c, "recall": rec, "precision": prec, "f1": f1,
+            "gt_match_rate": _ratio(c["gt_match"], c["tp"]),
+        }
+    bed_bp = sum(int(a[2]) - int(a[1]) for a in (l.split() for l in open(f"{d}/confident.bed")))
+    result = {
+        "method": (
+            "site+genotype matching, NOT haplotype-aware (not hap.py/vcfeval): both VCFs normalized "
+            "(bcftools norm -f ref -m -any), restricted to the GIAB confident BED, bcftools isec on exact "
+            "POS+REF+ALT = TP/FP/FN; GT compared as an unordered allele pair on TPs. Raw unfiltered "
+            "bcftools call -mv. Equivalent variants represented differently count as FP+FN."
+        ),
+        "truth": "GIAB HG001 (NA12878) GRCh38 v4.2.1 high-confidence small variants",
+        "region": "chr13:32305086-32410268",
+        "confident_bp": bed_bp,
+        "confident_fraction_of_region": round(bed_bp / SLICE_LEN, 4),
+        # not scorable: outside the confident regions the truth makes no claim (these are NOT errors)
+        "calls_outside_bed": int(_sh("bcftools view -H calls_norm.vcf.gz | wc -l", d)) - classes["all"]["tp"] - classes["all"]["fp"],
+        "truth_outside_bed": int(_sh("bcftools view -H truth_norm.vcf.gz | wc -l", d)) - classes["all"]["tp"] - classes["all"]["fn"],
+        "truth_records_in_bed": classes["all"]["tp"] + classes["all"]["fn"],
+        "calls_records_in_bed": classes["all"]["tp"] + classes["all"]["fp"],
+        "metrics": metrics,
+        "gt_mismatches": mismatches,
+        "fp_sites": [r[0] + " " + r[1] for r in fp],
+        "fn_sites": [r[0] + " " + r[1] for r in fn],
+    }
+    json.dump(result, open(out / "concordance.json", "w"), indent=2, sort_keys=True)
+    stats = json.load(open(stats_json))  # the merge stage's stats, with concordance folded in
+    stats["concordance"] = result
+    json.dump(stats, open(out / "stats.json", "w"), indent=2, sort_keys=True)
+    return {"concordance": result, "concordance_json": out / "concordance.json", "stats_json": out / "stats.json"}
+
+
 # ---- QC gates (expect=): run in the worker on each stage's return value, BEFORE upload ------------
 
 
@@ -339,10 +465,33 @@ def gate_calls(r: dict[str, Any]) -> str | None:
     return None
 
 
+# Regression floors, NOT aspirations. First live run (see examples/README.md): inside the GIAB confident
+# regions recall = precision = GT match = 1.0 (166 TP, 0 FP, 0 FN; 139 SNV, 27 indel). Floors sit just
+# below that: one lost SNV out of 139 (0.9928) still passes, a real regression does not. The indel floor
+# is looser because one miss in 27 is already 0.963.
+FLOOR_ALL = 0.97
+FLOOR_SNV = 0.97
+FLOOR_INDEL = 0.93
+MIN_TRUTH = 150  # the truth actually loaded and the BED actually applied (observed 166)
+
+
+def gate_concordance(r: dict[str, Any]) -> str | None:
+    c = r["concordance"]
+    m = c["metrics"]
+    if c["truth_records_in_bed"] < MIN_TRUTH:
+        return f"only {c['truth_records_in_bed']} truth records inside the confident BED (need >= {MIN_TRUTH}); truth/BED not applied?"
+    for cls, floor in (("all", FLOOR_ALL), ("snv", FLOOR_SNV), ("indel", FLOOR_INDEL)):
+        for metric in ("recall", "precision", "gt_match_rate"):
+            v = m[cls][metric]
+            if v is None or v < floor:
+                return f"concordance {cls} {metric} = {v} below regression floor {floor} ({m[cls]})"
+    return None
+
+
 # ---- the pipeline (runs as the detached driver, or in this process with --tethered) -------------
 
 
-def pipeline(run_id: str, data: str, results: str, salt: str) -> dict[str, Any]:
+def pipeline(run_id: str, data: str, results: str, salt: str, giab: str = GIAB) -> dict[str, Any]:
     """Chain the per-stage jobs. Every stage is memo=True; ``memo`` below records hit/computed."""
     out = f"{results}{run_id}/"
     t0 = time.time()
@@ -384,20 +533,26 @@ def pipeline(run_id: str, data: str, results: str, salt: str) -> dict[str, Any]:
         "merge", merge_calls, [c["vcf"] for c in calls], ref, upstream,
         requests=R_MERGE, expect=gate_calls,
     )
+    tvcf, ttbi, tbed = truth_inputs(giab)
+    conc = stage(
+        "concordance", concordance_check, final["vcf"], final["stats_json"], ref, tvcf, ttbi, tbed,
+        requests=R_CONCORD, expect=gate_concordance,
+    )
     # Publish: a permanent, legible home. copy=True keeps the CAS copy as well, so a later memo
     # hit can still find the bytes even if this results prefix is cleaned up.
     published = {
-        k: final[k].publish(out + name, copy=True).uri
-        for k, name in (
-            ("vcf", "NA12878.BRCA2.vcf.gz"),
-            ("tbi", "NA12878.BRCA2.vcf.gz.tbi"),
-            ("stats_json", "stats.json"),
+        k: src[k].publish(out + name, copy=True).uri
+        for src, k, name in (
+            (final, "vcf", "NA12878.BRCA2.vcf.gz"),
+            (final, "tbi", "NA12878.BRCA2.vcf.gz.tbi"),
+            (conc, "stats_json", "stats.json"),  # merge's stats + the concordance block
+            (conc, "concordance_json", "concordance.json"),
         )
     }
     print(f"[{run_id}] published {len(published)} objects under {out}", flush=True)
     return {
         "run_id": run_id,
-        "stats": final["stats"],
+        "stats": {**final["stats"], "concordance": conc["concordance"]},
         "memo": memo,
         "published": published,
         "produced_by": final["vcf"].produced_by,
@@ -434,6 +589,13 @@ def preview(run_id: str, salt: str) -> None:
             ),
         ),
         ("4 merge", sk8s.submit(merge_calls, [fake("win00.vcf.gz")], ref, {}, requests=R_MERGE, expect=gate_calls, **o)),
+        (
+            "5 concordance",
+            sk8s.submit(
+                concordance_check, fake("NA12878.BRCA2.vcf.gz"), fake("stats.json"), ref, *truth_inputs(GIAB),
+                requests=R_CONCORD, expect=gate_concordance, **o,
+            ),
+        ),
     ]
     print(f"PLAN for run {run_id}  (dry_run: nothing created; memo salt {salt!r})")
     for label, dr in plan:
@@ -510,6 +672,13 @@ def main() -> int:
             f"wall={s['wall_seconds']}s",
             flush=True,
         )
+        a = s["stats"]["concordance"]["metrics"]["all"]
+        print(
+            f"  concordance vs GIAB v4.2.1 (site+GT, confident BED): recall={a['recall']} precision={a['precision']} "
+            f"f1={a['f1']} gt_match={a['gt_match_rate']}  (tp={a['tp']} fp={a['fp']} fn={a['fn']}; "
+            f"snv f1={s['stats']['concordance']['metrics']['snv']['f1']} indel f1={s['stats']['concordance']['metrics']['indel']['f1']})",
+            flush=True,
+        )
         print(f"  memo: {s['memo']}")
         print("  published:", *s["published"].values(), sep="\n    ")
         runs.append(s)
@@ -518,6 +687,9 @@ def main() -> int:
         md5s = [r["stats"]["records_md5"] for r in runs]
         assert len(set(counts)) == 1, f"variant counts differ between runs: {counts}"
         print(f"REPRODUCIBLE: {len(runs)} runs, identical variant count {counts[0]}; record md5 identical: {len(set(md5s)) == 1}")
+        cj = {json.dumps(r["stats"]["concordance"], sort_keys=True) for r in runs}
+        assert len(cj) == 1, "concordance differs between runs"
+        print("  concordance identical across runs: True")
     return 0
 
 

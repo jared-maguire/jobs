@@ -54,12 +54,60 @@ the function writes under its `OutDir` and returns becomes an artifact):
 | `align` | `bwa index` + `mem` (read group, `-K` fixed), `fixmate`, `sort`, `markdup`; the BAM is an output artifact | >= 20,000 reads aligned and > 90% mapped |
 | `call_window` x4 | `bcftools mpileup` then `call -mv` over four disjoint windows via `submit_starmap(pilot=1)`; takes the BAM artifact by hash | >= 10 calls per window |
 | `merge` | `concat`, `bcftools norm -m -any`, lift to chr13, bgzip + tabix, `stats.json` | >= 50 records, non-empty, ts/tv in [1.0, 4.0] |
-| publish (driver) | `Artifact.publish(copy=True)` of VCF, index and stats to `results/<run-id>/` | n/a |
+| `concordance` | our VCF vs the pinned GIAB HG001 v4.2.1 truth inside the confident BED (see below); `concordance.json` + `stats.json` with the concordance folded in | regression floors (recall/precision/GT match per class; see below) |
+| publish (driver) | `Artifact.publish(copy=True)` of VCF, index, `stats.json` and `concordance.json` to `results/<run-id>/` | n/a |
 
-Output: `gs://.../sk8s-demo/results/<run-id>/NA12878.BRCA2.vcf.gz` (+ `.tbi`, `stats.json`). Each published
+Output: `gs://.../sk8s-demo/results/<run-id>/NA12878.BRCA2.vcf.gz` (+ `.tbi`, `stats.json` with a `concordance` block, `concordance.json`). Each published
 object carries `sk8s-artifact-sha256` and `sk8s-produced-by` (the workflow/job that actually computed it,
 which on a memo hit is the original run). Watch a run with `sk8s explain <wf-id>` (add `--json`); the
 driver prints one line per stage saying `computed` or `HIT`, visible in `sk8s logs`.
+
+### Concordance vs GIAB
+
+Does the demo's VCF agree with published truth? The `concordance` stage compares it to the NIST/GIAB
+HG001 (= NA12878) **GRCh38 v4.2.1** high-confidence small-variant benchmark. The truth is mirrored, sliced to
+our region, at `gs://jared-genome-analysis-sk8s/demo-data/na12878-brca2/giab/` (`truth.vcf.gz` + `.tbi`,
+`confident.bed`, and its own `MANIFEST.json` with URLs, md5s and the triple-fetch identity check; the original
+`MANIFEST.json` is untouched). The three files are `sk8s.artifact()` inputs pinned by generation and sha256,
+so the stage is memoizable and the truth cannot change unnoticed. The slice holds 171 truth variants
+(146 SNV, 25 indel, all PASS); the BED covers 102,901 of 105,183 bp (97.8%).
+
+**Method.** Both VCFs are normalized (`bcftools norm -f <chr13 ref> -m -any`; the pod builds a chr13-coordinate
+FASTA by N-padding the slice, so everything is compared in the truth's chr13 space), restricted to the confident
+BED (`-R`), then `bcftools isec` on exact POS+REF+ALT: private to truth = FN, private to calls = FP, shared =
+TP. Genotype match is on the TPs, GT compared as an unordered allele pair. Recall, precision, F1 are reported
+for SNVs, indels and combined, plus the GT match rate. Records outside the BED are counted
+(`calls_outside_bed`) but not scored: the truth makes no claim there.
+
+**Numbers (live GKE runs, memo salt `conc1`; both runs byte-identical `concordance.json`):**
+
+| class | TP | FP | FN | recall | precision | F1 | GT match |
+|---|---|---|---|---|---|---|---|
+| SNV | 139 | 0 | 0 | 1.000 | 1.000 | 1.000 | 139/139 |
+| indel | 27 | 0 | 0 | 1.000 | 1.000 | 1.000 | 27/27 |
+| all | 166 | 0 | 0 | 1.000 | 1.000 | 1.000 | 166/166 |
+
+The pipeline emitted 187 raw calls; 166 fall inside the confident regions, 21 fall outside (the gaps between BED
+intervals, which GIAB excludes as hard to call; not individually inspected) and cannot be scored. Calling those 21 "false positives" would
+give a naive precision of 0.888, but that is a statement about *unscorable* sites, not a measured error rate.
+Truth records inside the BED after `-m -any` splitting: 166 (the four 2/1 sites split in two).
+
+**Gate.** `expect=gate_concordance` asserts recall, precision and GT match >= 0.97 (all, SNV) and >= 0.93 (indel),
+and that >= 150 truth records fell inside the BED. These are a **regression floor, not an aspiration**: set just
+below the first observed run (all 1.0), so one lost SNV in 139 still passes and a broken caller/aligner does not.
+
+**Caveats.**
+- Site-level matching, **not** hap.py / vcfeval haplotype-aware comparison: an equivalent variant represented
+  differently after `norm` (e.g. a complex indel vs two simple ones) would count as one FP plus one FN.
+  `concordance.json` carries this in its `method` field.
+- Calls are raw `bcftools call -mv`, no filtering or recalibration. A perfect score here reflects that the
+  confident regions are the easy ones at 33x depth; it says nothing about performance in difficult regions.
+- Truth is v4.2.1 (2021). The same underlying sample (NA12878) was sequenced by many technologies; our reads are
+  the 1000G NYGC 30x data, which is not among the datasets listed in the truth records' INFO fields.
+- 166 variants is a small sample; do not read "1.000" as a rate to three decimals.
+
+One command: `python examples/na12878_brca2.py` (run it twice, or `--repeat 2`: the second run's concordance
+stage is a memo hit).
 
 **Choices to know about.**
 
