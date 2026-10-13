@@ -68,8 +68,8 @@ Does the demo's VCF agree with published truth? The `concordance` stage compares
 HG001 (= NA12878) **GRCh38 v4.2.1** high-confidence small-variant benchmark. The truth is mirrored, sliced to
 our region, at `gs://jared-genome-analysis-sk8s/demo-data/na12878-brca2/giab/` (`truth.vcf.gz` + `.tbi`,
 `confident.bed`, and its own `MANIFEST.json` with URLs, md5s and the triple-fetch identity check; the original
-`MANIFEST.json` is untouched). The three files are `sk8s.artifact()` inputs pinned by generation and sha256,
-so the stage is memoizable and the truth cannot change unnoticed. The slice holds 171 truth variants
+`MANIFEST.json` is untouched). The three files are `sk8s.artifact()` inputs pinned by sha256 (`sha256=`),
+so the stage is memoizable and a changed truth is a memo miss, not a stale answer. The slice holds 171 truth variants
 (146 SNV, 25 indel, all PASS); the BED covers 102,901 of 105,183 bp (97.8%).
 
 **Method.** Both VCFs are normalized (`bcftools norm -f <chr13 ref> -m -any`; the pod builds a chr13-coordinate
@@ -77,7 +77,8 @@ FASTA by N-padding the slice, so everything is compared in the truth's chr13 spa
 BED (`-R`), then `bcftools isec` on exact POS+REF+ALT: private to truth = FN, private to calls = FP, shared =
 TP. Genotype match is on the TPs, GT compared as an unordered allele pair. Recall, precision, F1 are reported
 for SNVs, indels and combined, plus the GT match rate. Records outside the BED are counted
-(`calls_outside_bed`) but not scored: the truth makes no claim there.
+(`calls_outside_bed`) but not scored: the truth makes no claim there. This note, and the informational
+`precision_if_outside_bed_counted_as_fp` (0.888), travel inside `concordance.json` / `stats.json` too.
 
 **Numbers (live GKE runs, memo salt `conc1`; both runs byte-identical `concordance.json`):**
 
@@ -91,6 +92,16 @@ The pipeline emitted 187 raw calls; 166 fall inside the confident regions, 21 fa
 intervals, which GIAB excludes as hard to call; not individually inspected) and cannot be scored. Calling those 21 "false positives" would
 give a naive precision of 0.888, but that is a statement about *unscorable* sites, not a measured error rate.
 Truth records inside the BED after `-m -any` splitting: 166 (the four 2/1 sites split in two).
+
+**Negative controls (live).** A clean 1.000 is only meaningful if the check can fail, so every failure path was
+exercised on GKE (`.superpowers/sdd/`, not part of the example; the classifier itself is unit-tested in
+`tests/test_concordance_classify.py`). One surgically damaged VCF (a dropped truth call, an injected SNV and
+insertion, one GT flipped 0/1 -> 1/1) gave exactly **FN 1, FP 2, gt_mismatch 1** with the right sites named
+(recall 0.994, precision 0.988, GT match 0.994). That damage is *within* the gate's floors by design (floors
+tolerate single errors); a heavier one (20 calls dropped, 5 GTs flipped) was rejected live with
+`ExpectationFailed` (recall 0.8795). Dropping one truth record inside the BED re-pinned the truth: memo
+miss, and the result showed the expected FP. An independent shell cross-check (no `isec`, no `norm -f`)
+reproduces 166/166 in both directions, and the damaged VCF's FN/FP exactly.
 
 **Gate.** `expect=gate_concordance` asserts recall, precision and GT match >= 0.97 (all, SNV) and >= 0.93 (indel),
 and that >= 150 truth records fell inside the BED. These are a **regression floor, not an aspiration**: set just
