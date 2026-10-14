@@ -242,6 +242,10 @@ def main(run_id: str, limit: int | None = None, chunk_size: int = 28) -> dict:
             eval_chunk, [(c, run_id) for c in chunks],
             batch_size=1, max_concurrent=90,
             requests={"cpu": "2", "memory": "3Gi", "ephemeral-storage": "4Gi"}, memo=True,
+            # Autopilot ScaleDown evicts multi-minute chunk pods (fleet-4/-6 both lost
+            # chunks, including the retry wave); with retries the eviction just moves
+            # the pod to another node. Chunks are idempotent + memoized, so this is safe.
+            backoff_limit=2,
         )
         lost: list[tuple[str, str]] = []
         for c, fut in zip(chunks, futs):
