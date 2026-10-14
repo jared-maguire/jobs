@@ -1,4 +1,6 @@
-"""Concordance primitives shared by examples/na12878_brca2.py and examples/cohort_eval.py.
+"""Concordance primitives for the BRCA2 examples (consumer: examples/na12878_brca2.py;
+examples/cohort_brca2.py keeps its own single-line GT normalization to stay self-contained
+for worker pickling — if that grows, move it here and ship this module by value too).
 
 PURE (no cluster, no tools). Scripts that run these in a worker must ship this module BY VALUE
 (``cloudpickle.register_pickle_by_value``) because the worker image does not contain examples/.

@@ -44,11 +44,6 @@ SLICE_CONTIG = "chr13_32305086_32410268"
 CACHE = Path("/tmp/cohort-cache")            # shared inside a pod; batch_size>1 reuses it
 
 
-def _run(cmd: str) -> None:
-    subprocess.run(cmd, shell=False if isinstance(cmd, list) else True, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-
 def _sh(cmd: str) -> str:
     p = subprocess.run(["bash", "-ceo", "pipefail", cmd], check=True,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -115,14 +110,20 @@ def eval_sample(sample: str, cram_url: str, run_id: str) -> dict:
     ebi_run = cram_url.rstrip("/").rsplit("/", 2)[-2]          # e.g. ERR3241719
     ebi_crai = (f"https://ftp.sra.ebi.ac.uk/vol1/run/{ebi_run[:6]}/{ebi_run}/"
                 f"{sample}.final.cram.crai")
+    def _crai_ok(p: Path) -> bool:
+        # a real .crai is gzip; a 403/404 XML error body is not, and must not pass
+        return p.exists() and p.stat().st_size > 0 and p.read_bytes()[:2] == b"\x1f\x8b"
+
     for url in (f"{cram_url}.crai", ebi_crai):
         try:
             urllib.request.urlretrieve(url, crai)
-            if crai.stat().st_size > 0:
+            if _crai_ok(crai):
+                if url == ebi_crai:
+                    env_note = "crai: EBI fallback (S3 copy empty/invalid)"
                 break
         except Exception:
             continue
-    if not crai.exists() or crai.stat().st_size == 0:
+    if not _crai_ok(crai):
         raise RuntimeError(f"no usable .crai for {sample} (tried S3 + EBI)")
     _sh(f"cd {wd} && samtools view -b -T {refs['chr13']} "
         f"-X '{cram_url}' aln.crai {REGION} -o region.bam && samtools index region.bam")
@@ -150,9 +151,11 @@ def eval_sample(sample: str, cram_url: str, run_id: str) -> dict:
     # 5. concordance vs the published panel (this sample's alt sites; MAC>=2 panel)
     # NB: -s and -i must be separate stages — in one `bcftools view`, -i evaluates
     # BEFORE the -s subset, so GT[0] would be the panel's first sample, not ours.
+    # norm the panel WITH the reference (-f), as our calls are: without it,
+    # differently-represented indels key differently and double-count as FN + extra
     pub = _sh(f"bcftools view -s {sample} {refs['panel']} 2>/dev/null | "
               f"bcftools view -i 'GT[0]=\"alt\"' 2>/dev/null | "
-              f"bcftools norm -m -any -Ov 2>/dev/null")
+              f"bcftools norm -f {refs['chr13']} -m -any -Ov 2>/dev/null")
     published = _read_sites(pub)
     ours = _read_sites((wd / "calls.chr13.vcf").read_text())
     tp = {k for k in published if k in ours}
@@ -257,10 +260,16 @@ def main(run_id: str, limit: int | None = None, chunk_size: int = 28) -> dict:
     # Autopilot's scale-down taint-evicts multi-minute chunk pods (fleet-4 lost 2 chunks
     # that way), so retry infra-lost samples once; memo makes the retry touch only them.
     lost = run_wave(samples, "wave1")
-    if lost:
-        for s, _ in lost:
+    # Per-sample transient errors (network blips) are baked into the memoized chunk
+    # result, so a plain rerun would replay them forever. Retry them here in freshly
+    # shaped chunks (different args -> memo miss). Gate rejections are final.
+    url_of = dict(samples)
+    retryable = lost + [(s, url_of[s]) for s, msg in list(failures.items())
+                        if not msg.startswith(("ExpectationFailed", "chunk["))]
+    if retryable:
+        for s, _ in retryable:
             failures.pop(s, None)
-        lost = run_wave(lost, "retry")
+        run_wave(retryable, "retry")
 
     recalls = [r["recall"] for r in results if r["recall"] is not None]
     gtr = [r["gt_match_rate"] for r in results if r["gt_match_rate"] is not None]
@@ -306,17 +315,30 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if a.check:
         import unittest.mock as _m
+        from types import SimpleNamespace
         stub = lambda s, u, r: {"sample": s, "run_id": r, "n_reads": 9999,
                                 "published_alt_sites": 100, "tp": 99, "fn": 1, "recall": 0.99,
                                 "gt_match": 99, "gt_match_rate": 1.0, "extra_calls": 2,
                                 "fn_sites": [], "timings": {}, "note": ""}
+        fake_store: dict[str, bytes] = {}
+        from sk8s import store as _store_mod
         sk8s.configure(cluster=sk8s.LocalCluster())
+        # main()'s own sk8s.configure(...) call would DISCARD the LocalCluster and build
+        # a real one from kubeconfig (sk8s.api configure semantics) — found the hard way:
+        # earlier --check runs submitted real GKE jobs and wrote cohort/check/ to the
+        # real store. Patch configure/load_config/get_store so check is genuinely local.
         with _m.patch(f"{__name__}.eval_sample", stub), \
-             _m.patch(f"{__name__}.load_samples", lambda limit: [(f"S{i}", "u") for i in range(limit or 4)]):
+             _m.patch(f"{__name__}.load_samples", lambda limit: [(f"S{i}", "u") for i in range(limit or 4)]), \
+             _m.patch.object(sk8s, "configure", lambda *args, **kw: None), \
+             _m.patch.object(sk8s, "load_config",
+                             lambda: SimpleNamespace(store="check", namespace="check", store_endpoint=None)), \
+             _m.patch.object(_store_mod, "get_store",
+                             lambda *args, **kw: SimpleNamespace(put=fake_store.__setitem__)):
             out = main("check", limit=4)
         sk8s.configure()
         assert out["samples_ok"] == 4 and out["samples_failed"] == 0, out
-        print("driver path OK: fan-out options, gates, harvest, aggregation all exercised locally")
+        assert "cohort/check/summary.json" in fake_store, fake_store.keys()
+        print("driver path OK: fan-out, gates, harvest, retry wave, aggregation, store — all local")
         sys.exit(0)
     if not a.fleet and a.limit is None:
         a.limit = 8
