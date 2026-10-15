@@ -55,8 +55,12 @@ def windows() -> list[tuple[int, int]]:
 
 
 def _sh(cmd: str) -> str:
-    p = subprocess.run(["bash", "-ceo", "pipefail", cmd], check=True,
+    p = subprocess.run(["bash", "-ceo", "pipefail", cmd],
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0:
+        # surface the tool's own stderr: a bare CalledProcessError str() loses it,
+        # and on a detached driver the pod (and its logs) are long gone by harvest time
+        raise RuntimeError(f"exit {p.returncode}: {cmd[:120]} :: {p.stderr[-300:]}")
     return p.stdout
 
 
@@ -85,12 +89,18 @@ def _norm_gt(g: str) -> tuple[str, ...]:
     return tuple(sorted(g.replace("|", "/").split("/")))
 
 
-def _read_sites(vcf_text: str) -> dict[str, tuple[str, ...]]:
+def _read_sites(vcf_text: str, pos_min: int = 0, pos_max: int = 1 << 60) -> dict[str, tuple[str, ...]]:
+    """Keyed by CHROM:POS:REF:ALT. pos_min/pos_max enforce the window PARTITION:
+    `bcftools view -r` is overlap-based, so a boundary-spanning indel appears in two
+    windows' panel subsets — keeping only POS within [pos_min, pos_max] assigns every
+    record to exactly one window, matching the POS-keyed calls."""
     sites: dict[str, tuple[str, ...]] = {}
     for line in vcf_text.splitlines():
         if not line or line.startswith("#"):
             continue
         f = line.split("\t")
+        if not (pos_min <= int(f[1]) <= pos_max):
+            continue
         gt = f[9].split(":", 1)[0] if len(f) > 9 else "."
         sites[f"{f[0]}:{f[1]}:{f[3]}:{f[4]}"] = _norm_gt(gt)
     return sites
@@ -110,7 +120,9 @@ def eval_window(sample: str, cram_url: str, ws: int, we: int, run_id: str) -> di
     # ranged CRAM fetch; the S3 mirror serves zero-byte .crai for a few samples, so fetch
     # the index ourselves (gzip-validated) with an EBI fallback
     import urllib.request
-    crai = wd / "aln.crai"
+    # cache the crai per SAMPLE (not per task): a sample-major chunk reuses it across
+    # its windows instead of re-downloading it 33x per sample fleet-wide
+    crai = CACHE / f"{sample}.crai"
     ebi_run = cram_url.rstrip("/").rsplit("/", 2)[-2]
     ebi_crai = (f"https://ftp.sra.ebi.ac.uk/vol1/run/{ebi_run[:6]}/{ebi_run}/"
                 f"{sample}.final.cram.crai")
@@ -118,20 +130,21 @@ def eval_window(sample: str, cram_url: str, ws: int, we: int, run_id: str) -> di
     def _crai_ok(p: Path) -> bool:
         return p.exists() and p.stat().st_size > 0 and p.read_bytes()[:2] == b"\x1f\x8b"
 
-    for url in (f"{cram_url}.crai", ebi_crai):
-        try:
-            urllib.request.urlretrieve(url, crai)
-            if _crai_ok(crai):
-                if url == ebi_crai:
-                    note = "crai: EBI fallback"
-                break
-        except Exception:
-            continue
+    if not _crai_ok(crai):
+        for url in (f"{cram_url}.crai", ebi_crai):
+            try:
+                urllib.request.urlretrieve(url, crai)
+                if _crai_ok(crai):
+                    if url == ebi_crai:
+                        note = "crai: EBI fallback"
+                    break
+            except Exception:
+                continue
     if not _crai_ok(crai):
         raise RuntimeError(f"no usable .crai for {sample} (tried S3 + EBI)")
 
     _sh(f"cd {wd} && samtools view -b -T {refs['ref']} "
-        f"-X '{cram_url}' aln.crai {fetch_region} -o region.bam && samtools index region.bam")
+        f"-X '{cram_url}' {crai} {fetch_region} -o region.bam && samtools index region.bam")
     n_reads = int(_sh(f"samtools view -c {wd}/region.bam").strip())
     t["fetch_s"] = round(time.time() - t0, 1)
 
@@ -158,8 +171,8 @@ def eval_window(sample: str, cram_url: str, ws: int, we: int, run_id: str) -> di
     pub = _sh(f"bcftools view -r {win} -s {sample} {refs['panel']} 2>/dev/null | "
               f"bcftools view -i 'GT[0]=\"alt\"' 2>/dev/null | "
               f"bcftools norm -f {refs['ref']} -m -any -Ov 2>/dev/null")
-    published = _read_sites(pub)
-    ours = _read_sites((wd / "calls.vcf").read_text())
+    published = _read_sites(pub, pos_min=ws, pos_max=we)
+    ours = _read_sites((wd / "calls.vcf").read_text(), pos_min=ws, pos_max=we)
     tp = {k for k in published if k in ours}
     fn = {k for k in published if k not in ours}
     gt_match = sum(1 for k in tp if published[k] == ours[k])
@@ -179,8 +192,9 @@ def eval_window(sample: str, cram_url: str, ws: int, we: int, run_id: str) -> di
 
 def gate(result: dict) -> str | None:
     """Per-task QC. A desert window (assembly gap: no reads AND no panel sites) is valid;
-    plenty of panel sites with almost no reads means the fetch broke."""
-    if result["n_reads"] < 1000 and result["published_alt_sites"] >= 50:
+    panel sites with almost no reads means the fetch broke — 30x data always has reads
+    where the panel has variants."""
+    if result["n_reads"] < 1000 and result["published_alt_sites"] >= 10:
         return (f"{result['sample']} {result['window']}: only {result['n_reads']} reads "
                 f"against {result['published_alt_sites']} published sites")
     return None
@@ -199,8 +213,10 @@ def load_samples(limit: int | None) -> list[tuple[str, str]]:
     return [(r["sample"].strip(), r["s3_cram_uri"].replace(" ", "")) for r in rows]
 
 
-def eval_chunk(chunk: list[tuple[str, str, int, int]], run_id: str) -> list[dict]:
-    """Several (sample, window) tasks in one pod; per-task harvesting; workdir cleanup."""
+def eval_chunk(chunk: list[tuple[str, str, int, int]], run_id: str, tag: str = "wave1") -> list[dict]:
+    """Several (sample, window) tasks in one pod; per-task harvesting; workdir cleanup.
+    `tag` is a memo salt: a retry wave passes a different tag so an identically shaped
+    chunk cannot memo-hit a stored result that has transient errors baked in."""
     out: list[dict] = []
     for sample, cram_url, ws, we in chunk:
         try:
@@ -226,42 +242,44 @@ def main(run_id: str, limit: int | None = None, chunk_size: int = 8) -> dict:
     tasks = [(s, u, ws, we) for s, u in samples for ws, we in wins]
 
     results: list[dict] = []
-    failures: dict[str, str] = {}
+    # failed task -> (task tuple or None, message); the tuple keeps retry structural
+    # instead of re-parsing human-readable keys
+    failed: dict[tuple[str, int], tuple[tuple | None, str]] = {}
+    task_of = {(t[0], t[2]): t for t in tasks}
 
-    def run_wave(wave: list[tuple[str, str, int, int]], tag: str) -> list:
+    def run_wave(wave: list[tuple[str, str, int, int]], tag: str) -> None:
         chunks = [wave[i:i + chunk_size] for i in range(0, len(wave), chunk_size)]
         futs = sk8s.submit_starmap(
-            eval_chunk, [(c, run_id) for c in chunks],
+            eval_chunk, [(c, run_id, tag) for c in chunks],  # tag = memo salt per wave
             batch_size=1, max_concurrent=90,
             requests={"cpu": "2", "memory": "4Gi", "ephemeral-storage": "8Gi"},
             memo=True,
             backoff_limit=2,  # eviction tolerance: explicit opt-in, tasks are idempotent+memoized
         )
-        lost: list = []
         for c, fut in zip(chunks, futs):
             try:
                 for r in fut.result():
+                    ws = int(r["window"].split(":")[1].split("-")[0])
                     if "error" in r:
-                        failures[f"{r['sample']}@{r['window']}"] = r["error"]
+                        failed[(r["sample"], ws)] = (task_of[(r["sample"], ws)], r["error"])
                     else:
                         results.append(r)
-            except Exception as e:
-                lost.extend(c)
-                for s, _, ws, we in c:
-                    failures[f"{s}@{CHR}:{ws}-{we}"] = f"chunk[{tag}]: {type(e).__name__}: {e}"[:300]
-        return lost
+            except Exception as e:  # whole-chunk infra failure
+                for t in c:
+                    failed[(t[0], t[2])] = (t, f"chunk[{tag}]: {type(e).__name__}: {e}"[:300])
 
-    lost = run_wave(tasks, "wave1")
-    # transient per-task errors are baked into memoized chunk results; retry them in
-    # freshly shaped chunks (memo miss). Gate rejections are final.
-    task_of = {(t[0], t[2]): t for t in tasks}
-    retryable = lost + [task_of[(k.split("@")[0], int(k.split(":")[1].split("-")[0]))]
-                        for k, msg in list(failures.items())
-                        if not msg.startswith(("ExpectationFailed", "chunk["))]
+    run_wave(tasks, "wave1")
+    # retry everything transient: whole-chunk losses AND per-task errors (which are baked
+    # into the memoized wave1 chunk results — the retry tag salts the memo so they re-run).
+    # Gate rejections are final.
+    retryable = [t for t, msg in failed.values()
+                 if t is not None and not msg.startswith("ExpectationFailed")]
     if retryable:
-        for s, _, ws, we in retryable:
-            failures.pop(f"{s}@{CHR}:{ws}-{we}", None)
+        for t in retryable:
+            failed.pop((t[0], t[2]), None)
         run_wave(retryable, "retry")
+    failures = {f"{s}@{CHR}:{ws}-{min(ws + WINDOW - 1, CHR_LEN)}": msg
+                for (s, ws), (_, msg) in failed.items()}
 
     # headline metrics aggregated over ALL calls in ALL samples (house convention)
     tp = sum(r["tp"] for r in results)
@@ -340,6 +358,8 @@ if __name__ == "__main__":
         assert "cohort/check/summary.json" in fake_store
         print(f"driver path OK: {n_tasks} window tasks fanned out, harvested, aggregated — all local")
         sys.exit(0)
+    if a.pilot and (a.fleet or a.limit is not None):
+        ap.error("--pilot conflicts with --fleet/--limit")
     if a.pilot:
         a.limit = 2
     if not a.fleet and a.limit is None:
