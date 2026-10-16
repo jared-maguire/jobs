@@ -97,7 +97,7 @@ def gate(x: int) -> str | None:
 
 # --- green pilot -------------------------------------------------------------
 
-def test_green_pilot_runs_the_rest_and_preserves_order(inline) -> None:  # type: ignore[no-untyped-def]
+def test_green_pilot_runs_the_rest_and_preserves_order(inline, serial_submission: None) -> None:  # type: ignore[no-untyped-def]
     assert sk8s.map(double, range(10), pilot=3) == [x * 2 for x in range(10)]
     assert [a[0] for a in inline.ran] == list(range(10))  # pilot first, then the remainder
 
@@ -214,7 +214,7 @@ def test_pilot_shares_the_overall_deadline(manual) -> None:  # type: ignore[no-u
 
 # --- submit_map ------------------------------------------------------------------
 
-def test_submit_map_pilot_blocks_until_the_pilot_is_green(manual) -> None:  # type: ignore[no-untyped-def]
+def test_submit_map_pilot_blocks_until_the_pilot_is_green(manual, serial_submission: None) -> None:  # type: ignore[no-untyped-def]
     returned = threading.Event()
     out: list[Any] = []
 

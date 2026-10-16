@@ -219,6 +219,9 @@ class Cluster:
         self._clock: Callable[[], float] = time.monotonic
         self._keep_any = False  # some job kept its results: don't cascade-delete on exit
         self._anchor_lock = threading.Lock()
+        # Guards lazy one-time initialisation (clients, store, artifact store) and other
+        # once-per-cluster state: submit() is called concurrently by api._submit_many's pool.
+        self._init_lock = threading.Lock()
         self._closed = False
         self._pending: set[JobFuture] = set()  # unresolved futures (unlike _futures, which empties before resolve)
         self._atexit_hook: Callable[[], None] | None = None
@@ -260,44 +263,63 @@ class Cluster:
             self.detached = detached
 
     # --- lazy client/store accessors -------------------------------------
+    # Built exactly once, under _init_lock: parallel fan-outs submit from several
+    # threads at once, and the first few submissions race these accessors.
     @property
     def batch(self) -> Any:
         if self._batch is None:
-            from sk8s import k8s
-            self._batch = k8s.batch_api()
+            with self._init_lock:
+                if self._batch is None:
+                    from sk8s import k8s
+                    self._batch = k8s.batch_api()
         return self._batch
 
     @property
     def core(self) -> Any:
         if self._core is None:
-            from sk8s import k8s
-            self._core = k8s.core_api()
+            with self._init_lock:
+                if self._core is None:
+                    from sk8s import k8s
+                    self._core = k8s.core_api()
         return self._core
 
     @property
     def apps(self) -> Any:
         if self._apps is None:
-            from sk8s import k8s
-            self._apps = k8s.apps_api()
+            with self._init_lock:
+                if self._apps is None:
+                    from sk8s import k8s
+                    self._apps = k8s.apps_api()
         return self._apps
 
     @property
     def store(self) -> BlobStore:
-        if self._store is None:
-            self._store = get_store(
-                self.config.store,
-                namespace=self.config.namespace,
-                core_api=self._core,
-                endpoint=self.config.store_endpoint,
-            )
-        return self._store
+        store = self._store
+        if store is None:
+            with self._init_lock:
+                store = self._store
+                if store is None:
+                    store = get_store(
+                        self.config.store,
+                        namespace=self.config.namespace,
+                        core_api=self._core,
+                        endpoint=self.config.store_endpoint,
+                    )
+                    self._store = store
+        return store
 
     @property
     def artifact_store(self) -> ArtifactStore:
         """The artifact layer (CAS, index, workflow reference sets) over this cluster's store."""
-        if self._artifact_store is None:
-            self._artifact_store = ArtifactStore(self.store, self.config.store)
-        return self._artifact_store
+        astore = self._artifact_store
+        if astore is None:
+            store = self.store  # resolved OUTSIDE _init_lock (it takes the same lock)
+            with self._init_lock:
+                astore = self._artifact_store
+                if astore is None:
+                    astore = ArtifactStore(store, self.config.store)
+                    self._artifact_store = astore
+        return astore
 
     # --- workflow anchor ----------------------------------------------------
     def _ensure_anchor(self) -> Any:
@@ -564,9 +586,13 @@ class Cluster:
 
     def _warn_uncosted(self, verdict: BudgetVerdict) -> None:
         """Once per cluster: a cost limit is set but this job requests no cpu, so it passes unseen."""
-        if verdict.uncosted_jobs and not self._warned_uncosted:
+        if not verdict.uncosted_jobs:
+            return
+        with self._init_lock:  # parallel submits race the check; the warning stays once-only
+            if self._warned_uncosted:
+                return
             self._warned_uncosted = True
-            log.warning("budget cost limits cannot see this job: %s", UNCOSTED_NOTE)
+        log.warning("budget cost limits cannot see this job: %s", UNCOSTED_NOTE)
 
     def _budget_verdict(self, opts: dict[str, Any]) -> BudgetVerdict | None:
         """This one job measured against its budget (None if there is none). Pure arithmetic on
@@ -634,6 +660,15 @@ class Cluster:
     ) -> JobFuture: ...
 
     def submit(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture | DryRun:
+        # Called concurrently by api._submit_many's submission pool. Shared state is safe
+        # under that: the anchor is created/verified under _anchor_lock; lazy clients, the
+        # store and the once-per-cluster warning sit under _init_lock; budget verdicts are
+        # pure arithmetic on this one job's options (the Budget itself is frozen), with the
+        # fan-out-wide admission done once in the calling thread and the concurrency cap
+        # enforced by the caller's semaphore; job names are random; clone/writer markers go
+        # through CloneManager's API-server-conditional writes (already multi-client-safe);
+        # and _futures/_memo_pending/_mount_plans/_read_volumes see only single atomic
+        # operations on unique keys (the watcher thread raced them before this change too).
         opts = {k: kwargs.pop(k) for k in list(kwargs) if k in JOB_OPTIONS}
         opts.pop("timeout", None)  # timeout is a run()/result() concern
         if opts.get("spot") and opts.get("backoff_limit", 0) < 1:
@@ -1209,7 +1244,8 @@ class Cluster:
             return
         try:
             mgr = self._clone_manager()
-            for volume in sorted(self._read_volumes):
+            # .copy(): one atomic snapshot, in case a late submit thread is still adding.
+            for volume in sorted(self._read_volumes.copy()):
                 try:
                     mgr.sweep_stale(volume, min_age=0.0)
                 except Exception:  # noqa: BLE001

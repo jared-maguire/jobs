@@ -232,6 +232,15 @@ def _unsubmitted(fut: JobFuture | None = None) -> JobFuture:
     return fut
 
 
+# Fan-out submissions overlap on a bounded pool this wide: the slow parts of each one
+# (payload staging, the memo lookup, the Kubernetes Job create) are mostly round trips,
+# so a 484-chunk fleet ramps ~8x faster. max_concurrent slots are still acquired in the
+# caller's thread, in input order (see _submit_many).
+_SUBMIT_WORKERS = 8
+# How often a blocked max_concurrent wait wakes to recheck the deadline and the abort flag.
+_ACQUIRE_POLL = 0.05
+
+
 def _submit_many(
     func: Callable[..., Any],
     iterable: Iterable[Any],
@@ -242,6 +251,15 @@ def _submit_many(
     **opts: Any,
 ) -> list[JobFuture]:
     """Shared body of the submit_map family.
+
+    Jobs are submitted through a bounded thread pool (``_SUBMIT_WORKERS`` wide), so the slow
+    half of each submission — payload staging, the memo lookup, the Job create — overlaps
+    across items. ``max_concurrent`` slots are acquired in the CALLER's thread, in input
+    order, BEFORE an item reaches the pool: in-flight jobs stay bounded exactly as when
+    submission was serial, admission is ordered, and an expired deadline cuts off a clean
+    suffix of the items. The returned futures are in input order regardless of which
+    submission finished first. If any submission raises, no further items are admitted and
+    the lowest-indexed error is re-raised once every in-flight submission has finished.
 
     ``deadline`` (a ``time.monotonic()`` value, set by ``map``/``starmap``) bounds
     how long submission may block on ``max_concurrent``. Once it passes, no more
@@ -261,21 +279,31 @@ def _submit_many(
         max_concurrent = budget.cap_concurrency(max_concurrent)
     items = list(iterable)
     sem = threading.BoundedSemaphore(max_concurrent) if max_concurrent else None
-    expired = False
+    abort = threading.Event()  # a parallel submission raised: stop admitting, unwind
 
-    def submit_job(fn: Callable[..., Any], *args: Any, **kw: Any) -> JobFuture | None:
-        # Waits while ``max_concurrent`` jobs are unresolved; the slot is freed
-        # when the job's future completes (result, error or cancel). Returns None
-        # if ``deadline`` passes first.
-        nonlocal expired
-        if expired:
-            return None
-        if sem is not None:
-            if deadline is None:
-                sem.acquire()
-            elif not sem.acquire(timeout=max(0.0, deadline - time.monotonic())):
-                expired = True
-                return None
+    def acquire_slot() -> bool:
+        # In the caller's thread, in input order: waits while ``max_concurrent`` jobs are
+        # unresolved. False once ``deadline`` passes or another item's submission raised.
+        # Polls so it can notice an abort while blocked (a plain acquire would sleep
+        # through it forever).
+        if sem is None:
+            return not abort.is_set()
+        while not abort.is_set():
+            wait = _ACQUIRE_POLL
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return sem.acquire(blocking=False)  # the deadline's last chance
+                wait = min(wait, remaining)
+            if sem.acquire(timeout=wait):
+                return True
+        return False
+
+    def create_job(fn: Callable[..., Any], *args: Any, **kw: Any) -> JobFuture:
+        # The slow half of one submission; runs on a pool thread. The caller already holds
+        # the max_concurrent slot; it is freed when the job's future completes (result,
+        # error or cancel) — a memo hit's future is born resolved, so a hit frees it
+        # immediately and never occupies concurrency.
         try:
             fut: JobFuture = _cluster().submit(fn, *args, **kw)
         except BaseException:
@@ -286,12 +314,50 @@ def _submit_many(
             fut.add_done_callback(lambda _: sem.release())
         return fut
 
+    def submit_all(make: list[Callable[[], Any]]) -> list[Any]:
+        # Admission (the slot) happens here, in input order; the submissions themselves
+        # overlap on the pool. Results land by input index; None marks a job that was
+        # never submitted (deadline, or unwinding after another item's error).
+        results: list[Any] = [None] * len(make)
+        errors: dict[int, BaseException] = {}
+
+        def run(i: int) -> None:
+            if abort.is_set():
+                return  # a sibling failed while this item sat queued: the call raises below
+            try:
+                results[i] = make[i]()
+            except BaseException as exc:  # noqa: BLE001 — re-raised below, lowest index first
+                errors[i] = exc
+                abort.set()
+
+        workers = min(_SUBMIT_WORKERS, len(make))
+        pool = (
+            concurrent.futures.ThreadPoolExecutor(workers, thread_name_prefix="sk8s-submit")
+            if workers > 1 else None
+        )
+        try:
+            for i in range(len(make)):
+                if abort.is_set() or not acquire_slot():
+                    break
+                if pool is None:
+                    run(i)
+                else:
+                    pool.submit(run, i)
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=True)  # join every in-flight submission
+        if errors:
+            raise errors[min(errors)]
+        return results
+
     if batch_size == 1:
-        out: list[JobFuture] = []
-        for item in items:
-            fut = submit_job(func, *item, **opts) if star else submit_job(func, item, **opts)
-            out.append(fut if fut is not None else _unsubmitted())
-        return out
+        def one(item: Any) -> Callable[[], JobFuture]:
+            if star:
+                return lambda: create_job(func, *item, **opts)
+            return lambda: create_job(func, item, **opts)
+
+        submitted = submit_all([one(item) for item in items])
+        return [fut if fut is not None else _unsubmitted() for fut in submitted]
 
     # Batched: one job per chunk; per-item futures are resolved from the chunk's
     # result. Names in JOB_OPTIONS configure the job; every other keyword goes to
@@ -309,19 +375,23 @@ def _submit_many(
     # consumed by the cluster as the gate of the whole batch job.
     extra = (expect,) if expect is not None else ()
     func_kwargs = {k: v for k, v in opts.items() if k not in JOB_OPTIONS}
+    chunks = [items[start:start + batch_size] for start in range(0, len(items), batch_size)]
+
+    def one_chunk(chunk: list[Any]) -> Callable[[], list[_ItemFuture]]:
+        def go() -> list[_ItemFuture]:
+            parent = create_job(_run_batch, func, chunk, star, func_kwargs, *extra, **job_opts)
+            group = [_ItemFuture(parent.job_name, parent.workflow_id, parent._backend)  # noqa: SLF001
+                     for _ in chunk]
+            for fut in group:
+                fut._parent = parent  # noqa: SLF001
+            parent.add_done_callback(_make_unpack(group))
+            return group
+        return go
+
+    groups = submit_all([one_chunk(chunk) for chunk in chunks])
     item_futures: list[JobFuture] = []
-    for start in range(0, len(items), batch_size):
-        chunk = items[start:start + batch_size]
-        parent = submit_job(_run_batch, func, chunk, star, func_kwargs, *extra, **job_opts)
-        if parent is None:
-            item_futures.extend(_unsubmitted() for _ in chunk)
-            continue
-        group = [_ItemFuture(parent.job_name, parent.workflow_id, parent._backend)  # noqa: SLF001
-                 for _ in chunk]
-        for fut in group:
-            fut._parent = parent  # noqa: SLF001
-        item_futures.extend(group)
-        parent.add_done_callback(_make_unpack(group))
+    for chunk, group in zip(chunks, groups):
+        item_futures.extend(group if group is not None else [_unsubmitted() for _ in chunk])
     return item_futures
 
 
@@ -531,6 +601,10 @@ def submit_map(
     func: Callable[..., Any], iterable: Iterable[Any], **opts: Any
 ) -> list[JobFuture] | DryRun:
     """Submit ``func(item)`` for each item; return the futures in input order.
+
+    Submissions run in parallel (a bounded pool, 8 wide): payload staging, memo lookups
+    and the Job creates of different items overlap, while the returned futures stay in
+    input order and budget admission is unchanged.
 
     ``opts`` are split as in ``submit``: job-option names configure the jobs,
     all other keyword arguments are forwarded to ``func``. Two fan-out controls
