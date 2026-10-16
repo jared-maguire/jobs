@@ -213,10 +213,10 @@ def load_samples(limit: int | None) -> list[tuple[str, str]]:
     return [(r["sample"].strip(), r["s3_cram_uri"].replace(" ", "")) for r in rows]
 
 
-def eval_chunk(chunk: list[tuple[str, str, int, int]], run_id: str, tag: str = "wave1") -> list[dict]:
+def eval_chunk(chunk: list[tuple[str, str, int, int]], run_id: str) -> list[dict]:
     """Several (sample, window) tasks in one pod; per-task harvesting; workdir cleanup.
-    `tag` is a memo salt: a retry wave passes a different tag so an identically shaped
-    chunk cannot memo-hit a stored result that has transient errors baked in."""
+    The retry wave submits with a different memo_salt so an identically shaped chunk
+    cannot memo-hit a stored result that has transient errors baked in."""
     out: list[dict] = []
     for sample, cram_url, ws, we in chunk:
         try:
@@ -250,11 +250,13 @@ def main(run_id: str, limit: int | None = None, chunk_size: int = 8) -> dict:
     def run_wave(wave: list[tuple[str, str, int, int]], tag: str) -> None:
         chunks = [wave[i:i + chunk_size] for i in range(0, len(wave), chunk_size)]
         futs = sk8s.submit_starmap(
-            eval_chunk, [(c, run_id, tag) for c in chunks],  # tag = memo salt per wave
+            eval_chunk, [(c, run_id) for c in chunks],
             batch_size=1, max_concurrent=90,
-            requests={"cpu": "2", "memory": "4Gi", "ephemeral-storage": "8Gi"},
-            memo=True,
-            backoff_limit=2,  # eviction tolerance: explicit opt-in, tasks are idempotent+memoized
+            requests={"cpu": "2", "memory": "3Gi", "ephemeral-storage": "8Gi"},
+            memo=True, memo_salt=tag,  # retry wave salts the memo: never replay baked errors
+            # spot + retries: ~65% cheaper compute; preemption is just a pod move for
+            # idempotent memoized chunks (the explicit eviction-tolerant opt-in)
+            backoff_limit=2, spot=True,
         )
         for c, fut in zip(chunks, futs):
             try:

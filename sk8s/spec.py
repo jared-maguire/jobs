@@ -58,6 +58,7 @@ def build_job(
     store_endpoint: str | None = None,
     store_env: dict[str, str] | None = None,
     budget_json: str | None = None,
+    spot: bool = False,
 ) -> client.V1Job:
     labels = {"app.kubernetes.io/managed-by": MANAGED_BY, "sk8s/workflow-id": workflow_id}
     env = [
@@ -111,6 +112,15 @@ def build_job(
     pod_spec = client.V1PodSpec(
         restart_policy="Never",
         service_account_name=service_account,
+        # Spot placement: the nodeSelector is what GKE Autopilot keys on (it injects the
+        # matching toleration itself); the explicit toleration also covers Standard
+        # clusters with spot node pools. Preemption can kill the pod at any moment, which
+        # is why cluster.py refuses spot without retries.
+        node_selector={"cloud.google.com/gke-spot": "true"} if spot else None,
+        tolerations=[client.V1Toleration(
+            key="cloud.google.com/gke-spot", operator="Equal", value="true",
+            effect="NoSchedule",
+        )] if spot else None,
         containers=[container],
         volumes=[
             client.V1Volume(

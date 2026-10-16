@@ -983,3 +983,13 @@ def test_store_object_injection_leaves_config_alone(tmp_path) -> None:  # type: 
     _OPEN.append(c)
     assert c.store is injected
     assert c.config.store == "s3://b/p"
+
+
+def test_spot_requires_retries(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    with pytest.raises(ValueError, match="spot=True requires backoff_limit"):
+        h.cluster.submit(lambda: 1, spot=True)
+    # with retries it goes through, carrying the spot placement
+    fut = h.cluster.submit(lambda: 1, spot=True, backoff_limit=2)
+    pod = h.batch.jobs[("ns1", fut.job_name)].spec.template.spec
+    assert pod.node_selector == {"cloud.google.com/gke-spot": "true"}

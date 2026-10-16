@@ -41,6 +41,7 @@ JOB_OPTIONS = {
     "image", "requests", "limits", "volumes", "timeout", "backoff_limit",
     "service_account", "namespace", "name_prefix", "privileged",
     "pull_policy", "keep_results", "expect", "dry_run", "memo", "memo_salt", "budget",
+    "spot",
 }
 
 _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
@@ -615,6 +616,7 @@ class Cluster:
             backoff_limit=opts.get("backoff_limit", 0),
             ttl=self.config.ttl_seconds_after_finished,
             privileged=opts.get("privileged", False),
+            spot=opts.get("spot", False),
             owner=owner,
             anchor_name=anchor_name,
             anchor_uid=anchor_uid,
@@ -634,6 +636,13 @@ class Cluster:
     def submit(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> JobFuture | DryRun:
         opts = {k: kwargs.pop(k) for k in list(kwargs) if k in JOB_OPTIONS}
         opts.pop("timeout", None)  # timeout is a run()/result() concern
+        if opts.get("spot") and opts.get("backoff_limit", 0) < 1:
+            raise ValueError(
+                "spot=True requires backoff_limit>=1: spot nodes can be preempted at any "
+                "moment, and without retries one preemption fails the job permanently. "
+                "Use spot only for idempotent work (house policy: disruption protection "
+                "is the default; spot is the explicit eviction-tolerant opt-in)."
+            )
         if opts.pop("dry_run", False):
             return self._dry_run(func, args, kwargs, opts)
         expect = self._expectation(opts)  # before any side effect
