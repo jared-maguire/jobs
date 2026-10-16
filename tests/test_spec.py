@@ -110,6 +110,18 @@ def test_spot_off_by_default() -> None:
     assert pod.tolerations is None
 
 
+def test_every_pod_is_protected_from_voluntary_eviction() -> None:
+    ann = make().spec.template.metadata.annotations
+    assert ann["cluster-autoscaler.kubernetes.io/safe-to-evict"] == "false"
+
+
+def test_spot_pods_omit_the_eviction_annotation() -> None:
+    # Not a nicety: Autopilot's admission webhook DENIES a pod carrying both
+    # safe-to-evict=false and the gke-spot toleration (autopilot-scaledown-limitation).
+    # Spot pods stay evictable by platform decree; backoff_limit is their protection.
+    assert make(spot=True).spec.template.metadata.annotations is None
+
+
 def test_spot_sets_selector_and_toleration() -> None:
     pod = make(spot=True).spec.template.spec
     assert pod.node_selector == {"cloud.google.com/gke-spot": "true"}

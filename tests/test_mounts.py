@@ -256,6 +256,9 @@ BASELINE: dict[str, Any] = {
         'backoffLimit': 0,
         'template': {
             'metadata': {
+                # Deliberate post-b39f882 delta: every non-spot pod is protected from
+                # voluntary autoscaler eviction (see sk8s.spec.POD_ANNOTATIONS).
+                'annotations': {'cluster-autoscaler.kubernetes.io/safe-to-evict': 'false'},
                 'labels': {'app.kubernetes.io/managed-by': 'sk8s', 'sk8s/workflow-id': 'wf-x'}
             },
             'spec': {

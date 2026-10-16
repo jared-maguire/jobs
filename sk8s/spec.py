@@ -11,6 +11,16 @@ from kubernetes import client
 
 MANAGED_BY = "sk8s"
 
+# sk8s pods refuse VOLUNTARY eviction: the autoscaler's ScaleDown bin-packing killed
+# 4 multi-minute worker chunks (three strikes to BackoffLimitExceeded) and 3 detached-workflow
+# drivers in one day (2026-10-16). The annotation blocks only voluntary compaction — worst
+# case a node drains one chunk-length later. House ruling: protection is the default, no
+# opt-out knob. EXCEPTION, by Autopilot decree: a spot pod must NOT carry it — GKE Autopilot's
+# admission webhook denies any pod with both this annotation and the gke-spot toleration
+# ("[denied by autopilot-scaledown-limitation]"), so spot pods stay evictable and
+# backoff_limit remains their protection (cluster.py already refuses spot without retries).
+POD_ANNOTATIONS = {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}
+
 
 @dataclass(frozen=True)
 class PodMount:
@@ -143,7 +153,12 @@ def build_job(
             backoff_limit=backoff_limit,
             ttl_seconds_after_finished=ttl,
             template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(labels=labels), spec=pod_spec
+                # Spot pods must omit the annotation (see POD_ANNOTATIONS: Autopilot's
+                # autopilot-scaledown-limitation webhook denies annotation + spot toleration).
+                metadata=client.V1ObjectMeta(
+                    labels=labels, annotations=None if spot else dict(POD_ANNOTATIONS)
+                ),
+                spec=pod_spec,
             ),
         ),
     )
