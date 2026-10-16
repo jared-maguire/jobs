@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from kubernetes import client
 
-from sk8s.spec import MANAGED_BY
+from sk8s.spec import MANAGED_BY, POD_ANNOTATIONS
 
 
 def _labels(name: str) -> dict[str, str]:
@@ -65,7 +65,10 @@ def build_deployment(
             replicas=replicas,
             selector=client.V1LabelSelector(match_labels={"sk8s/service": name}),
             template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(labels=labels), spec=pod_spec
+                # Service pods are long-running and never spot, so they always get the
+                # voluntary-eviction protection (see sk8s.spec.POD_ANNOTATIONS).
+                metadata=client.V1ObjectMeta(labels=labels, annotations=dict(POD_ANNOTATIONS)),
+                spec=pod_spec,
             ),
         ),
     )

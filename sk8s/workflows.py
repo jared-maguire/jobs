@@ -50,7 +50,9 @@ def submit_workflow(
     the workflow (no anchor, no payload, no API call); a ``cluster`` you pass is left unbound.
 
     The driver's own submissions are owned by the workflow's anchor, which this
-    process never deletes. Keyword arguments are split as in ``submit``.
+    process never deletes. Keyword arguments are split as in ``submit``, except that
+    the driver defaults to ``backoff_limit=2`` (a driver death orphans the whole run,
+    and node churn kills drivers; an explicit ``backoff_limit`` still wins).
 
     Cluster rule: ``cluster=None`` builds a fresh ``Cluster`` from the ``configure()``
     overrides (the handle owns it) and deliberately ignores a cluster installed with
@@ -72,6 +74,9 @@ def submit_workflow(
         c.bind_workflow(wf, adopt=False, detached=True)
         job_opts["name_prefix"] = "wfdriver"
         job_opts["keep_results"] = True  # the driver's result must outlive it until fetched
+        # A driver death orphans the whole run (3 died to node churn on 2026-10-16), so
+        # drivers retry by default; callers who want fail-fast pass backoff_limit=0.
+        job_opts.setdefault("backoff_limit", 2)
         fut = c.submit(func, *args, **job_opts)
         # Window: between the Job's creation above and this patch the anchor records no
         # driver ("sk8s/driver-job" == ""); an attach in that gap sees no driver yet.
@@ -96,6 +101,7 @@ def _preview_workflow(
     try:
         job_opts["name_prefix"] = "wfdriver"
         job_opts["keep_results"] = True
+        job_opts.setdefault("backoff_limit", 2)  # the preview shows the Job submit would build
         preview: DryRun = c.dry_run(func, *args, **job_opts)
     finally:
         if cluster is None:

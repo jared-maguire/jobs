@@ -53,6 +53,12 @@ def test_deployment_no_workflow_id_or_owner() -> None:
     assert dep.metadata.owner_references is None
 
 
+def test_deployment_pods_are_protected_from_voluntary_eviction() -> None:
+    # Service pods are long-running and never spot: always annotated (webhook-safe).
+    ann = make().spec.template.metadata.annotations
+    assert ann["cluster-autoscaler.kubernetes.io/safe-to-evict"] == "false"
+
+
 def test_deployment_env() -> None:
     env = {e.name: e.value for e in make().spec.template.spec.containers[0].env}
     assert env == {

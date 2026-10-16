@@ -89,6 +89,22 @@ def test_submit_workflow_splits_job_options_from_kwargs(tmp_path) -> None:  # ty
     assert handle.result(timeout=10) == 12
 
 
+def test_driver_defaults_to_retries_and_eviction_protection(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    workflows.submit_workflow(double, 21, cluster=h.cluster)
+    (job,) = h.batch.jobs.values()
+    assert job.spec.backoff_limit == 2  # a driver death orphans the whole run
+    ann = job.spec.template.metadata.annotations
+    assert ann["cluster-autoscaler.kubernetes.io/safe-to-evict"] == "false"
+
+
+def test_driver_explicit_backoff_limit_wins(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    h = Harness(tmp_path)
+    workflows.submit_workflow(double, 21, backoff_limit=0, cluster=h.cluster)
+    (job,) = h.batch.jobs.values()
+    assert job.spec.backoff_limit == 0
+
+
 def test_attach_finds_workflow_on_cold_cluster(tmp_path) -> None:  # type: ignore[no-untyped-def]
     h = Harness(tmp_path)
     handle = workflows.submit_workflow(double, 21, cluster=h.cluster)
