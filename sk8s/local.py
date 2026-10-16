@@ -23,6 +23,7 @@ from sk8s.store.local import LocalStore
 IGNORED_OPTIONS = {
     "image", "requests", "limits", "volumes", "backoff_limit",
     "service_account", "namespace", "privileged", "pull_policy", "timeout", "budget",
+    "spot",
 }
 
 

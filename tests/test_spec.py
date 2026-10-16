@@ -102,3 +102,17 @@ def test_store_env_exported_to_worker() -> None:
     assert env["AWS_ACCESS_KEY_ID"] == "k"
     assert env["AWS_SECRET_ACCESS_KEY"] == "s"
     assert env["SK8S_STORE"] == "k8s"  # core vars untouched
+
+
+def test_spot_off_by_default() -> None:
+    pod = make().spec.template.spec
+    assert pod.node_selector is None
+    assert pod.tolerations is None
+
+
+def test_spot_sets_selector_and_toleration() -> None:
+    pod = make(spot=True).spec.template.spec
+    assert pod.node_selector == {"cloud.google.com/gke-spot": "true"}
+    [tol] = pod.tolerations
+    assert (tol.key, tol.operator, tol.value, tol.effect) == (
+        "cloud.google.com/gke-spot", "Equal", "true", "NoSchedule")
