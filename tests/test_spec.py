@@ -128,3 +128,19 @@ def test_spot_sets_selector_and_toleration() -> None:
     [tol] = pod.tolerations
     assert (tol.key, tol.operator, tol.value, tol.effect) == (
         "cloud.google.com/gke-spot", "Equal", "true", "NoSchedule")
+
+
+def test_node_selector_passes_through() -> None:
+    pod = make(node_selector={"topology.kubernetes.io/zone": "us-central1-c"}).spec.template.spec
+    assert pod.node_selector == {"topology.kubernetes.io/zone": "us-central1-c"}
+    assert pod.tolerations is None  # a plain selector implies no spot toleration
+
+
+def test_node_selector_merges_with_spot() -> None:
+    pod = make(
+        node_selector={"cloud.google.com/machine-family": "c3"}, spot=True
+    ).spec.template.spec
+    assert pod.node_selector == {
+        "cloud.google.com/machine-family": "c3",
+        "cloud.google.com/gke-spot": "true",
+    }

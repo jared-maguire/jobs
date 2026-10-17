@@ -41,7 +41,7 @@ JOB_OPTIONS = {
     "image", "requests", "limits", "volumes", "timeout", "backoff_limit",
     "service_account", "namespace", "name_prefix", "privileged",
     "pull_policy", "keep_results", "expect", "dry_run", "memo", "memo_salt", "budget",
-    "spot",
+    "spot", "node_selector",
 }
 
 _WAITING_PULL_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
@@ -643,6 +643,7 @@ class Cluster:
             ttl=self.config.ttl_seconds_after_finished,
             privileged=opts.get("privileged", False),
             spot=opts.get("spot", False),
+            node_selector=opts.get("node_selector"),
             owner=owner,
             anchor_name=anchor_name,
             anchor_uid=anchor_uid,
