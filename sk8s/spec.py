@@ -69,6 +69,7 @@ def build_job(
     store_env: dict[str, str] | None = None,
     budget_json: str | None = None,
     spot: bool = False,
+    node_selector: dict[str, str] | None = None,
 ) -> client.V1Job:
     labels = {"app.kubernetes.io/managed-by": MANAGED_BY, "sk8s/workflow-id": workflow_id}
     env = [
@@ -126,7 +127,10 @@ def build_job(
         # matching toleration itself); the explicit toleration also covers Standard
         # clusters with spot node pools. Preemption can kill the pod at any moment, which
         # is why cluster.py refuses spot without retries.
-        node_selector={"cloud.google.com/gke-spot": "true"} if spot else None,
+        node_selector=(
+            {**(node_selector or {}), **({"cloud.google.com/gke-spot": "true"} if spot else {})}
+            or None
+        ),
         tolerations=[client.V1Toleration(
             key="cloud.google.com/gke-spot", operator="Equal", value="true",
             effect="NoSchedule",
