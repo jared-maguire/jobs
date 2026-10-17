@@ -100,7 +100,7 @@ def test_batched_func_kwargs_reach_function() -> None:
     assert sk8s.starmap(lambda a, b, k=0: a + b + k, [(1, 2), (3, 4)], batch_size=2, k=100) == [103, 107]
 
 
-def test_batched_item_futures_inherit_parent_identity_and_logs() -> None:
+def test_batched_item_futures_inherit_parent_identity_and_logs(serial_submission: None) -> None:
     stub = StubCluster()
     sk8s.configure(cluster=stub)
     futs = sk8s.submit_map(lambda x: x, range(5), batch_size=2)
@@ -111,7 +111,7 @@ def test_batched_item_futures_inherit_parent_identity_and_logs() -> None:
     assert not any(f.done() for f in futs)
 
 
-def test_batched_items_resolve_from_parent_outcomes() -> None:
+def test_batched_items_resolve_from_parent_outcomes(serial_submission: None) -> None:
     stub = StubCluster()
     sk8s.configure(cluster=stub)
     futs = sk8s.submit_map(lambda x: x, range(3), batch_size=2)
@@ -123,7 +123,7 @@ def test_batched_items_resolve_from_parent_outcomes() -> None:
     assert futs[2].result(timeout=1) == "c"
 
 
-def test_whole_batch_failure_propagates_to_every_item_in_chunk() -> None:
+def test_whole_batch_failure_propagates_to_every_item_in_chunk(serial_submission: None) -> None:
     stub = StubCluster()
     sk8s.configure(cluster=stub)
     futs = sk8s.submit_map(lambda x: x, range(5), batch_size=2)
@@ -136,7 +136,7 @@ def test_whole_batch_failure_propagates_to_every_item_in_chunk() -> None:
     assert [f.result(timeout=1) for f in futs[2:]] == [2, 3, 4]
 
 
-def test_batched_map_reports_whole_batch_failure_per_item() -> None:
+def test_batched_map_reports_whole_batch_failure_per_item(serial_submission: None) -> None:
     stub = StubCluster()
     sk8s.configure(cluster=stub)
     threading.Timer(0.2, lambda: stub.futures[0].set_exception(RuntimeError("gone"))).start()
@@ -167,7 +167,7 @@ def test_empty_iterable() -> None:
     assert sk8s.map(lambda x: x, [], max_concurrent=2) == []
 
 
-def test_batch_size_one_submits_one_job_per_item() -> None:
+def test_batch_size_one_submits_one_job_per_item(serial_submission: None) -> None:
     stub = StubCluster()
     sk8s.configure(cluster=stub)
     futs = sk8s.submit_map(lambda x: x, [7, 8], batch_size=1, image="i")
@@ -175,7 +175,7 @@ def test_batch_size_one_submits_one_job_per_item() -> None:
     assert [(a, k) for _, a, k in stub.calls] == [((7,), {"image": "i"}), ((8,), {"image": "i"})]
 
 
-def test_unbatched_starmap_splats_item_args() -> None:
+def test_unbatched_starmap_splats_item_args(serial_submission: None) -> None:
     stub = StubCluster()
     sk8s.configure(cluster=stub)
     sk8s.submit_starmap(lambda a, b: a, [(1, 2), (3, 4)])
@@ -257,7 +257,7 @@ def test_gather_does_not_mask_non_timeout_error_on_pending_future() -> None:
 
 # --- cancellation -------------------------------------------------------------
 
-def test_cancelling_one_item_cancels_whole_batch_job() -> None:
+def test_cancelling_one_item_cancels_whole_batch_job(serial_submission: None) -> None:
     stub = StubCluster()
     sk8s.configure(cluster=stub)
     futs = sk8s.submit_map(lambda x: x, range(4), batch_size=2)

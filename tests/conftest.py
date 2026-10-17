@@ -10,3 +10,16 @@ def _no_real_cluster_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(worker, "_core_api", lambda: FakeCoreV1())
     monkeypatch.setattr(worker, "_batch_api", lambda: FakeBatchV1())
+
+
+@pytest.fixture()
+def serial_submission(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the fan-out submission pool to one worker.
+
+    For tests that assert the ORDER in which jobs reach the cluster (stub bookkeeping
+    indexed by submission sequence): with the parallel pool, submission order within a
+    fan-out is not deterministic — only the returned futures' order is. The parallel
+    path itself is covered by test_parallel_submit.py."""
+    from sk8s import api
+
+    monkeypatch.setattr(api, "_SUBMIT_WORKERS", 1)
