@@ -71,7 +71,7 @@ and are self-sufficient for agents.
 | Point sk8s at a non-default config file | `SK8S_CONFIG=/path/to.toml` (agents/CI: always set this) |
 | Any config field via env | `SK8S_<FIELD>`, e.g. `SK8S_NAMESPACE`, `SK8S_IMAGE`, `SK8S_IMAGE_PREFIX` |
 | Layer Python deps on your base image | `sk8s image build --tag TAG --base YOURBASE --pip numpy --push` |
-| apt/system deps in an image | custom Dockerfile `FROM` your base (references/api.md) |
+| apt/system deps, multi-stage images | `images.build(TAG, dockerfile=DF_STRING, push=True)` from inside the script — no Dockerfile sidecar file (references/api.md) |
 | Try the API with no cluster | `sk8s.configure(cluster=sk8s.LocalCluster())` |
 | What is this data? (format, size, cohort) | `sk8s data describe gs://B/prefix/ --json` / `sk8s.describe(uri)` (references/api.md) |
 | Watch / kill / clean | `sk8s workflows`, `sk8s kill <id>`, `sk8s clean --older-than 7d` |
