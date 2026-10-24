@@ -99,15 +99,27 @@ From Python: `from sk8s import images` (not reachable as `sk8s.images`) —
 `images.generate_dockerfile(pip=[...])` returns the Dockerfile text (a `str`);
 `images.build(tag, ...)`, `images.push(tag)`.
 
-**apt/system packages** (bwa, samtools, …) need a Dockerfile on your base:
+**apt/system packages** (bwa, samtools, …) need Dockerfile content on your base — but
+NOT a Dockerfile *file*. `images.build` takes the whole thing as a string (fed to docker
+on stdin; `path=` is the build context, default `.`), so a script that needs a custom
+image stays one self-contained script:
 
-```dockerfile
+```python
+from sk8s import images
+
+TAG = "YOURREG/science:py3.12-v1"
+images.build(TAG, push=True, dockerfile="""
 FROM YOURREG/sk8s-base:py3.12
 RUN apt-get update && apt-get install -y bwa samtools && rm -rf /var/lib/apt/lists/*
 RUN pip install numpy
+""")
+sk8s.submit(fn, image=TAG)   # or SK8S_CONFIG / config `image`
 ```
 
-`docker build` + `docker push`, then `image=` / `SK8S_IMAGE` / config `image`.
+Multi-stage Dockerfiles work the same way (one string). `dockerfile=` cannot be combined
+with `base`/`pip`/`conda`/`channels` — it replaces generation entirely. Prefer this over
+shelling out to `docker build` or keeping a `docker/Dockerfile.*` sidecar next to an
+example script.
 The worker only unpickles and runs functions, so any image with sk8s installed
 at the same Python minor works.
 
