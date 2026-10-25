@@ -14,7 +14,9 @@ futs = sk8s.submit_map(f, items)   # the futures, when you need per-item control
 
 Job options (kwargs): `image`, `requests`, `limits` (e.g. `requests={"cpu":
 "500m", "memory": "1Gi"}`), `volumes`, `backoff_limit`, `service_account`,
-`name_prefix`, `privileged`, `pull_policy`, `keep_results`, `expect` (a QC gate run
+`name_prefix`, `privileged`, `pull_policy`, `keep_results`, `spot` (preemptible
+nodes; requires `backoff_limit>=1`), `node_selector` (a dict merged into the pod's
+`nodeSelector` — hardware pinning, see "Scratch space and hardware"), `expect` (a QC gate run
 in the worker on the result: `None`/`True` passes, a string or a raise fails with
 `ExpectationFailed`; see references/advanced.md), `dry_run` (see "Previewing and
 inspecting"). `map`/`starmap`/`submit_map` add
@@ -123,7 +125,46 @@ example script.
 The worker only unpickles and runs functions, so any image with sk8s installed
 at the same Python minor works.
 
+## Scratch space and hardware
+
+**Job-local scratch wants ephemeral storage, not a volume.** If the data is born
+and dies inside one job — downloaded inputs, intermediate files, an index pulled
+from a bucket — request it as ephemeral storage and write anywhere in the
+container filesystem:
+
+```python
+sk8s.submit(align, requests={"cpu": "16", "memory": "28Gi",
+                             "ephemeral-storage": "40Gi"})
+```
+
+No PVC to create, nothing to clean up, no provisioning wait, no deletion
+finalizer races. Reach for `create_volume` only when scratch cannot do the job:
+the data must outlive the pod, be shared between jobs (reference volumes,
+RWX), or be written by one job and read by another.
+
+**GKE Autopilot caveat:** default pods cap ephemeral storage at **10Gi** and
+*evict* on overflow. Past that, pin a dedicated machine with local-NVMe-backed
+ephemeral storage (multi-GB/s, the cap becomes the machine's SSD capacity,
+billed per machine, dies with the pod):
+
+```python
+sk8s.submit(align,
+    requests={"cpu": "16", "memory": "28Gi", "ephemeral-storage": "200Gi"},
+    node_selector={
+        "cloud.google.com/compute-class": "Performance",       # dedicated node
+        "cloud.google.com/machine-family": "c3d",              # pick the silicon
+        "cloud.google.com/gke-ephemeral-storage-local-ssd": "true",  # NVMe scratch
+    })
+```
+
+The same `node_selector` trio (with or without the local-SSD line) pins CPU
+architecture — useful for benchmarks or AVX-512-dependent code. On minikube,
+`node_selector` keys must match labels you set yourself.
+
 ## Volumes
+
+Only for data that outlives a pod or crosses jobs — for job-local scratch,
+see "Scratch space and hardware" above.
 
 ```python
 vol = sk8s.create_volume("10Gi")                                   # RWO, name auto

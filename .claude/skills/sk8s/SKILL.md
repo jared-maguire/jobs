@@ -49,9 +49,14 @@ and are self-sufficient for agents.
    client's**, and the base has **no scientific stack**. Failures:
    `ImageNotConfigured` (no image set anywhere; raised at submit, before anything
    is created), `VersionMismatch`, remote `ModuleNotFoundError`.
-3. **Volume mounts default to read-only.** Any job that writes passes
-   `volumes={"name": {"access_mode": "rw"}}`. Failure: `OSError: Read-only file
-   system` raised *by your function*.
+3. **Job-local scratch wants `ephemeral-storage`, not a volume.** Data born and
+   dying inside one job goes to the container filesystem via
+   `requests={"ephemeral-storage": "40Gi"}`; volumes are only for data that
+   crosses jobs or outlives the pod. On GKE Autopilot, ephemeral past 10Gi
+   needs the local-NVMe node selectors (references/api.md, "Scratch space and
+   hardware"). Volume mounts default to **read-only**: any job that writes
+   passes `volumes={"name": {"access_mode": "rw"}}`. Failure: `OSError:
+   Read-only file system` raised *by your function*.
 4. **A plain `submit`/`map` is tethered to your process** (the client resolves
    futures). Close the laptop ⇒ orphaned work. `submit_workflow` detaches; attach
    from anywhere later — and collect with `result(delete=False)` if you'll look
@@ -72,6 +77,7 @@ and are self-sufficient for agents.
 | Any config field via env | `SK8S_<FIELD>`, e.g. `SK8S_NAMESPACE`, `SK8S_IMAGE`, `SK8S_IMAGE_PREFIX` |
 | Layer Python deps on your base image | `sk8s image build --tag TAG --base YOURBASE --pip numpy --push` |
 | apt/system deps, multi-stage images | `images.build(TAG, dockerfile=DF_STRING, push=True)` from inside the script — no Dockerfile sidecar file (references/api.md) |
+| Big/fast scratch, pinned hardware (Autopilot) | `requests={"ephemeral-storage": ...}` + `node_selector={"cloud.google.com/compute-class": "Performance", "cloud.google.com/machine-family": "c3d", "cloud.google.com/gke-ephemeral-storage-local-ssd": "true"}` (references/api.md) |
 | Try the API with no cluster | `sk8s.configure(cluster=sk8s.LocalCluster())` |
 | What is this data? (format, size, cohort) | `sk8s data describe gs://B/prefix/ --json` / `sk8s.describe(uri)` (references/api.md) |
 | Watch / kill / clean | `sk8s workflows`, `sk8s kill <id>`, `sk8s clean --older-than 7d` |
